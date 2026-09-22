@@ -57,3 +57,14 @@ class ValidationError(ManageAgendaError):
     """Raised when data validation fails."""
 
     pass
+
+
+class UserCancelled(BaseException):
+    """Raised by a UI port implementation when the user backs out of a prompt (the GUI's
+    Cancel button, a closed dialog). A BaseException, like KeyboardInterrupt - its terminal
+    equivalent - on purpose: it must pass through the `except Exception` handlers around
+    prompt calls (connections.select_calendar and friends) instead of being converted into a
+    CalendarError, and library code never catches it. `finally` blocks still run, so an
+    interrupted flow cleans up but records nothing it did not finish."""
+
+    pass

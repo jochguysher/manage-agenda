@@ -232,3 +232,30 @@ def pinned_english_language():
     set_language("en")
     yield
     reset_language_cache()
+
+
+@pytest.fixture(autouse=True)
+def reset_ui():
+    """Every test starts from, and leaves behind, the default (console) UI port: a
+    ScriptedUI installed by a test through set_ui() - rather than the use_ui() context
+    manager - must not leak into the next test."""
+    from manage_agenda.ui import set_ui
+
+    set_ui(None)
+    yield
+    set_ui(None)
+
+
+@pytest.fixture
+def scripted_ui():
+    """A ScriptedUI installed as the current UI port for the test, with no answers queued:
+    the test queues what its flow will ask (`scripted_ui.queue("confirm", True)`) and, at the
+    end, every queued answer must have been consumed. unittest.TestCase tests cannot take
+    fixtures; they use `with use_ui(ScriptedUI([...])) as ui:` directly instead."""
+    from manage_agenda.ui import use_ui
+    from manage_agenda.ui.fake import ScriptedUI
+
+    ui = ScriptedUI()
+    with use_ui(ui):
+        yield ui
+    ui.assert_consumed()
