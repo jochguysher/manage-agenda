@@ -361,6 +361,26 @@ class TestPrepareCalendar(unittest.TestCase):
 
     @patch("manage_agenda.connections.select_calendars")
     @patch("manage_agenda.connections.select_api")
+    def test_a_saved_rule_key_tuple_read_back_as_a_list_still_resolves(
+        self, mock_select_api, mock_select_calendars
+    ):
+        """A real socialModules rule key is a tuple; config.yaml (yaml.safe_dump) stores it as a
+        list, and a list can't be the dict key rules.more is looked up by - the saved account
+        must be turned back into the tuple, not crash every run after the first save."""
+        key = ("gcalendar", "set", "me@example.com", "posts")
+        save_user_config({"calendar_account": key, "calendar": ["cal-saved"]}, self.config_path)
+        self.rules.more = {key: {"x": 1}}
+        self.rules.readConfigSrc.return_value = MagicMock(src=key)
+        args = Args(interactive=False)
+
+        result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
+
+        self.assertTrue(result)
+        self.rules.readConfigSrc.assert_called_once_with("", key, {"x": 1})
+        mock_select_api.assert_not_called()
+
+    @patch("manage_agenda.connections.select_calendars")
+    @patch("manage_agenda.connections.select_api")
     def test_interactive_selection_of_several_calendars_is_saved(
         self, mock_select_api, mock_select_calendars
     ):

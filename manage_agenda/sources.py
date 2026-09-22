@@ -15,7 +15,7 @@ from socialModules.moduleContent import display_posts
 from socialModules.moduleRules import moduleRules
 
 from manage_agenda.base import write_file
-from manage_agenda.config import config, data_dir, msg_txt_dir
+from manage_agenda.config import config, data_dir, log_file_path, msg_txt_dir
 from manage_agenda.connections import prepare_calendar, select_api
 from manage_agenda.extraction import _process_event_with_llm_and_calendar
 from manage_agenda.i18n import t
@@ -444,7 +444,7 @@ def mark_events_restored(identity, restored_refs, path=None):
     _save_state(path, state)
 
 
-def _extract_event_refs(calendar_result):
+def _extract_event_refs(calendar_result, calendar_account=None):
     """Pull {calendar_id, event_id, recorded_at, event_end} out of the per-event calendar
     publishing results.
 
@@ -458,6 +458,11 @@ def _extract_event_refs(calendar_result):
     entries by - see docs/investigation-limite1.md amendment 2. Absent when the publishing
     result didn't carry one (e.g. an older ref format, or a source that predates this field) -
     the purge step falls back to recorded_at for those, with a short margin.
+
+    calendar_account (ledger_migration_account_key() of the run's calendar connection) is
+    stored on every ref when known, and omitted otherwise - "primary" is relative to the
+    account, so without it a ref can't be attributed once several calendar accounts are
+    configured (see CalendarScope.owner_of).
     """
     refs = []
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -471,6 +476,8 @@ def _extract_event_refs(calendar_result):
             event_end = result.get("event_end")
             if event_end:
                 ref["event_end"] = event_end
+            if calendar_account:
+                ref["calendar_account"] = calendar_account
             refs.append(ref)
     return refs
 
@@ -527,11 +534,20 @@ def reconcile_handled_events(
 
     from manage_agenda.extraction import sync_calendar_changes
 
+    # Only refs of THIS calendar account are checked or resolved - see CalendarScope.owner_of.
+    # Critical for "primary", which is relative to the account: another account's legacy
+    # "primary" ref would otherwise be looked up in this account's primary calendar, come back
+    # 404, and be journaled unknown_event - silently wiping a live event from the ledger.
+    scope = _calendar_scope(args, read_calendar_list=False)
+
+    def owned(ev):
+        return scope.owner_of(ev, check_calendar=False)[0]
+
     tracked_by_calendar = {}
     for entry in state.values():
         for ev in entry.get("events") or []:
             calendar_id, event_id = ev.get("calendar_id"), ev.get("event_id")
-            if calendar_id and event_id:
+            if calendar_id and event_id and owned(ev):
                 tracked_by_calendar.setdefault(calendar_id, {})[event_id] = ev.get("recorded_at")
 
     cancelled_by_calendar = {}
@@ -548,14 +564,19 @@ def reconcile_handled_events(
     for identity in list(state.keys()):
         entry = state[identity]
         events = entry.get("events") or []
-        if not events:
+        if not events or not any(owned(ev) for ev in events):
+            # Nothing to check against Calendar - or nothing this account may check: another
+            # account's entry stays handled and untouched.
             still_handled.add(identity)
             continue
         remaining = [
             ev
             for ev in events
-            if ev.get("event_id") not in cancelled_by_calendar.get(ev.get("calendar_id"), set())
-            and ev.get("event_id") not in unknown_by_calendar.get(ev.get("calendar_id"), set())
+            if not owned(ev)
+            or (
+                ev.get("event_id") not in cancelled_by_calendar.get(ev.get("calendar_id"), set())
+                and ev.get("event_id") not in unknown_by_calendar.get(ev.get("calendar_id"), set())
+            )
         ]
         if remaining:
             still_handled.add(identity)
@@ -623,7 +644,7 @@ def reconcile_handled_events(
     return still_handled
 
 
-def migrate_legacy_ledger_entries(args, path=None, dry_run=False):
+def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
     """One-time-per-ref migration: patch extendedProperties.private onto Calendar events
     created before deterministic ids/origin stamping existed, and backfill each ref's
     event_end while at it (free - the same events.get() call already fetches it) - see
@@ -660,6 +681,23 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False):
     event_end via the shorter no_event-style margin from recorded_at - never a crash or wrong
     data, just a possibly-shorter retention than a live event would have earned.
 
+    Only refs of the calendar account this run is connected to (see CalendarScope.owner_of,
+    from `args.calendar_scope`) are looked at: another account's ref, a calendar this account
+    can't see, or a legacy "primary" ref whose account can't be established is skipped
+    BEFORE any events.get() - logged, never marked migrated, retried on a later run (e.g.
+    the migration of its own account). That is what lets a 404 from events.get() mean the
+    event is gone rather than the calendar being out of reach, so "gone" (and its "migrated":
+    true) only ever applies to an event of this account.
+
+    When this account is the only configured calendar account, legacy "primary" refs (no
+    `calendar_account` recorded, in `events` and `cancelled_events` alike) are attached to it:
+    `calendar_account` is written on them (real pass only), so they stay attributed if a
+    second account is configured later.
+
+    `report`, if given (a dict), receives counts: "skipped" (refs left for another account or
+    an unreachable calendar) and "attached" (legacy "primary" refs attributed to this account;
+    dry_run: that would be).
+
     Returns the number of refs migrated, confirmed already-migrated, or (dry_run only)
     that would be migrated, this call.
     """
@@ -669,6 +707,11 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False):
     client = api_dst.getClient() if api_dst is not None else None
     if client is None:
         return 0
+    scope = _calendar_scope(args)
+    report = report if report is not None else {}
+    report.setdefault("skipped", 0)
+    report.setdefault("attached", 0)
+    prefix = "DRY RUN " if dry_run else ""
 
     from manage_agenda.extraction import _is_within_bootstrap_window, migrate_one_legacy_event
 
@@ -679,6 +722,18 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False):
 
     migrated_count = 0
     changed = False
+    if scope.sole_account and scope.account_key:
+        for identity, entry in state.items():
+            for ref in list(entry.get("events") or []) + list(entry.get("cancelled_events") or []):
+                if ref.get("calendar_id") == "primary" and not ref.get("calendar_account"):
+                    report["attached"] += 1
+                    logging.info(
+                        f"{prefix}migrate: {identity} primary/{ref.get('event_id')}: legacy ref "
+                        f"attached to {scope.account_key} (the only configured calendar account)."
+                    )
+                    if not dry_run:
+                        ref["calendar_account"] = scope.account_key
+                        changed = True
     for identity, entry in state.items():
         # Only "created" entries have live refs worth stamping. Deliberately excludes
         # "cancelled_events" refs on an on_user_delete="ignore" entry (status "no_event") -
@@ -697,10 +752,30 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False):
             calendar_id, event_id = ref.get("calendar_id"), ref.get("event_id")
             if not calendar_id or not event_id:
                 continue
+            is_owned, reason = scope.owner_of(ref)
+            if not is_owned:
+                report["skipped"] += 1
+                logging.info(
+                    f"{prefix}migrate: {identity} {calendar_id}/{event_id} skipped - {reason}. "
+                    "Not marked migrated; retried on a later run."
+                )
+                continue
             status, event_end = migrate_one_legacy_event(
                 client, calendar_id, event_id, identity, generation, index, dry_run=dry_run
             )
             if status == "retry":
+                continue
+            if status == "cancelled":
+                # Never patched, never counted, never marked migrated - reconcile (which
+                # normally runs first, see reconcile_migrate_and_purge) resolves it through
+                # on_user_delete and takes the ref out of `events`. Its event_end is still
+                # backfilled (outside dry_run): the ref keeps it into cancelled_events, where
+                # it earns the entry the event_end-based purge margin (see _entry_purge_after)
+                # instead of the short recorded_at fallback - legacy refs are old, so that
+                # fallback would purge the entry, and `restore`'s record of it, almost at once.
+                if not dry_run and event_end and not ref.get("event_end"):
+                    ref["event_end"] = event_end
+                    changed = True
                 continue
             if status in ("migrated", "already_migrated", "would_migrate"):
                 migrated_count += 1
@@ -873,6 +948,240 @@ def reconcile_migrate_and_purge(
     migrated_count = migrate_legacy_ledger_entries(args, path=path, dry_run=dry_run)
     purged_count = purge_expired_ledger_entries(path=path, dry_run=dry_run)
     return handled, migrated_count, purged_count
+
+
+def ledger_migration_file():
+    """Per-calendar-account record of explicit `migrate-ledger` runs - bounded by the number of
+    calendar accounts, never by mail volume. See ledger_migrated_for()."""
+    return data_dir() / "ledger_migration.json"
+
+
+def ledger_migration_account_key(args):
+    """The calendar account `args.calendar_api` (set by prepare_calendar) talks to, as a
+    stable string - the socialModules rule key (`api.src`, a tuple when picked interactively,
+    a list once read back from config.yaml), joined so both forms give the same key. None
+    when there is no calendar connection (e.g. `-o file`) or no usable key - callers treat
+    that as "not migrated" (fail closed).
+
+    Keyed by calendar account, not mail account: the ledger is one file shared by every mail
+    source, and what migration actually does - patching events through this account's client
+    - is scoped to the calendar account, not to whichever mailbox a run happens to scan."""
+    api = getattr(args, "calendar_api", None)
+    return calendar_account_key(getattr(api, "src", None) if api is not None else None)
+
+
+def calendar_account_key(src):
+    """A socialModules rule key (tuple, list, or plain string) as the stable string stored in
+    ledger_migration.json and on each ledger ref's `calendar_account` - None if `src` isn't a
+    usable rule key."""
+    if isinstance(src, (list, tuple)) and src:
+        return "|".join(str(part) for part in src)
+    if isinstance(src, str) and src:
+        return src
+    return None
+
+
+def owned_calendar_ids(client):
+    """Every calendar id on this account's calendarList - any access role, hidden calendars
+    included, every page - or None if it could not be read. Unlike
+    connections._eligible_calendars(), reader-only calendars are kept: this answers "can
+    this account see that calendar at all", not "can it write there"."""
+    try:
+        ids = set()
+        page_token = None
+        while True:
+            kwargs = {"showHidden": True}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            response = client.calendarList().list(**kwargs).execute()
+            if not isinstance(response, dict):
+                raise ValueError(f"unexpected calendarList response: {response!r}")
+            for item in response.get("items") or []:
+                if isinstance(item, dict) and item.get("id"):
+                    ids.add(str(item["id"]))
+            page_token = response.get("nextPageToken")
+            if not isinstance(page_token, str) or not page_token:
+                return ids
+    except Exception as error:
+        logging.warning(f"Could not read the calendar list for this account: {error}")
+        return None
+
+
+def configured_calendar_account_keys(rules):
+    """The account key of every gcalendar account configured in socialModules, or None if
+    the configuration could not be read."""
+    try:
+        sources = rules.selectRule(["gcalendar"], "")
+    except Exception as error:
+        logging.warning(f"Could not list the configured calendar accounts: {error}")
+        return None
+    return [key for key in (calendar_account_key(src) for src in sources or []) if key]
+
+
+@dataclass
+class CalendarScope:
+    """Which ledger refs belong to the calendar account a run is connected to - see
+    owner_of(). Built once per run by calendar_scope_for() and carried on
+    `args.calendar_scope`, next to the `args.calendar_api` it describes."""
+
+    account_key: str | None
+    # Calendar ids on this account's calendarList; None when it could not be read.
+    owned_ids: set | None = None
+    # True only when exactly one gcalendar account is configured, and it is this one - the
+    # one case where a legacy "primary" ref (no calendar_account recorded) can be attributed.
+    sole_account: bool = False
+
+    def owner_of(self, ref, check_calendar=True):
+        """(True, "") if `ref` belongs to this account, else (False, reason). Never calls the
+        API. In order:
+        - a ref recorded with `calendar_account` belongs to that account only;
+        - "primary" is relative to the account: a legacy "primary" ref (no calendar_account)
+          belongs to this account only when it is the sole configured one - otherwise its
+          owner is unknown and nothing is guessed;
+        - any other calendar id must be on this account's calendarList (`check_calendar`).
+          reconcile passes check_calendar=False: listing a calendar this account can't see
+          fails, and sync_calendar_changes() already treats that as "nothing to report".
+        Skipping every non-owned ref BEFORE any events.get() is what makes a 404 from that
+        get() mean "this event is not found" rather than "this calendar is not visible from
+        here" - Calendar answers notFound for both."""
+        calendar_id = str(ref.get("calendar_id") or "")
+        recorded = ref.get("calendar_account")
+        if recorded and recorded != self.account_key:
+            return False, f"recorded for another calendar account ({recorded})"
+        if calendar_id == "primary":
+            if recorded or (self.sole_account and self.account_key):
+                return True, ""
+            return False, "legacy 'primary' ref and the sole calendar account can't be established - owner unknown"
+        if not check_calendar:
+            return True, ""
+        if self.owned_ids is None:
+            return False, "this account's calendar list could not be read"
+        if calendar_id not in self.owned_ids:
+            return False, "calendar not on this account's calendar list"
+        return True, ""
+
+
+def calendar_scope_for(args, rules=None):
+    """The CalendarScope for `args.calendar_api` (one calendarList call). `rules` is needed to
+    count configured calendar accounts; without it, sole_account stays False (fail closed:
+    legacy "primary" refs are then left alone)."""
+    account_key = ledger_migration_account_key(args)
+    api = getattr(args, "calendar_api", None)
+    client = api.getClient() if api is not None else None
+    owned_ids = owned_calendar_ids(client) if client is not None else None
+    configured = configured_calendar_account_keys(rules) if rules is not None else None
+    sole_account = bool(account_key) and configured == [account_key]
+    return CalendarScope(account_key=account_key, owned_ids=owned_ids, sole_account=sole_account)
+
+
+def _calendar_scope(args, read_calendar_list=True):
+    """args.calendar_scope when the caller built one (process_email_cli, migrate_ledger_cli),
+    else a fail-closed default: no configured-account count, so no legacy "primary" ref is
+    attributed. `read_calendar_list=False` skips the calendarList call for a caller that
+    never checks calendar ids (reconcile, see CalendarScope.owner_of)."""
+    scope = getattr(args, "calendar_scope", None)
+    if isinstance(scope, CalendarScope):
+        return scope
+    if not read_calendar_list:
+        return CalendarScope(account_key=ledger_migration_account_key(args))
+    return calendar_scope_for(args)
+
+
+def _load_ledger_migrations(path=None):
+    path = Path(path) if path else ledger_migration_file()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    return {str(k): str(v) for k, v in accounts.items()} if isinstance(accounts, dict) else {}
+
+
+def ledger_migrated_for(account_key, path=None):
+    """True once `migrate-ledger` has completed a real (non-dry-run) pass for this calendar
+    account. Until then, process_email_cli skips reconcile/migrate/purge entirely - see
+    docs/investigation-limite1.md §12. An unreadable record counts as "not migrated"."""
+    if not account_key:
+        return False
+    return account_key in _load_ledger_migrations(path)
+
+
+def record_ledger_migration(account_key, path=None, now=None):
+    """Stamp the per-account marker ledger_migrated_for() reads. Written once per account; a
+    later migrate-ledger run for the same account keeps the first timestamp."""
+    path = Path(path) if path else ledger_migration_file()
+    migrations = _load_ledger_migrations(path)
+    if account_key in migrations:
+        return
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    migrations[account_key] = now.isoformat().replace("+00:00", "Z")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"accounts": migrations}, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
+    """The explicit `migrate-ledger` command: migrate_legacy_ledger_entries() for the calendar
+    account prepare_calendar() selects (the same one `add` would use), then - on a real pass
+    only - stamp that account's marker so `add` starts running reconcile/migrate/purge
+    automatically from then on (see process_email_cli and docs/investigation-limite1.md §12).
+
+    Migration only, deliberately: no reconcile, no purge. migrate_one_legacy_event() never
+    patches a cancelled event, so running it without reconcile first is safe - reconcile
+    resolves those on the first automatic `add` afterwards.
+
+    `args.dry_run_ledger` forwards to migrate_legacy_ledger_entries (reads only: no patch, no
+    ledger write, no .bak) and never stamps the marker. A real pass stamps it even when
+    nothing needed migrating - what it records is that the operator ran it for this account
+    (an empty ledger must be able to unblock `add` too). Refs left for retry after an
+    ambiguous API error don't block the stamp: migrate still runs inside every automatic
+    `add` afterwards, always before purge, and retries them there.
+
+    Refs of other calendar accounts, of calendars this account can't see, and legacy
+    "primary" refs whose account can't be established are left alone and counted as skipped
+    (see migrate_legacy_ledger_entries) - they are never marked migrated, so running this
+    command for their own account later still migrates them. If this account's calendar list
+    can't be read, nothing runs and nothing is stamped.
+
+    Returns True when the pass ran (dry or real), False when nothing could run."""
+    rules = rules or moduleRules.from_config()
+    if not prepare_calendar(args, rules):
+        print(t("sources.migrate_ledger_no_calendar"))
+        return False
+    account_key = ledger_migration_account_key(args)
+    if account_key is None:
+        print(t("sources.migrate_ledger_no_calendar"))
+        return False
+    # Resolved once, before anything runs: without this account's calendar list, nothing can
+    # be told apart as "mine", so a pass would migrate nothing - and stamping the marker on
+    # that would open the gate for `add` with no migration ever done. Abort instead.
+    args.calendar_scope = calendar_scope_for(args, rules)
+    if args.calendar_scope.owned_ids is None:
+        print(t("sources.migrate_ledger_calendar_list_failed", account=account_key))
+        return False
+    dry_run = bool(getattr(args, "dry_run_ledger", False))
+    report = {}
+    count = migrate_legacy_ledger_entries(args, path=path, dry_run=dry_run, report=report)
+    details = {
+        "account": account_key,
+        "count": count,
+        "skipped": report.get("skipped", 0),
+        "attached": report.get("attached", 0),
+        "log_file": log_file_path(),
+    }
+    if dry_run:
+        print(t("sources.migrate_ledger_dry_run_done", **details))
+        return True
+    record_ledger_migration(account_key, path=marker_path)
+    logging.info(
+        f"migrate-ledger: {count} ref(s) migrated for {account_key}, {details['skipped']} "
+        f"skipped, {details['attached']} legacy 'primary' ref(s) attached; marker stamped."
+    )
+    print(t("sources.migrate_ledger_done", **details))
+    return True
 
 
 def list_restorable_identities_cli(path=None):
@@ -1940,7 +2249,30 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     # reconcile_migrate_and_purge() enforces reconcile -> migrate -> purge in that fixed
     # order structurally (see its own docstring for why the order matters) - not left to this
     # call site to get right by calling three separate functions in sequence.
-    handled, _migrated_count, _purged_count = reconcile_migrate_and_purge(args, dry_run=dry_run)
+    #
+    # Only once `migrate-ledger` has been run for this calendar account (see
+    # docs/investigation-limite1.md §12): until then the whole trio is skipped - none of them
+    # writes the ledger - and `handled` falls back to every identity on record, read-only, so
+    # already-handled messages are still skipped exactly as before. An empty `handled` here
+    # would rescan the whole mailbox and recreate events as duplicates.
+    calendar_account = ledger_migration_account_key(args)
+    ledger_migrated = ledger_migrated_for(calendar_account)
+    if ledger_migrated:
+        # Which refs are this calendar account's - reconcile and migrate only ever touch those
+        # (see CalendarScope.owner_of).
+        args.calendar_scope = calendar_scope_for(args, rules)
+        handled, _migrated_count, _purged_count = reconcile_migrate_and_purge(args, dry_run=dry_run)
+    else:
+        handled = load_handled_mail_ids()
+        if calendar_account is None:
+            logging.info("No calendar connection: ledger reconcile/migrate/purge skipped.")
+        else:
+            logging.warning(
+                f"Ledger not migrated yet for calendar account {calendar_account}: reconcile/"
+                "migrate/purge skipped. Run 'manage-agenda migrate-ledger --dry-run-ledger', "
+                "then 'manage-agenda migrate-ledger'."
+            )
+            print(t("sources.ledger_migration_required", account=calendar_account))
     # Loaded once, after reconcile/migrate/purge - metadata_extractor below does one dict
     # lookup per message instead of re-reading the ledger file each time, and is also where a
     # pending_requeue entry (identity intentionally left out of `handled` above) is found for
@@ -1985,10 +2317,14 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     # scan, this only ever acts on a specific, already-known identity via a targeted search,
     # not the "purged-then-resurfaced messages match a wide criterion" risk the guard above
     # exists for.
-    _requeue_pending_imap_messages(
-        api_src, source_details, is_imap_source, imap_marker_mode, imap_marker_value,
-        imap_capabilities, handled_state,
-    )
+    #
+    # Gated on the ledger migration, like reconcile/purge: a successful un-mark removes the
+    # entry from the ledger (forget_handled_mail), so it is ledger maintenance too.
+    if ledger_migrated:
+        _requeue_pending_imap_messages(
+            api_src, source_details, is_imap_source, imap_marker_mode, imap_marker_value,
+            imap_capabilities, handled_state,
+        )
 
     posts = (
         None
@@ -2058,7 +2394,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
                         )
             remember_handled_mail(
                 mail_identity(post),
-                events=_extract_event_refs(calendar_result),
+                events=_extract_event_refs(calendar_result, calendar_account=calendar_account),
                 imap_locator=imap_locator,
             )
 

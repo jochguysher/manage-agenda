@@ -663,6 +663,14 @@ def migrate_one_legacy_event(
       get() that was needed anyway to check.
     - ("gone", None): the event is confirmed deleted (404/410) - nothing to patch or read;
       logged and treated as a normal, non-fatal, non-retried outcome.
+    - ("cancelled", event_end): get() returned the event with status "cancelled" (deleted,
+      not yet purged by Calendar) - never patched: whether a PATCH on a cancelled event can
+      bring it back is unverified (probe (b) territory), and stamping one buys nothing anyway.
+      event_end is still read, so the caller can backfill it: once reconcile moves the ref to
+      cancelled_events, it is what earns the entry the event_end-based purge margin instead of
+      the short recorded_at fallback. The caller leaves the ref un-migrated for reconcile to
+      resolve through on_user_delete. This matters most for the explicit `migrate-ledger`
+      command, which runs without reconcile first (see sources.migrate_ledger_cli).
     - ("retry", None): an ambiguous error (not a confirmed 404/410) on either call - left
       un-migrated so a future run tries again, the same conservative pattern
       _get_event_if_present uses for the same reason (proceeding on an unconfirmed answer
@@ -685,6 +693,10 @@ def migrate_one_legacy_event(
         return "retry", None
 
     event_end = _event_end_iso(existing)
+    if existing.get("status") == "cancelled":
+        logging.info(f"migrate: {calendar_id}/{event_id} is cancelled - not patched, left to reconcile.")
+        return "cancelled", event_end
+
     private = dict((existing.get("extendedProperties") or {}).get("private") or {})
     if private.get("origin") == "manage-agenda":
         return "already_migrated", event_end

@@ -9,6 +9,21 @@ from manage_agenda.exceptions import LLMError
 from manage_agenda.sources import Args, _process_common_flow, list_folder, process_email_cli
 
 
+def _prepare_migrated_calendar(account="acct1"):
+    """A prepare_calendar stand-in that connects args to calendar account `account`, and that
+    account's migrate-ledger marker - process_email_cli only runs reconcile/migrate/purge for a
+    migrated account (see docs/investigation-limite1.md §12)."""
+    from manage_agenda.sources import record_ledger_migration
+
+    record_ledger_migration(account)
+
+    def prepare(args, rules=None):
+        args.calendar_api = MagicMock(src=account)
+        return True
+
+    return prepare
+
+
 class TestProcessEmailCli(unittest.TestCase):
     def setUp(self):
         self.Args = namedtuple(
@@ -222,8 +237,10 @@ class TestProcessEmailCli(unittest.TestCase):
         self, mock_module_rules, mock_requeue
     ):
         """The un-marking step must run regardless of whether this run's scan finds anything
-        new - it resolves entries left pending_requeue by a *previous* run."""
-        args = self.Args(
+        new - it resolves entries left pending_requeue by a *previous* run. (Once the ledger
+        is migrated for the calendar account - before that it is gated, see
+        tests/test_ledger_migration_gate.py.)"""
+        args = Args(
             interactive=False, delete=None, source="gemini", verbose=False, destination="", text=""
         )
         mock_api_src = MagicMock()
@@ -235,7 +252,7 @@ class TestProcessEmailCli(unittest.TestCase):
         rules.readConfigSrc.return_value = mock_api_src
 
         with (
-            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_migrated_calendar()),
             patch("manage_agenda.sources._get_emails_from_folder", return_value=None),
         ):
             process_email_cli(args, MagicMock(), selected_source="mail-account")
@@ -258,7 +275,7 @@ class TestProcessEmailCli(unittest.TestCase):
         """migrate must run between reconcile and purge: it backfills event_end on legacy
         refs, which purge needs to give them their full margin instead of the shorter
         no_event-style fallback."""
-        args = self.Args(
+        args = Args(
             interactive=False, delete=None, source="gemini", verbose=False, destination="", text=""
         )
         mock_api_src = MagicMock()
@@ -274,7 +291,7 @@ class TestProcessEmailCli(unittest.TestCase):
         mock_purge.side_effect = lambda *a, **k: order.append("purge") or 0
 
         with (
-            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_migrated_calendar()),
             patch("manage_agenda.sources._get_emails_from_folder", return_value=None),
         ):
             process_email_cli(args, MagicMock(), selected_source="mail-account")
@@ -306,7 +323,7 @@ class TestProcessEmailCli(unittest.TestCase):
         mock_reconcile.return_value = set()
 
         with (
-            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_migrated_calendar()),
             patch("manage_agenda.sources._get_emails_from_folder", return_value=None),
         ):
             process_email_cli(args, MagicMock(), selected_source="mail-account")

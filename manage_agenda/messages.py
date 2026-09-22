@@ -187,6 +187,30 @@ TRANSLATIONS = {
         "en": "An identity is required (see 'restore --list' to find one)",
         "fr": "Une identité est requise (voir « restore --list » pour en trouver une)",
     },
+    "cli.migrate_ledger.help": {
+        "en": (
+            "Migrate the ledger's existing Calendar events for the configured calendar "
+            "account (extendedProperties + event end date). Until this has run once for an "
+            "account, 'add' skips ledger reconcile and purge."
+        ),
+        "fr": (
+            "Migre les événements Calendar existants du registre pour le compte de calendrier "
+            "configuré (extendedProperties + date de fin). Tant que cette commande n'a pas été "
+            "exécutée une fois pour un compte, « add » saute la réconciliation et la purge du "
+            "registre."
+        ),
+    },
+    "cli.migrate_ledger.dry_run_ledger_help": {
+        "en": (
+            "Preview only: read the events and log what would be migrated, without patching "
+            "any event, writing the ledger, or marking the account as migrated"
+        ),
+        "fr": (
+            "Prévisualisation uniquement : lit les événements et journalise ce qui serait "
+            "migré, sans modifier aucun événement, sans écrire le registre et sans marquer le "
+            "compte comme migré"
+        ),
+    },
     "cli.install.help": {
         "en": (
             "Install the Playwright browser needed by this tool.\n\n"
@@ -626,6 +650,68 @@ TRANSLATIONS = {
             "recréer des événements en double. Revenez à processed_marker précédent, ou "
             "appliquez manuellement le marqueur {mode} à chaque message encore suivi dans le "
             "ledger avant de réessayer."
+        ),
+    },
+    "sources.ledger_migration_required": {
+        "en": (
+            "Ledger reconcile and purge skipped: the ledger has not been migrated yet for "
+            "calendar account {account}. Preview with 'manage-agenda migrate-ledger "
+            "--dry-run-ledger', then run 'manage-agenda migrate-ledger'. Already-handled "
+            "messages are still skipped."
+        ),
+        "fr": (
+            "Réconciliation et purge du registre sautées : le registre n'a pas encore été "
+            "migré pour le compte de calendrier {account}. Prévisualisez avec « manage-agenda "
+            "migrate-ledger --dry-run-ledger », puis lancez « manage-agenda migrate-ledger ». "
+            "Les messages déjà traités restent ignorés."
+        ),
+    },
+    "sources.migrate_ledger_no_calendar": {
+        "en": "No calendar account available - nothing migrated, account not marked as migrated.",
+        "fr": "Aucun compte de calendrier disponible - rien n'a été migré, compte non marqué comme migré.",
+    },
+    "sources.migrate_ledger_calendar_list_failed": {
+        "en": (
+            "Could not read the calendar list of calendar account {account} - nothing migrated, "
+            "account not marked as migrated. Check the connection ('manage-agenda auth') and "
+            "retry."
+        ),
+        "fr": (
+            "Impossible de lire la liste des calendriers du compte {account} - rien n'a été "
+            "migré, compte non marqué comme migré. Vérifiez la connexion (« manage-agenda "
+            "auth ») et réessayez."
+        ),
+    },
+    "sources.migrate_ledger_dry_run_done": {
+        "en": (
+            "DRY RUN for calendar account {account}: {count} event(s) would be migrated or are "
+            "already migrated; {skipped} left alone (another account, or a calendar this "
+            "account can't see - retried later); {attached} legacy 'primary' ref(s) would be "
+            "attached to this account. Nothing was written and the account is not marked as "
+            "migrated. Details: {log_file}"
+        ),
+        "fr": (
+            "SIMULATION pour le compte de calendrier {account} : {count} événement(s) seraient "
+            "migrés ou le sont déjà ; {skipped} laissés de côté (autre compte, ou calendrier "
+            "invisible depuis ce compte - retentés plus tard) ; {attached} référence(s) "
+            "« primary » anciennes seraient rattachées à ce compte. Rien n'a été écrit et le "
+            "compte n'est pas marqué comme migré. Détails : {log_file}"
+        ),
+    },
+    "sources.migrate_ledger_done": {
+        "en": (
+            "Ledger migrated for calendar account {account}: {count} event(s) migrated or "
+            "already migrated; {skipped} left alone (another account, or a calendar this "
+            "account can't see - retried later); {attached} legacy 'primary' ref(s) attached "
+            "to this account. 'add' now runs ledger reconcile and purge automatically for this "
+            "account. Details: {log_file}"
+        ),
+        "fr": (
+            "Registre migré pour le compte de calendrier {account} : {count} événement(s) "
+            "migrés ou déjà migrés ; {skipped} laissés de côté (autre compte, ou calendrier "
+            "invisible depuis ce compte - retentés plus tard) ; {attached} référence(s) "
+            "« primary » anciennes rattachées à ce compte. « add » réconcilie et purge "
+            "désormais le registre automatiquement pour ce compte. Détails : {log_file}"
         ),
     },
     # --- events.py ---

@@ -57,6 +57,10 @@ def prepare_calendar(args, rules=None, config_path=None):
     reconfigure = getattr(args, "reconfigure", False)
     explicit_calendar = getattr(args, "destination", None)
     account_name = saved.get("calendar_account")
+    if isinstance(account_name, list):
+        # A socialModules rule key is a tuple; config.yaml (yaml.safe_dump) stores it as a
+        # list, which can't be used as the dict key rules.more is looked up by.
+        account_name = tuple(account_name)
 
     if reconfigure or not account_name:
         api = select_api(args, "gcalendar", rules=rules, title=t("connections.select_calendar_title"))

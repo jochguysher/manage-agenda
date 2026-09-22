@@ -1,11 +1,20 @@
 """Read-only diagnostic for the handled-mail ledger (handled_mail_ids.json).
 
-For every tracked event ref, calls events.get(calendar_id, event_id) and classifies it:
+Works for ONE calendar account at a time: the one `add` uses (the saved calendar_account),
+or one chosen interactively with -i. Every tracked event ref is first checked against that
+account (see manage_agenda.sources.CalendarScope.owner_of - the same rule migrate-ledger and
+reconcile use), then, only if it belongs to it, looked up with events.get() and classified:
+  - calendar_inaccessible: the ref is not this account's - recorded for another calendar
+                account, on a calendar missing from this account's calendarList, or a legacy
+                "primary" ref while several calendar accounts are configured (so its owner is
+                unknown). NOT queried: a 404 from a calendar this account can't see says
+                nothing about the event. Rerun with -i for the other account.
   - active:     the event exists and is not cancelled.
   - cancelled:  the event exists with status="cancelled" (a genuine Calendar tombstone).
-  - not_found:  404/410 - Calendar has no record of it at all (see
-                docs/investigation-limite1.md §8/§9 - this is NOT proof of a user deletion,
-                it is equally consistent with the event never having existed).
+  - not_found:  404/410 on a calendar this account does see - Calendar has no record of the
+                event (see docs/investigation-limite1.md §8/§9 - this is NOT proof of a user
+                deletion, it is equally consistent with the event never having existed). A
+                real entry of another account never lands here: it is calendar_inaccessible.
   - error:      an ambiguous API error - inconclusive, not a hard failure.
   - skipped:    the ref itself is malformed (missing calendar_id/event_id).
 
@@ -22,14 +31,15 @@ so this is a starting point for finding more, NOT a verdict on its own:
             actual default Google Calendar ID for every account, or "INBOX") - a match here
             is NOT a reliable pollution signal on its own; never delete on this alone.
 
-Read-only with respect to application state: makes only events.get() calls to Calendar (never
-insert/patch/delete), and never writes to the ledger file or any other manage-agenda state.
+Read-only with respect to application state: makes only calendarList.list() and events.get()
+calls to Calendar (never insert/patch/delete), and never writes to the ledger file or any
+other manage-agenda state (the saved calendar_account is read, never written).
 The only file this script itself writes is its own report, and only if --output is given.
 Not run by the assistant - the user runs and reviews this themselves, and decides what (if
 anything) to clean up.
 
 Usage:
-    python scripts/diagnose_ledger.py [--ledger PATH] [--tests-dir PATH]
+    python scripts/diagnose_ledger.py [-i] [--ledger PATH] [--tests-dir PATH]
                                        [--format csv|json] [--output PATH]
 """
 
@@ -44,25 +54,40 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from manage_agenda.sources import Args, handled_mail_file, load_handled_mail_state  # noqa: E402
+from manage_agenda.sources import (  # noqa: E402
+    Args,
+    calendar_scope_for,
+    handled_mail_file,
+    load_handled_mail_state,
+)
 
 _COMMON_REAL_IDENTIFIERS = {"primary", "INBOX", "Sent", "Trash", "Drafts", "Archive", "", "0", "1"}
 
 
-def connect_calendar():
-    """Interactively pick a Google Calendar account and return its authenticated client -
-    read-only from here on; this script never calls insert/patch/delete."""
-    from socialModules.moduleRules import moduleRules
-
+def connect_calendar(interactive, rules, config_path=None):
+    """The calendar account to diagnose, authenticated: chosen interactively with -i, else the
+    saved calendar_account `add` uses - never silently the first configured one, which could
+    be a different account than the ledger's. Read-only: unlike prepare_calendar(), nothing
+    is ever saved. Exits if no account can be resolved."""
     from manage_agenda.connections import select_api
+    from manage_agenda.user_config import load_user_config
 
-    args = Args(interactive=True)
-    rules = moduleRules.from_config()
-    api_dst = select_api(args, "gcalendar", rules=rules, title="Select the calendar account to diagnose")
+    if interactive:
+        api_dst = select_api(
+            Args(interactive=True), "gcalendar", rules=rules, title="Select the calendar account to diagnose"
+        )
+    else:
+        account = load_user_config(config_path).get("calendar_account")
+        if isinstance(account, list):
+            account = tuple(account)  # config.yaml stores the rule-key tuple as a list
+        if not account:
+            print("No saved calendar account - rerun with -i to choose one.", file=sys.stderr)
+            sys.exit(1)
+        api_dst = rules.readConfigSrc("", account, rules.more.get(account, {}))
     if api_dst is None or api_dst.getClient() is None:
         print("Could not authenticate a Google Calendar account. Run `manage-agenda auth -i` first.")
         sys.exit(1)
-    return api_dst.getClient()
+    return api_dst
 
 
 def collect_test_literals(tests_dir):
@@ -109,7 +134,9 @@ def classify_event(client, calendar_id, event_id):
     return ("cancelled" if status == "cancelled" else "active"), (status or "")
 
 
-def build_rows(state, client, test_literals):
+def build_rows(state, client, test_literals, scope):
+    """One row per ref (or per ref-less entry). `scope` (a manage_agenda.sources.CalendarScope)
+    decides which refs are this account's; only those are queried."""
     rows = []
     for identity, entry in state.items():
         identity_match = confidence(identity, test_literals)
@@ -122,6 +149,7 @@ def build_rows(state, client, test_literals):
                     "identity": identity,
                     "status": entry.get("status", ""),
                     "ref_source": "-",
+                    "ref_calendar_account": "",
                     "calendar_id": "",
                     "event_id": "",
                     "calendar_classification": "-",
@@ -136,15 +164,20 @@ def build_rows(state, client, test_literals):
         for ref in refs:
             calendar_id = str(ref.get("calendar_id") or "")
             event_id = str(ref.get("event_id") or "")
-            if calendar_id and event_id:
-                classification, detail = classify_event(client, calendar_id, event_id)
-            else:
+            if not (calendar_id and event_id):
                 classification, detail = "skipped", "ref missing calendar_id/event_id"
+            else:
+                is_owned, reason = scope.owner_of(ref)
+                if is_owned:
+                    classification, detail = classify_event(client, calendar_id, event_id)
+                else:
+                    classification, detail = "calendar_inaccessible", reason
             rows.append(
                 {
                     "identity": identity,
                     "status": entry.get("status", ""),
                     "ref_source": ref.get("ref_source", "events"),
+                    "ref_calendar_account": str(ref.get("calendar_account") or "(not recorded)"),
                     "calendar_id": calendar_id,
                     "event_id": event_id,
                     "calendar_classification": classification,
@@ -161,6 +194,7 @@ _FIELDS = [
     "identity",
     "status",
     "ref_source",
+    "ref_calendar_account",
     "calendar_id",
     "event_id",
     "calendar_classification",
@@ -189,6 +223,12 @@ def main():
     parser.add_argument(
         "--tests-dir", default=None, help="Directory to scan for test literals. Default: <repo>/tests."
     )
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Choose the calendar account to diagnose. Default: the saved one `add` uses.",
+    )
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
     parser.add_argument("--output", default=None, help="Output file path. Default: stdout.")
     args = parser.parse_args()
@@ -208,9 +248,29 @@ def main():
     state = load_handled_mail_state(ledger_path)
     print(f"{len(state)} ledger identities to check.", file=sys.stderr)
 
-    client = connect_calendar()
+    from socialModules.moduleRules import moduleRules
 
-    rows = build_rows(state, client, test_literals)
+    rules = moduleRules.from_config()
+    scoped = Args(interactive=args.interactive)
+    scoped.calendar_api = connect_calendar(args.interactive, rules)
+    scope = calendar_scope_for(scoped, rules)
+    print(f"Calendar account: {scope.account_key}", file=sys.stderr)
+    if scope.owned_ids is None:
+        print(
+            "Could not read this account's calendar list - refs can't be told apart from "
+            "another account's, so nothing is classified.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not scope.sole_account:
+        print(
+            "Several calendar accounts are configured (or they could not be counted): legacy "
+            "'primary' refs with no recorded account are reported calendar_inaccessible, "
+            "never guessed.",
+            file=sys.stderr,
+        )
+
+    rows = build_rows(state, scoped.calendar_api.getClient(), test_literals, scope)
     output_text = render(rows, args.format)
 
     if args.output:

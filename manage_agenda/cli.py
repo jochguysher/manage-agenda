@@ -25,6 +25,7 @@ from .sources import (
     add_events_cli,
     list_folder,
     list_restorable_identities_cli,
+    migrate_ledger_cli,
     restore_deleted_event_cli,
 )
 
@@ -542,6 +543,40 @@ def restore(ctx, identity, list_only, source):
 
 
 restore.help = t("cli.restore.help")
+
+
+@cli.command(name="migrate-ledger")
+@click.option(
+    "-i",
+    "--interactive",
+    is_flag=True,
+    default=False,
+    help=t("cli.interactive_help"),
+)
+@click.option(
+    "--dry-run-ledger",
+    "dry_run_ledger",
+    is_flag=True,
+    default=False,
+    help=t("cli.migrate_ledger.dry_run_ledger_help"),
+)
+@click.pass_context
+def migrate_ledger(ctx, interactive, dry_run_ledger):
+    verbose = ctx.obj["VERBOSE"]
+    args = Args(
+        interactive=interactive,
+        delete=None,
+        source=None,
+        verbose=verbose,
+        destination=None,
+        text=None,
+        dry_run_ledger=dry_run_ledger,
+    )
+
+    migrate_ledger_cli(args)
+
+
+migrate_ledger.help = t("cli.migrate_ledger.help")
 
 BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
 

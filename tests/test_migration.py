@@ -8,7 +8,12 @@ from unittest.mock import MagicMock
 import googleapiclient.errors
 
 from manage_agenda.extraction import migrate_one_legacy_event
-from manage_agenda.sources import Args, load_handled_mail_state, migrate_legacy_ledger_entries
+from manage_agenda.sources import (
+    Args,
+    CalendarScope,
+    load_handled_mail_state,
+    migrate_legacy_ledger_entries,
+)
 
 
 def http_error(status):
@@ -156,6 +161,9 @@ class TestMigrateLegacyLedgerEntries(unittest.TestCase):
         api = MagicMock()
         api.getClient.return_value = _client_with_get(get_response)
         args.calendar_api = api
+        # The common real case: one configured calendar account, so these legacy "primary"
+        # refs are attributable to it (see CalendarScope.owner_of).
+        args.calendar_scope = CalendarScope(account_key="acct", owned_ids=set(), sole_account=True)
         return args
 
     def _recent_iso(self):
