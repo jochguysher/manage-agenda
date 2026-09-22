@@ -140,7 +140,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         )
 
         cancelled, unknown = sync_calendar_changes(
-            api, "cal-1", tracked_events={"e-missing": recent_iso()}, path=self.path
+            api, "cal-1", tracked_events={"e-missing": {"recorded_at": recent_iso()}}, path=self.path
         )
 
         self.assertEqual(cancelled, set())
@@ -175,7 +175,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         cancelled, unknown = sync_calendar_changes(
             api,
             "cal-1",
-            tracked_events={"e-still-there": recent_iso(), "e-gone": recent_iso()},
+            tracked_events={"e-still-there": {"recorded_at": recent_iso()}, "e-gone": {"recorded_at": recent_iso()}},
             path=self.path,
         )
 
@@ -192,7 +192,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         )
 
         cancelled, unknown = sync_calendar_changes(
-            api, "cal-1", tracked_events={"e-gone": recent_iso()}, path=self.path
+            api, "cal-1", tracked_events={"e-gone": {"recorded_at": recent_iso()}}, path=self.path
         )
 
         self.assertEqual(cancelled, {"e-gone"})
@@ -208,7 +208,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         )
 
         cancelled, unknown = sync_calendar_changes(
-            api, "cal-1", tracked_events={"e-far-future": recent_iso()}, path=self.path
+            api, "cal-1", tracked_events={"e-far-future": {"recorded_at": recent_iso()}}, path=self.path
         )
 
         self.assertEqual(cancelled, set())
@@ -219,7 +219,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         api, client = _api([{"items": [{"id": "e-still-there", "status": "confirmed"}]}])
 
         sync_calendar_changes(
-            api, "cal-1", tracked_events={"e-still-there": recent_iso()}, path=self.path
+            api, "cal-1", tracked_events={"e-still-there": {"recorded_at": recent_iso()}}, path=self.path
         )
 
         self.assertEqual(client.get_calls, [])
@@ -234,7 +234,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         cancelled, unknown = sync_calendar_changes(
             api,
             "cal-1",
-            tracked_events={"e-still-there": recent_iso(), "e-gone": recent_iso()},
+            tracked_events={"e-still-there": {"recorded_at": recent_iso()}, "e-gone": {"recorded_at": recent_iso()}},
             path=self.path,
         )
 
@@ -246,7 +246,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         bounded listing gets its own get() call regardless of age, so a reseed's cost would grow
         with the whole ledger's history instead of its recent activity."""
         api, client = _api([{"items": []}])
-        tracked_events = {f"e-old-{i}": old_iso() for i in range(200)}
+        tracked_events = {f"e-old-{i}": {"recorded_at": old_iso()} for i in range(200)}
 
         cancelled, unknown = sync_calendar_changes(
             api, "cal-1", tracked_events=tracked_events, path=self.path
@@ -260,7 +260,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         api, client = _api([{"items": []}])
 
         cancelled, unknown = sync_calendar_changes(
-            api, "cal-1", tracked_events={"e-unknown-age": None}, path=self.path
+            api, "cal-1", tracked_events={"e-unknown-age": {"recorded_at": None}}, path=self.path
         )
 
         self.assertEqual(cancelled, set())
@@ -1049,6 +1049,64 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertEqual(client.get_calls, [])
         self.assertEqual(self.path.read_bytes(), before)
         self.assertFalse(self.sync_path.exists())
+
+    def _one_missing_ref(self, recorded_at, event_end=None, get_response=None):
+        ref = {"calendar_id": "cal-1", "event_id": "ev-1", "recorded_at": recorded_at}
+        if event_end is not None:
+            ref["event_end"] = event_end
+        self._write_state({"msg-1": {"events": [ref], "status": "created", "recorded_at": recorded_at}})
+        get_responses = {("cal-1", "ev-1"): get_response} if get_response is not None else {}
+        api, client = _api([{"items": [], "nextSyncToken": "tok-first"}], get_responses=get_responses)
+        args = Args(interactive=False)
+        args.calendar_api = api
+        return args, client
+
+    def test_a_future_event_recorded_120_days_ago_and_deleted_before_the_bootstrap_is_detected(self):
+        """Planned long ago for a date still ahead: recorded_at is far outside the bootstrap
+        window, but event_end decides - the deletion is confirmed by events.get() and applied."""
+        args, client = self._one_missing_ref(
+            old_iso(120), event_end=old_iso(-20), get_response={"id": "ev-1", "status": "cancelled"}
+        )
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(client.get_calls, [("cal-1", "ev-1")])
+        self.assertEqual(still_handled, {"msg-1"})
+        entry = load_handled_mail_state(self.path)["msg-1"]
+        self.assertEqual(entry["status"], "no_event")
+        self.assertEqual([ref["event_id"] for ref in entry["cancelled_events"]], ["ev-1"])
+
+    def test_an_ended_event_still_within_the_purge_margin_is_looked_up(self):
+        args, client = self._one_missing_ref(
+            old_iso(120), event_end=old_iso(10), get_response={"id": "ev-1", "status": "cancelled"}
+        )
+
+        reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(client.get_calls, [("cal-1", "ev-1")])
+        self.assertEqual(load_handled_mail_state(self.path)["msg-1"]["status"], "no_event")
+
+    def test_an_event_past_the_purge_margin_is_not_looked_up_even_if_recently_recorded(self):
+        """event_end decides even against a recent recorded_at: past event_end + margin the
+        entry is about to be purged, so no lookup, and absence alone changes nothing."""
+        args, client = self._one_missing_ref(recent_iso(), event_end=old_iso(60))
+        before = self.path.read_bytes()
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(client.get_calls, [])
+        self.assertEqual(still_handled, {"msg-1"})
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_a_date_only_event_end_is_understood(self):
+        future_day = (datetime.date.today() + datetime.timedelta(days=5)).isoformat()
+        args, client = self._one_missing_ref(
+            old_iso(120), event_end=future_day, get_response={"id": "ev-1", "status": "cancelled"}
+        )
+
+        reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(client.get_calls, [("cal-1", "ev-1")])
 
 
 class TestEntryPurgeAfter(unittest.TestCase):

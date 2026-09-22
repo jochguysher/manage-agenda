@@ -666,9 +666,16 @@ diagnostic or `--dry-run-ledger` preview. Migration is now an explicit operator 
 refuses to do any ledger maintenance until it has been done.
 
 **`manage-agenda migrate-ledger [-i] [--dry-run-ledger]`** (`sources.migrate_ledger_cli`):
-- Connects to the calendar account through `prepare_calendar()`, the same selection `add`
-  uses: the saved `calendar_account`, otherwise the first configured `gcalendar` account
-  (or a choice, with `-i`).
+- Connects to one calendar account:
+  - without `-i`: the saved `calendar_account` (the one `add` uses), otherwise the first
+    configured `gcalendar` account;
+  - with `-i`: **always** a choice among the configured `gcalendar` accounts, even when one is
+    saved - that is how another account's refs are migrated or reconciled;
+  - the saved account is **never** changed, with or without `-i`
+    (`connections.select_calendar_account`, unlike `prepare_calendar()`, writes no config and
+    picks no destination calendar - ledger maintenance works from the refs in the ledger).
+    `add` keeps `prepare_calendar()` and its behaviour: its `-i` asks only when no account is
+    saved (or with `--reconfigure`), and it saves what was picked.
 - Runs `migrate_legacy_ledger_entries()` only: no reconcile, no purge. Only this calendar
   account's refs are touched (see "Only this calendar account's refs" below). Everything
   else is counted as "left alone", never marked migrated, and migrated later by running the
@@ -747,9 +754,8 @@ the owner can attach such a ref by hand, by adding `"calendar_account": "<key>"`
 **`manage-agenda reconcile [-i] [--dry-run-ledger]`** (`sources.reconcile_ledger_cli`): the
 ledger side of `add`, and nothing else. `add --dry-run-ledger` is not a safe preview: it keeps
 the ledger untouched, but still scans, extracts, publishes and marks new messages (§9).
-- Same calendar account as `add`, through `prepare_calendar()`: the saved
-  `calendar_account`, otherwise the first configured `gcalendar` account (or a choice, with
-  `-i` - which, as for `add` and `migrate-ledger`, only asks when no account is saved). Same gate:
+- Same account selection as `migrate-ledger` (by default the saved account `add` uses; `-i`
+  always offers the choice; the saved account is never changed). Same gate as `add`:
   without the account's migration marker it prints the `migrate-ledger` instructions and
   makes no Calendar call at all. No calendar account → nothing runs.
 - Runs `reconcile_migrate_and_purge()`, exactly as `add` does: Calendar sync + reconcile,
@@ -784,7 +790,8 @@ deleted event, almost at once.
    `systemctl --user list-timers --all`, `which -a manage-agenda`). With the editable install,
    they run the working tree, not a frozen release.
 2. Back up `~/.local/share/manage-agenda`, `~/.config/manage-agenda` and `MSG_TXT_DIR/log`.
-3. `scripts/diagnose_ledger.py` (the saved calendar account by default; `-i` to choose), then
+3. `scripts/diagnose_ledger.py` (the saved calendar account by default; `-i` always offers
+   the choice and, like everything this script does, changes nothing), then
    clean up the ledger by hand. It reports `calendar_inaccessible` for refs that aren't this
    account's, without querying them. Those are **not** `not_found` and not a cleanup signal:
    rerun with `-i` for the other account. A real entry of another account never shows up as
@@ -800,8 +807,11 @@ deleted event, almost at once.
    - `legacy ref attached to <account>` - a `primary` ref attributed to the only configured
      account.
 6. `manage-agenda migrate-ledger`: `.bak` written, events patched, calendar account marked as
-   migrated. With several calendar accounts, run it once per account (`-i`), each with its
-   own dry run first.
+   migrated. With several calendar accounts, run it once per account, each with its own dry
+   run first: `manage-agenda migrate-ledger -i --dry-run-ledger`, then
+   `manage-agenda migrate-ledger -i`, choosing the same account both times. `-i` offers the
+   choice even though an account is saved, and leaves the saved account (the one `add`
+   publishes to) unchanged. Same for step 7: `reconcile -i` for each other account.
 7. First ledger maintenance for that account, with `reconcile` rather than `add`, so no mail
    is touched:
    - `manage-agenda reconcile --dry-run-ledger`, then read `LOG_FILE`. It writes nothing
@@ -850,23 +860,32 @@ token, and neither is ever handed the other's.
   backlog it reported. It is fixed on its own merits, with or without the account keying,
   and holds for `reconcile --dry-run-ledger` and `add --dry-run-ledger` alike.
 
+- **A connection with no usable account key** reads and stores no token. Every sync for it
+  bootstraps.
+
 **Deletions are read from tombstones, never from absence.** Every listing, bootstrap and
 delta alike, passes `showDeleted=True` (`extraction._list_all_pages`), so a deleted event
 comes back with `status: "cancelled"` instead of just going missing. A tracked ref absent from
-a bootstrap listing is not a deletion by itself:
-- recent enough (`recorded_at` within the 90-day window): one `events.get()`
-  (`_confirm_missing_ids`). `status: "cancelled"` → a confirmed deletion, resolved through
-  `on_user_delete`. 404/410 → `unknown_event`, never a deletion. Still live (e.g. it starts
-  beyond the listing's window), or any other error → nothing reported, the entry is
-  untouched;
-- older, or no `recorded_at`: no lookup, nothing reported, the entry is untouched.
+a bootstrap listing is not a deletion by itself. Whether it is looked up at all
+(`extraction._should_confirm_missing`):
+- with an `event_end`: while the event is still to come or within the ledger's purge margin
+  (`event_end` + 30 days, `LEDGER_EVENT_END_MARGIN_DAYS`, not yet past) - whatever
+  `recorded_at` says. An event planned long ago for a date still ahead is exactly the one
+  whose deletion matters. Past that margin the entry is about to be purged: no lookup;
+- without an `event_end` (a ref recorded before it was tracked, and not migrated): only if
+  `recorded_at` is within the 90-day bootstrap window. Older, or no `recorded_at`: no lookup.
+A looked-up ref gets one `events.get()` (`_confirm_missing_ids`): `status: "cancelled"` → a
+confirmed deletion, resolved through `on_user_delete`. 404/410 → `unknown_event`, never a
+deletion. Still live, or any other error → nothing reported, the entry is untouched. A ref not
+looked up is untouched too. Either way the lookups stay bounded by current activity (events
+still to come or recently ended), never by the ledger's whole history. Migrate keeps its own
+`recorded_at`-window scope (unchanged).
+
 The 404 is only trusted once the calendar is known to be visible. A calendar this account
 can't see fails at the listing itself, before any `events.get()`: nothing is reported for any
 of its refs. Refs of other accounts, and legacy `primary` refs whose account is unknown, are
 filtered out before that (`CalendarScope.owner_of`). Migrate calls the same 404 `gone`; it
 looks up only calendars on this account's calendar list, for the same reason.
-- **A connection with no usable account key** reads and stores no token. Every sync for it
-  bootstraps.
 
 **Rollback.** Restore `handled_mail_ids.json.bak` over the ledger, and remove the account's
 entry from `ledger_migration.json` (or the file) to close the gate again. The
@@ -900,7 +919,8 @@ additions only, and existing keys were preserved (§7).
   call; after migration it runs and forgets the entry.
 - `tests/test_diagnose_ledger.py`: `calendar_inaccessible` for each of the three reasons,
   never queried; `not_found` only on this account's own calendar; the saved account is read
-  back from its list form; no saved account and no `-i` → exit, not a guess.
+  back from its list form; no saved account and no `-i` → exit, not a guess; with an account
+  saved, `-i` still offers the choice and leaves the config file byte-identical.
 - `tests/test_connections.py`: the saved rule key read back as a list still resolves.
 - Sync tokens (`tests/test_event_deletion_detection.py`, and end to end through `add` in
   `tests/test_ledger_migration_gate.py`):
@@ -934,3 +954,13 @@ additions only, and existing keys were preserved (§7).
   send `showDeleted=True`; a ref missing from the bootstrap whose `get()` fails with a 500 is
   in neither set; at the reconcile level, one found live by `get()` leaves the ledger
   byte-identical, and one on a calendar whose listing fails is never looked up.
+- Looked up by `event_end`, not `recorded_at` (same file): an event still to come, recorded
+  120 days ago and deleted before the bootstrap → the deletion is detected and applied; an
+  event ended 10 days ago (within the margin) is looked up; one ended 60 days ago is not, even
+  recorded yesterday; a date-only `event_end` is understood; without `event_end`, an old
+  `recorded_at` is still never looked up.
+- Account selection (`TestLedgerAccountSelection`, through the real CLI and the real
+  `select_calendar_account`): with account A saved, `migrate-ledger -i` migrates B's ref and
+  stamps B only, A is never connected, and the config file stays byte-identical; without
+  `-i` the saved A is used and B's ref left alone; `-i` with nothing saved saves nothing;
+  `reconcile -i` reconciles B with A saved, config unchanged.

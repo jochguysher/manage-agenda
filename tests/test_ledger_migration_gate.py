@@ -239,7 +239,7 @@ def _migrate(api, *extra, configured=(ACCOUNT_SRC,)):
     `api`, with `configured` gcalendar accounts in socialModules."""
     with (
         patch("manage_agenda.sources.moduleRules") as mock_rules,
-        patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_calendar_with(api)),
+        patch("manage_agenda.sources.select_calendar_account", side_effect=_prepare_calendar_with(api)),
     ):
         mock_rules.from_config.return_value.selectRule.return_value = list(configured)
         return CliRunner().invoke(cli.cli, ["migrate-ledger", *extra])
@@ -314,7 +314,7 @@ class TestMigrateLedgerCommand:
         args = Args(interactive=False)
         with (
             patch("manage_agenda.sources.moduleRules"),
-            patch("manage_agenda.sources.prepare_calendar", return_value=False),
+            patch("manage_agenda.sources.select_calendar_account", return_value=False),
         ):
             assert migrate_ledger_cli(args) is False
 
@@ -349,7 +349,7 @@ class TestAddAfterMigration:
         api = _calendar_api(client)
         with (
             patch("manage_agenda.sources.moduleRules"),
-            patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_calendar_with(api)),
+            patch("manage_agenda.sources.select_calendar_account", side_effect=_prepare_calendar_with(api)),
         ):
             assert migrate_ledger_cli(Args(interactive=False)) is True
 
@@ -526,7 +526,7 @@ class TestOtherCalendarAccountsEntries:
 
         with (
             patch("manage_agenda.sources.moduleRules"),
-            patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_calendar_with(api)),
+            patch("manage_agenda.sources.select_calendar_account", side_effect=_prepare_calendar_with(api)),
         ):
             assert migrate_ledger_cli(Args(interactive=False)) is False
 
@@ -859,7 +859,7 @@ def _reconcile(api, *extra, configured=(ACCOUNT_SRC,)):
     with ExitStack() as stack:
         mock_rules = stack.enter_context(patch("manage_agenda.sources.moduleRules"))
         stack.enter_context(
-            patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_calendar_with(api))
+            patch("manage_agenda.sources.select_calendar_account", side_effect=_prepare_calendar_with(api))
         )
         spies = {name: stack.enter_context(patch(f"manage_agenda.sources.{name}")) for name in _NOT_LEDGER}
         rules = mock_rules.from_config.return_value
@@ -965,7 +965,7 @@ class TestReconcileCommand:
 
         with (
             patch("manage_agenda.sources.moduleRules"),
-            patch("manage_agenda.sources.prepare_calendar", return_value=False),
+            patch("manage_agenda.sources.select_calendar_account", return_value=False),
         ):
             result = CliRunner().invoke(cli.cli, ["reconcile"])
 
@@ -1033,3 +1033,99 @@ class TestReconcileCommand:
         assert entry["status"] == "no_event"
         assert entry["cancelled_events"][0]["event_id"] == "ev-a"
         assert json.loads(tokens.read_text(encoding="utf-8")) == {"accounts": {ACCOUNT_KEY: {"primary": "tok-a1"}}}
+
+
+class TestLedgerAccountSelection:
+    """`migrate-ledger -i` / `reconcile -i` ALWAYS offer the calendar account, even with one
+    saved, and never change the saved one (select_calendar_account, not prepare_calendar)."""
+
+    def _save_account(self, src):
+        from manage_agenda.user_config import save_user_config, user_config_file
+
+        save_user_config({"calendar_account": list(src), "calendar": ["cal-1"]})
+        return user_config_file()
+
+    def _invoke(self, command, *extra, interactive_api=None, saved_api=None):
+        with patch("manage_agenda.sources.moduleRules") as mock_rules:
+            rules = mock_rules.from_config.return_value
+            rules.more = {}
+            rules.selectRule.return_value = [ACCOUNT_SRC, OTHER_SRC]
+            rules.selectRuleInteractive.return_value = interactive_api
+            rules.readConfigSrc.return_value = saved_api
+            result = CliRunner().invoke(cli.cli, [command, *extra])
+        return result, rules
+
+    def _ledger_with_one_ref_of_account_b(self):
+        return _write_ledger({"msg-b": _entry(_ref("cal-1", "ev-b", calendar_account=OTHER_KEY))})
+
+    def test_migrate_ledger_i_migrates_b_while_a_stays_saved(self):
+        config = self._save_account(ACCOUNT_SRC)
+        config_before = config.read_bytes()
+        ledger = self._ledger_with_one_ref_of_account_b()
+        client_a = FakeCalendarClient()
+        client_b = FakeCalendarClient(events_by_id={("cal-1", "ev-b"): _live("ev-b")})
+
+        result, rules = self._invoke(
+            "migrate-ledger", "-i",
+            interactive_api=_calendar_api(client_b, src=OTHER_SRC),
+            saved_api=_calendar_api(client_a, src=ACCOUNT_SRC),
+        )
+
+        assert result.exit_code == 0, result.output
+        rules.selectRuleInteractive.assert_called_once()
+        rules.readConfigSrc.assert_not_called()  # the saved account A is not even connected
+        assert [call[:2] for call in client_b.patch_calls] == [("cal-1", "ev-b")]
+        assert load_handled_mail_state(ledger)["msg-b"]["events"][0]["migrated"] is True
+        assert ledger_migrated_for(OTHER_KEY) and not ledger_migrated_for(ACCOUNT_KEY)
+        assert config.read_bytes() == config_before
+
+    def test_without_i_the_saved_account_is_used(self):
+        config = self._save_account(ACCOUNT_SRC)
+        config_before = config.read_bytes()
+        self._ledger_with_one_ref_of_account_b()
+        client_a = FakeCalendarClient()
+
+        result, rules = self._invoke("migrate-ledger", saved_api=_calendar_api(client_a, src=ACCOUNT_SRC))
+
+        assert result.exit_code == 0, result.output
+        rules.selectRuleInteractive.assert_not_called()
+        assert rules.readConfigSrc.call_args.args[1] == ACCOUNT_SRC
+        # B's ref is another account's: left alone.
+        assert client_a.get_calls == [] and client_a.patch_calls == []
+        assert ledger_migrated_for(ACCOUNT_KEY) and not ledger_migrated_for(OTHER_KEY)
+        assert config.read_bytes() == config_before
+
+    def test_i_with_no_saved_account_saves_nothing(self):
+        from manage_agenda.user_config import user_config_file
+
+        self._ledger_with_one_ref_of_account_b()
+        client_b = FakeCalendarClient(events_by_id={("cal-1", "ev-b"): _live("ev-b")})
+
+        result, _rules = self._invoke(
+            "migrate-ledger", "-i", interactive_api=_calendar_api(client_b, src=OTHER_SRC)
+        )
+
+        assert result.exit_code == 0, result.output
+        assert ledger_migrated_for(OTHER_KEY)
+        assert not user_config_file().exists()
+
+    def test_reconcile_i_reconciles_b_while_a_stays_saved(self):
+        config = self._save_account(ACCOUNT_SRC)
+        config_before = config.read_bytes()
+        ledger = _write_ledger(
+            {"msg-b": _entry(_ref("cal-1", "ev-b", calendar_account=OTHER_KEY, event_end=_iso(-30), migrated=True))}
+        )
+        record_ledger_migration(OTHER_KEY)
+        _seed_sync_token(account=OTHER_KEY)
+        client_b = FakeCalendarClient(list_items=[{"id": "ev-b", "status": "cancelled"}])
+
+        result, rules = self._invoke(
+            "reconcile", "-i",
+            interactive_api=_calendar_api(client_b, src=OTHER_SRC),
+            saved_api=_calendar_api(FakeCalendarClient(), src=ACCOUNT_SRC),
+        )
+
+        assert result.exit_code == 0, result.output
+        rules.readConfigSrc.assert_not_called()
+        assert load_handled_mail_state(ledger)["msg-b"]["status"] == "no_event"
+        assert config.read_bytes() == config_before

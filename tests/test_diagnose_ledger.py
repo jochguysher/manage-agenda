@@ -234,6 +234,19 @@ class TestConnectCalendar:
         rules.readConfigSrc.assert_called_once_with("", key, {"x": 1})
         assert api is rules.readConfigSrc.return_value
 
+    def test_i_always_offers_the_choice_and_never_changes_the_saved_account(self, tmp_path):
+        config = tmp_path / "config.yaml"
+        config.write_text("calendar_account:\n- gcalendar\n- set\n- me@example.com\n", encoding="utf-8")
+        before = config.read_bytes()
+        rules = MagicMock()
+
+        api = diagnose_ledger.connect_calendar(True, rules, config_path=config)
+
+        rules.selectRuleInteractive.assert_called_once()
+        rules.readConfigSrc.assert_not_called()
+        assert api is rules.selectRuleInteractive.return_value
+        assert config.read_bytes() == before
+
     def test_no_saved_account_exits_rather_than_picking_one(self, tmp_path):
         rules = MagicMock()
 

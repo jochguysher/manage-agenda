@@ -48,6 +48,36 @@ def calendar_account_key(src):
     return None
 
 
+def select_calendar_account(args, rules=None, config_path=None):
+    """The calendar account for ledger maintenance (`migrate-ledger`, `reconcile`), set on
+    `args.calendar_api` and returned - None when no account can be connected.
+
+    `-i` (args.interactive) ALWAYS offers the choice, even with a calendar_account saved:
+    migrating or reconciling another account's refs is exactly what -i is for. Without -i: the
+    saved calendar_account `add` uses, else the first configured gcalendar account.
+
+    Never writes the user config, unlike prepare_calendar(): choosing an account for one
+    maintenance run must never change the account `add` publishes to. No destination
+    calendar is chosen either - ledger maintenance works from the refs recorded in the ledger,
+    never from args.calendar_ids."""
+    from manage_agenda.user_config import load_user_config
+
+    rules = rules or moduleRules.from_config()
+    account_name = None if args.interactive else load_user_config(config_path).get("calendar_account")
+    if isinstance(account_name, list):
+        # See prepare_calendar(): config.yaml stores the rule-key tuple as a list.
+        account_name = tuple(account_name)
+    if account_name:
+        api = rules.readConfigSrc("", account_name, rules.more.get(account_name, {}))
+    else:
+        api = select_api(args, "gcalendar", rules=rules, title=t("connections.select_calendar_title"))
+    if api is None or api.getClient() is None:
+        print(missing_calendar_message(api))
+        return None
+    args.calendar_api = api
+    return api
+
+
 def prepare_calendar(args, rules=None, config_path=None):
     """Select the destination calendar(s) once, before any model call.
 

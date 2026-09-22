@@ -552,7 +552,7 @@ restore.help = t("cli.restore.help")
     "--interactive",
     is_flag=True,
     default=False,
-    help=t("cli.interactive_help"),
+    help=t("cli.ledger_account_interactive_help"),
 )
 @click.option(
     "--dry-run-ledger",
@@ -586,7 +586,7 @@ migrate_ledger.help = t("cli.migrate_ledger.help")
     "--interactive",
     is_flag=True,
     default=False,
-    help=t("cli.interactive_help"),
+    help=t("cli.ledger_account_interactive_help"),
 )
 @click.option(
     "--dry-run-ledger",

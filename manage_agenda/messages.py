@@ -211,6 +211,16 @@ TRANSLATIONS = {
             "compte comme migré"
         ),
     },
+    "cli.ledger_account_interactive_help": {
+        "en": (
+            "Choose the calendar account, even when one is saved. The saved account is never "
+            "changed"
+        ),
+        "fr": (
+            "Choisir le compte de calendrier, même si un compte est sauvegardé. Le compte "
+            "sauvegardé n'est jamais modifié"
+        ),
+    },
     "cli.reconcile.help": {
         "en": (
             "Run only the ledger side of 'add' for the configured calendar account: Calendar "

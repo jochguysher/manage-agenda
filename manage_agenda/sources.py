@@ -16,8 +16,17 @@ from socialModules.moduleRules import moduleRules
 
 from manage_agenda.base import write_file
 from manage_agenda.config import config, data_dir, log_file_path, msg_txt_dir
-from manage_agenda.connections import calendar_account_key, prepare_calendar, select_api
-from manage_agenda.extraction import _process_event_with_llm_and_calendar
+from manage_agenda.connections import (
+    calendar_account_key,
+    prepare_calendar,
+    select_api,
+    select_calendar_account,
+)
+from manage_agenda.extraction import (
+    LEDGER_EVENT_END_MARGIN_DAYS,
+    _parse_iso_datetime,
+    _process_event_with_llm_and_calendar,
+)
 from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 from manage_agenda.web import reduce_html
@@ -549,7 +558,10 @@ def reconcile_handled_events(
         for ev in entry.get("events") or []:
             calendar_id, event_id = ev.get("calendar_id"), ev.get("event_id")
             if calendar_id and event_id and owned(ev):
-                tracked_by_calendar.setdefault(calendar_id, {})[event_id] = ev.get("recorded_at")
+                tracked_by_calendar.setdefault(calendar_id, {})[event_id] = {
+                    "recorded_at": ev.get("recorded_at"),
+                    "event_end": ev.get("event_end"),
+                }
 
     cancelled_by_calendar = {}
     unknown_by_calendar = {}
@@ -666,8 +678,9 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
     ambiguous API error) is retried on a future run, matching the conservative pattern used
     throughout this module.
 
-    Scoped to refs within the sync bootstrap window (same one reconcile's own bootstrap diff
-    trusts, via _is_within_bootstrap_window) - a ref older than that is left alone: it is
+    Scoped to refs within the sync bootstrap window (_is_within_bootstrap_window - the same
+    window reconcile's bootstrap falls back to for a ref with no event_end, see
+    extraction._should_confirm_missing) - a ref older than that is left alone: it is
     either already purged or close to it regardless of whether it ever gets the origin stamp,
     so spending an API call on it buys nothing for the "state bounded by current activity"
     goal this whole redesign exists for.
@@ -797,27 +810,9 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
     return migrated_count
 
 
-LEDGER_EVENT_END_MARGIN_DAYS = 30
+# LEDGER_EVENT_END_MARGIN_DAYS and _parse_iso_datetime live in extraction.py (imported above):
+# the sync bootstrap needs them too, and extraction.py can't import this module at load time.
 LEDGER_NO_EVENT_MARGIN_DAYS = 7
-
-
-def _parse_iso_datetime(value):
-    """A tz-aware datetime from an ISO date or datetime string, or None if unparseable."""
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.datetime.fromisoformat(text)
-    except ValueError:
-        try:
-            parsed = datetime.datetime.fromisoformat(text + "T00:00:00+00:00")
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed
 
 
 def _entry_purge_after(entry, event_margin_days, no_event_margin_days):
@@ -958,7 +953,8 @@ def ledger_migration_file():
 
 
 def ledger_migration_account_key(args):
-    """The calendar account `args.calendar_api` (set by prepare_calendar) talks to, as a
+    """The calendar account `args.calendar_api` (set by prepare_calendar or
+    select_calendar_account) talks to, as a
     stable string - the socialModules rule key (`api.src`, a tuple when picked interactively,
     a list once read back from config.yaml), joined so both forms give the same key. None
     when there is no calendar connection (e.g. `-o file`) or no usable key - callers treat
@@ -1115,7 +1111,8 @@ def record_ledger_migration(account_key, path=None, now=None):
 
 def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
     """The explicit `migrate-ledger` command: migrate_legacy_ledger_entries() for the calendar
-    account prepare_calendar() selects (the same one `add` would use), then - on a real pass
+    account select_calendar_account() connects - the saved one `add` uses, or with -i any
+    configured account, the saved one never being changed - then - on a real pass
     only - stamp that account's marker so `add` starts running reconcile/migrate/purge
     automatically from then on (see process_email_cli and docs/investigation-limite1.md §12).
 
@@ -1138,7 +1135,7 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
 
     Returns True when the pass ran (dry or real), False when nothing could run."""
     rules = rules or moduleRules.from_config()
-    if not prepare_calendar(args, rules):
+    if not select_calendar_account(args, rules):
         print(t("sources.migrate_ledger_no_calendar"))
         return False
     account_key = ledger_migration_account_key(args)
@@ -1176,7 +1173,8 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
 
 def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
     """The `reconcile` command: the ledger side of `add`, and nothing else - for the calendar
-    account prepare_calendar() selects (the same one `add` would use), behind the same gate
+    account select_calendar_account() connects (the saved one `add` uses, or with -i any
+    configured account, the saved one never being changed), behind the same gate
     (ledger_migrated_for). No mail account is opened: no scan, no extraction, no LLM, no
     Calendar publish, no mailbox marking, no remember_handled_mail.
 
@@ -1197,7 +1195,7 @@ def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
     Returns True when the pass ran (dry or real), False when nothing could run - no calendar
     account, or the gate still closed (no Calendar call at all then)."""
     rules = rules or moduleRules.from_config()
-    if not prepare_calendar(args, rules):
+    if not select_calendar_account(args, rules):
         print(t("sources.reconcile_no_calendar"))
         return False
     account_key = ledger_migration_account_key(args)

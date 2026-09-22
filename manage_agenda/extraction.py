@@ -773,10 +773,15 @@ def _save_sync_tokens(path, tokens):
 # How far back a bootstrap (or post-410 reseed) full listing reaches. Calendar's API forbids
 # combining timeMin/timeMax with syncToken at all, so this bound only ever applies to the
 # unavoidable full listing - every later incremental call is a cheap, unbounded-by-us delta.
-# Events this tool creates are appointments extracted from recent messages, so their start time
-# is virtually always within this window; an event scheduled further out than this and deleted
-# before its first incremental check would not be caught by the bootstrap diff below.
+# A tracked ref missing from that listing is not assumed deleted: _should_confirm_missing()
+# decides whether it is worth one targeted events.get() - by its event_end when recorded,
+# otherwise by its recorded_at falling within this same window.
 _SYNC_BOOTSTRAP_WINDOW_DAYS = 90
+
+# How long after its event's end a ledger entry is kept (purge_expired_ledger_entries, via
+# sources._entry_purge_after). Defined here, not in sources.py (which re-exports it), because
+# the bootstrap uses it too and sources.py imports this module at load time.
+LEDGER_EVENT_END_MARGIN_DAYS = 30
 
 
 def _bootstrap_cutoff():
@@ -790,7 +795,8 @@ def _bootstrap_time_min():
 
 
 def _is_within_bootstrap_window(recorded_at):
-    """Whether a tracked ref is recent enough that the bootstrap listing should cover it.
+    """Whether a tracked ref is recent enough that the bootstrap listing should cover it - the
+    fallback _should_confirm_missing() uses for a ref with no event_end (migrate's scope, too).
 
     Without this, an id whose ref predates the window would be "missing from the listing" on
     every reseed forever, without ever actually being confirmable one way or the other - paying
@@ -808,6 +814,44 @@ def _is_within_bootstrap_window(recorded_at):
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=datetime.timezone.utc)
     return moment >= _bootstrap_cutoff()
+
+
+def _parse_iso_datetime(value):
+    """A tz-aware datetime from an ISO date or datetime string, or None if unparseable."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.datetime.fromisoformat(text + "T00:00:00+00:00")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def _should_confirm_missing(tracked):
+    """Whether a tracked ref absent from a bootstrap listing is worth one events.get().
+
+    `tracked` is the ref's {"recorded_at", "event_end"} (either may be missing). With an
+    event_end: yes while the event is still to come or within the ledger's purge margin
+    (event_end + LEDGER_EVENT_END_MARGIN_DAYS not yet past) - i.e. for as long as its entry is
+    kept, whatever recorded_at says: an event planned long ago for a date still ahead is
+    exactly the one whose deletion matters. Past that margin the entry is about to be purged,
+    and a lookup buys nothing. Without an event_end (refs recorded before it was tracked, and
+    not migrated), fall back to recorded_at within the bootstrap window
+    (_is_within_bootstrap_window). Either way the lookups stay bounded by current activity,
+    never by the ledger's whole history."""
+    event_end = _parse_iso_datetime(tracked.get("event_end"))
+    if event_end is not None:
+        cutoff = event_end + datetime.timedelta(days=LEDGER_EVENT_END_MARGIN_DAYS)
+        return cutoff > datetime.datetime.now(datetime.timezone.utc)
+    return _is_within_bootstrap_window(tracked.get("recorded_at"))
 
 
 def _list_all_pages(client, calendar_id, sync_token=None, time_min=None):
@@ -887,16 +931,18 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None, 
     The first call for a calendar (no token yet), or one made after a stored token has expired
     (Calendar answers 410 Gone), has no "since when" to diff against, so instead it does one
     bounded full listing (see _SYNC_BOOTSTRAP_WINDOW_DAYS) to seed a fresh token - covering
-    deletions that happened before this tool ever ran, or during the gap before a reseed. Among
-    the tracked ids absent from that listing, only the recent ones (see
-    _is_within_bootstrap_window) are confirmed with one targeted lookup each (_confirm_missing_ids):
-    an id old enough to already be outside the listing's window is left alone rather than paying
-    for a lookup every single reseed, forever, as the ledger accumulates history. Any other API
-    error is conservative: nothing is reported and the stored token, if any, is left untouched.
+    deletions that happened before this tool ever ran, or during the gap before a reseed. Every
+    listing passes showDeleted=True, so a deletion normally shows up as a "cancelled" item.
+    A tracked id absent from that listing is never taken as deleted: it is confirmed with one
+    targeted lookup (_confirm_missing_ids) when _should_confirm_missing() says it still matters
+    - its event_end not yet past the ledger's purge margin, or, with no event_end recorded, its
+    recorded_at within the bootstrap window - and otherwise left alone rather than paying for a
+    lookup every single reseed, forever, as the ledger accumulates history. Any other API error
+    is conservative: nothing is reported and the stored token, if any, is left untouched.
 
-    `tracked_events` is {event_id: recorded_at} for this calendar - recorded_at is when this
-    tool created/confirmed the ref (see _extract_event_refs), used only to decide which missing
-    ids are worth confirming.
+    `tracked_events` is {event_id: {"recorded_at": ..., "event_end": ...}} for this calendar
+    (either key may be missing) - taken from the ledger refs (see _extract_event_refs), used
+    only to decide which missing ids are worth confirming.
 
     Returns (cancelled_ids, unknown_ids) - see _confirm_missing_ids for what distinguishes
     them. A syncToken delta itself only ever reports items Calendar has an explicit status
@@ -969,10 +1015,13 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None, 
             item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")
         }
         missing_ids = set(tracked_events) - listed_ids
+        # Absence from the listing is never a deletion by itself: a missing ref is only ever
+        # resolved by what one events.get() says (_confirm_missing_ids), and only looked up at
+        # all while it still matters (_should_confirm_missing).
         confirmable_ids = {
             event_id
             for event_id in missing_ids
-            if _is_within_bootstrap_window(tracked_events.get(event_id))
+            if _should_confirm_missing(tracked_events.get(event_id) or {})
         }
         if confirmable_ids:
             confirmed_cancelled, confirmed_unknown = _confirm_missing_ids(
