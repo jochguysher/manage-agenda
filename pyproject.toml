@@ -41,19 +41,10 @@ manage-agenda = "manage_agenda.cli:cli"
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov", "pytest-mock"]
-dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "black", "isort", "ruff", "bandit"]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "black", "isort", "ruff", "bandit"]
-
-[tool.black]
-line-length = 100
-target-version = ['py310', 'py311', 'py312']
-include = '\.pyi?$'
-
-[tool.isort]
-profile = "black"
-line_length = 100
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
 
 [tool.ruff]
 line-length = 100
@@ -70,7 +61,7 @@ select = [
     "UP",  # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by black)
+    "E501",  # line too long (not enforced: no formatter in the toolchain since black was dropped)
     "B008",  # do not perform function calls in argument defaults
     "C901",  # too complex
 ]

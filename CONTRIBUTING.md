@@ -32,14 +32,12 @@ Thank you for your interest in contributing to manage-agenda! This document prov
 
 ## Code Quality Standards
 
-### Formatting
-- **Black**: Code formatter (line length: 100)
-- **isort**: Import sorting
-- Run: `black . && isort .`
-
-### Linting
-- **Ruff**: Fast Python linter
+### Linting and import sorting
+- **Ruff**: linter, and import sorting through its `I` rules (line length: 100). It is the
+  only code-style tool: the pre-commit hook and the CI `lint` job run the same `ruff check`,
+  at the version pinned in `uv.lock`.
 - Run: `ruff check . --fix`
+- Install the hook once: `pre-commit install`
 
 ### Security
 - **Bandit**: Security issue scanner
