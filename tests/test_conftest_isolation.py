@@ -14,6 +14,8 @@ this scenario - the only one that actually matters for test isolation - works.
 import os
 from pathlib import Path
 
+import pytest
+
 import manage_agenda.config as config_module
 
 
@@ -118,7 +120,12 @@ def test_config_does_not_leak_the_real_env_files_values():
     """
     from manage_agenda.config import BASE_DIR, Config
 
-    real_env_values = _read_env_file_raw(BASE_DIR / ".env")
+    env_file = BASE_DIR / ".env"
+    if not env_file.is_file():
+        # .env is git-ignored: on a fresh checkout (CI) there is nothing that could leak,
+        # so the check is meaningless there - it only guards a developer's machine.
+        pytest.skip("no real .env in this checkout - nothing to leak")
+    real_env_values = _read_env_file_raw(env_file)
     assert "DEFAULT_TIMEZONE" in real_env_values, (
         "expected the repo's real .env to set DEFAULT_TIMEZONE for this to be a meaningful "
         "check - if it no longer does, this test should be re-pointed at whatever key still "
