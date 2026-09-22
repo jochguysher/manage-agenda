@@ -33,11 +33,14 @@ def write_file(filename, content, enabled=False, base_dir=None):
     enabled=True fails safe - closed, not open). `-o file` mode's own write always passes
     enabled=True unconditionally - it is the user's requested result, not an optional trail.
 
-    When enabled and writing under msg_txt_dir()/log/ specifically, the created directory is
-    chmod'd 0700 and the file 0600 - this holds real email/event content, so it must never be
-    left group/world-readable regardless of the process umask. A different base_dir (e.g.
-    output_dir()) is not chmod'd by this function - out of scope for the debug-log permission
-    tightening this was written for (see docs/investigation-limite1.md).
+    When enabled, the file is chmod'd 0600 - this holds real email/event content, so it must
+    never be left group/world-readable regardless of the process umask. Directories: with no
+    base_dir, every directory from msg_txt_dir()/log/ down to the file is chmod'd 0700 (never
+    msg_txt_dir() itself, which also holds the user's .txt sources). With a base_dir
+    (output_dir(), which OUTPUT_DIR may point at a directory the user already owns and uses
+    for other things), an existing directory's permissions are NEVER changed - only the
+    directories this call creates, from base_dir down, get 0700; an existing one looser than
+    0700 is only reported by a warning in the log (see _makedirs_private).
 
     Args:
         filename (str): The name of the file, relative to base_dir.
@@ -91,8 +94,11 @@ def write_file(filename, content, enabled=False, base_dir=None):
         # from other types of errors
         dir_path = os.path.dirname(full_path)
         try:
-            os.makedirs(dir_path, exist_ok=True)
-            _chmod_debug_log_tree(default_data_dir, dir_path)
+            if base_dir is None:
+                os.makedirs(dir_path, exist_ok=True)
+                _chmod_private_tree(os.path.join(default_data_dir, "log"), dir_path)
+            else:
+                _makedirs_private(base_dir, dir_path)
         except OSError as dir_error:
             # If directory creation fails, we log it but continue to try opening the file
             # This allows tests with fake directories to work while still providing security
@@ -113,27 +119,26 @@ def write_file(filename, content, enabled=False, base_dir=None):
         return False
 
 
-def _chmod_debug_log_tree(default_data_dir, dir_path):
-    """chmod 0700 every directory from default_data_dir/log down to dir_path (inclusive) -
-    never default_data_dir itself, which also holds the user's real .txt source files and
-    must keep its normal permissions. A no-op if dir_path isn't under .../log at all (a
-    future caller passing enabled=True with some other path is left alone, not assumed to
-    be the debug tree)."""
-    log_root = os.path.join(default_data_dir, "log")
+def _chmod_private_tree(root, dir_path):
+    """chmod 0700 every directory from root (msg_txt_dir()/log, or output_dir()) down to
+    dir_path (inclusive) - never anything above root, e.g. msg_txt_dir() itself, which
+    also holds the user's real .txt source files and must keep its normal permissions. A
+    no-op if dir_path isn't under root at all (a write outside it is left alone, not
+    assumed to be a private tree)."""
     try:
         real_dir = os.path.realpath(dir_path)
-        real_log_root = os.path.realpath(log_root)
-        common = os.path.commonpath([real_dir, real_log_root])
+        real_root = os.path.realpath(root)
+        common = os.path.commonpath([real_dir, real_root])
     except (OSError, ValueError):
         return
-    if common != real_log_root:
+    if common != real_root:
         return
     try:
-        os.chmod(log_root, 0o700)
-        relative = os.path.relpath(real_dir, real_log_root)
+        os.chmod(root, 0o700)
+        relative = os.path.relpath(real_dir, real_root)
         if relative == os.curdir:
             return
-        current = log_root
+        current = root
         for part in Path(relative).parts:
             current = os.path.join(current, part)
             os.chmod(current, 0o700)
@@ -142,7 +147,45 @@ def _chmod_debug_log_tree(default_data_dir, dir_path):
         # os.makedirs above only partially succeeded, leaving a directory in this chain
         # missing. Must not escape as an uncaught exception: write_file()'s outer
         # `except Exception` would turn that into a failed write, not a permissions warning.
-        logging.warning(f"Could not chmod debug log directory under {log_root}: {chmod_error}")
+        logging.warning(f"Could not chmod private directory under {root}: {chmod_error}")
+
+
+_warned_loose_directories = set()
+
+
+def _makedirs_private(root, dir_path):
+    """Create every missing directory from root down to dir_path with mode 0700, and never
+    touch the permissions of one that already exists: an existing directory looser than 0700
+    (any group/other bit) only gets a warning in the log, once per process per directory, so
+    a run writing many files doesn't repeat it. Directories above root (e.g. msg_txt_dir()
+    for the default output_dir()) are created, if missing, with default permissions - they
+    are not part of the private tree. If dir_path isn't under root, it is just created
+    normally."""
+    relative = os.path.relpath(dir_path, root)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        os.makedirs(dir_path, exist_ok=True)
+        return
+    os.makedirs(os.path.dirname(os.path.normpath(root)), exist_ok=True)
+    chain = [root]
+    if relative != os.curdir:
+        for part in Path(relative).parts:
+            chain.append(os.path.join(chain[-1], part))
+    for directory in chain:
+        try:
+            # 0700 at creation (umask can only remove bits, never add them), so a new
+            # directory is never momentarily group/world-readable.
+            os.mkdir(directory, 0o700)
+            continue
+        except FileExistsError:
+            pass
+        mode = os.stat(directory).st_mode & 0o777
+        if mode & 0o077 and directory not in _warned_loose_directories:
+            _warned_loose_directories.add(directory)
+            logging.warning(
+                f"Existing output directory {directory} has permissions {oct(mode)}, looser "
+                f"than 0700 - left unchanged. Files written into it are still 0600; run "
+                f"`chmod 700 {directory}` if it should be private."
+            )
 
 
 _PURGE_MARKER_NAME = ".purge_enabled_since"

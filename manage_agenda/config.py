@@ -62,7 +62,16 @@ def output_dir() -> str:
     directory, deliberately separate from msg_txt_dir()/log/ (which purge_expired_log_files()
     sweeps by age - see base.py). That file used to live under msg_txt_dir()/log/ itself,
     indistinguishable by path from a debug artifact of the same name shape; moving it here
-    is what makes that sweep safe to apply uniformly, with no per-filename exception."""
+    is what makes that sweep safe to apply uniformly, with no per-filename exception.
+
+    It holds the same kind of extracted event content as log/, so each file is written 0600
+    and every directory write_file() creates here is 0700 - but, unlike log/, an EXISTING
+    directory's permissions are never changed (OUTPUT_DIR may point at a directory the user
+    already uses for other things): a looser one only gets a warning in the log.
+
+    NEVER purged automatically - nothing in manage-agenda deletes anything here. It grows by
+    one file per extracted event on every run with `-o file` (the default for `llm evaluate`),
+    so clean it up by hand when needed."""
     return os.getenv("OUTPUT_DIR", os.path.join(msg_txt_dir(), "output"))
 
 

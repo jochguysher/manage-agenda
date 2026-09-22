@@ -44,7 +44,7 @@ class TestWriteFileEnabledFlag:
         assert oct((tmp_path / "log" / "model").stat().st_mode)[-3:] == "700"
 
     def test_a_chmod_failure_on_the_log_tree_does_not_fail_the_write(self, tmp_path, monkeypatch):
-        """_chmod_debug_log_tree's own chmod calls must be guarded the same way write_file's
+        """_chmod_private_tree's own chmod calls must be guarded the same way write_file's
         mkdir/file-chmod already are - a permissions error there must degrade to a warning,
         not escape as an uncaught OSError that write_file's outer except turns into a failed
         write (result False, nothing written) despite the file having been written fine."""
@@ -62,6 +62,58 @@ class TestWriteFileEnabledFlag:
         before = tmp_path.stat().st_mode
 
         write_file("log/model/post_1.json", "content", enabled=True)
+
+        assert tmp_path.stat().st_mode == before
+
+    def test_output_dir_directories_it_creates_are_0700_and_files_0600(self, tmp_path, monkeypatch):
+        """`-o file` output (base_dir=output_dir()) holds the same extracted event content as
+        log/ - every directory write_file() creates, from output_dir() down, is 0700."""
+        monkeypatch.setenv("MSG_TXT_DIR", str(tmp_path) + "/")
+        output_root = tmp_path / "output"
+
+        write_file("model/post_1_times.json", "output", enabled=True, base_dir=str(output_root))
+
+        assert oct(output_root.stat().st_mode)[-3:] == "700"
+        assert oct((output_root / "model").stat().st_mode)[-3:] == "700"
+        assert oct((output_root / "model" / "post_1_times.json").stat().st_mode)[-3:] == "600"
+
+    def test_an_existing_output_dir_keeps_its_permissions_with_a_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """OUTPUT_DIR may point at a directory the user already uses for other things - its
+        permissions are never changed, a looser-than-0700 one is only reported (once)."""
+        monkeypatch.setenv("MSG_TXT_DIR", str(tmp_path) + "/")
+        output_root = tmp_path / "output"
+        output_root.mkdir()
+        os.chmod(output_root, 0o755)
+
+        with caplog.at_level("WARNING"):
+            write_file("model/post_1_times.json", "a", enabled=True, base_dir=str(output_root))
+            write_file("model/post_2_times.json", "b", enabled=True, base_dir=str(output_root))
+
+        assert oct(output_root.stat().st_mode)[-3:] == "755"
+        loose = [r for r in caplog.records if str(output_root) in r.getMessage() and "0o755" in r.getMessage()]
+        assert len(loose) == 1
+        # The subdirectory it created itself is still 0700, the files 0600.
+        assert oct((output_root / "model").stat().st_mode)[-3:] == "700"
+        assert oct((output_root / "model" / "post_1_times.json").stat().st_mode)[-3:] == "600"
+
+    def test_an_existing_0700_output_dir_gets_no_warning(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setenv("MSG_TXT_DIR", str(tmp_path) + "/")
+        output_root = tmp_path / "output"
+        output_root.mkdir()
+        os.chmod(output_root, 0o700)
+
+        with caplog.at_level("WARNING"):
+            write_file("post_1_times.json", "a", enabled=True, base_dir=str(output_root))
+
+        assert not [r for r in caplog.records if str(output_root) in r.getMessage()]
+
+    def test_output_dir_write_does_not_chmod_msg_txt_dir_itself(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MSG_TXT_DIR", str(tmp_path) + "/")
+        before = tmp_path.stat().st_mode
+
+        write_file("model/post_1_times.json", "output", enabled=True, base_dir=str(tmp_path / "output"))
 
         assert tmp_path.stat().st_mode == before
 
