@@ -165,5 +165,59 @@ this is exactly what probes (a)/(b) exist to test empirically.
 | e | A new event can reuse a deleted event's id (load-bearing for `requeue`) | Undocumented, untested | `probe_e_deleted_id_reuse.py` |
 | — | Does `modifyLabels(id, old, None)` (`addLabelIds: [null]`) work as manage-agenda currently calls it | Unresolvable by reading code | not scripted (existing behavior, not a new probe target — flagging only) |
 
-None of the probe scripts have been run. They require a test calendar (and, for probe d,
-a test IMAP account/folder) that only you can safely provide.
+None of the probe scripts have been run. They require a test calendar (and, for probes d
+and f, a test IMAP account/folder) that only you can safely provide.
+
+## 5. IMAP marker design (addendum)
+
+`imap_processed_marker` config, one of:
+- `keyword:<name>` — e.g. `keyword:$AgendaDone`.
+- `flag:\Seen` — kept for `mark: seen` backward compatibility (see §6 migration).
+- `folder:<path>` — a dedicated folder (created if absent), never Trash.
+
+**Default marker per account**, chosen from probe (f)'s result for that specific account:
+`keyword` if `PERMANENTFLAGS` advertises `\*` **and** a STORE/FETCH round trip confirms the
+keyword actually persists; `folder` otherwise. This is per-account, not global — different
+configured accounts can land on different defaults.
+
+**Python's stdlib `imaplib` has no built-in support for MOVE (RFC 6851) or UIDPLUS/COPYUID
+(RFC 4315).** Confirmed by reading `imaplib.py`: `'MOVE' in imaplib.Commands` is `True` (state
+`SELECTED`), so `client.uid('MOVE', uid, folder)` is callable via the generic UID-command
+dispatcher — but there is no dedicated `.move()` method, and the tagged response's response-
+text (where a `[COPYUID uidvalidity src-uid dest-uid]` code would appear) is returned as a
+**raw, unparsed string** in the `dat` list from `_command_complete`/`_simple_command`/`uid()`.
+manage-agenda has to regex-parse `[COPYUID ...]` out of that string itself — no socialModules
+change needed (same "already reachable via getClient()" pattern as every other capability
+found in this investigation), but no library does the parsing for us either. Probe (f) tests
+this on the real client and reports whether `MOVE` is accepted at all and whether a `COPYUID`
+code is present in the response.
+
+### Per-marker behavior
+
+- **keyword** (and Gmail-over-IMAP specifically: `X-GM-LABELS` instead of a generic keyword,
+  same mechanism as the Gmail API mode): mark on success = `UID STORE +FLAGS`; scan exclusion
+  = search criteria including `UNKEYWORD <name>`; requeue = `UID STORE -FLAGS`. **No locator
+  needed in the ledger** - the message never moves, so there's nothing to lose track of.
+- **folder**: mark on success = `UID MOVE` to the dedicated folder (created via `createFolder`
+  if absent - confirmed to exist in §2). If the response carries a `COPYUID` code, store
+  `(uidvalidity, uid)` in the ledger entry as the locator. Requeue: if the locator is present
+  **and** the folder's current `UIDVALIDITY` still matches the stored one, `UID MOVE` straight
+  back using the stored uid - no search needed. If `UIDVALIDITY` has changed, or no locator was
+  ever recorded (server lacked UIDPLUS), fall back to `UID SEARCH HEADER Message-ID "<...>"`
+  scoped to that one folder and bounded by `SINCE` (never an unbounded search); compare the
+  found message's `Message-ID` header for an exact match before acting on it. **Zero or
+  multiple matches both resolve to `source_lost`, journaled** - never an arbitrary pick among
+  several candidates.
+- **flag:\Seen**: unchanged from today's `mark: seen` behavior - the message is never moved
+  or otherwise touched; exclusion is by the `\Seen` flag already read via `SEARCH`.
+
+## 6. Migration — no reprocessing of already-handled messages
+
+Accounts currently configured with `mark: seen` keep `flag:\Seen` as their marker unless the
+operator explicitly switches them to `keyword`/`folder`. On an explicit switch to `keyword`:
+before the *first* scan under the new criteria, the migration step applies the keyword to
+every message still referenced in the ledger and still present in the source folder (a
+message the old mechanism already relied on staying put). This must complete before the new
+exclusion criteria is used, or those messages would be picked up as new by the newly-added
+`UNKEYWORD` search. A dedicated test asserts no already-handled message is reprocessed
+immediately after this migration step runs.

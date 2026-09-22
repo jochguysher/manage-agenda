@@ -33,6 +33,7 @@ once Phase 2 (the design plan) is finalized and no longer needs re-verification.
 | `probe_c_sync_delta_cancelled_fields.py` | (c) What fields does a cancelled item carry in an incremental-sync (`syncToken`) delta? |
 | `probe_d_imap_custom_keyword.py` | (d) Does the target IMAP server's `PERMANENTFLAGS` accept a custom keyword (e.g. `$AgendaDone`)? |
 | `probe_e_deleted_id_reuse.py` | (e, not in the original four) Can a new event reuse a deleted event's id? Load-bearing for the `requeue` resolution step. |
+| `probe_f_imap_keyword_and_uidplus.py` | (f) Per IMAP account: keyword support+persistence (folds in probe d's check), and UID MOVE + UIDPLUS/COPYUID support - decides the default marker (keyword vs folder) per account. Re-run once per configured account. |
 
 ## Usage
 
@@ -42,6 +43,7 @@ uv run python scripts/probes/probe_b_patch_restore_cancelled.py --calendar-id <i
 uv run python scripts/probes/probe_c_sync_delta_cancelled_fields.py --calendar-id <id> --yes
 uv run python scripts/probes/probe_d_imap_custom_keyword.py --account <name> --folder <folder> --yes
 uv run python scripts/probes/probe_e_deleted_id_reuse.py --calendar-id <id> --yes
+uv run python scripts/probes/probe_f_imap_keyword_and_uidplus.py --account <name> --folder <folder> --yes
 ```
 
 Run without `--yes` first to see exactly what each script will do.
