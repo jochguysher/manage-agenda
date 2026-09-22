@@ -688,11 +688,35 @@ def _save_sync_tokens(path, tokens):
 _SYNC_BOOTSTRAP_WINDOW_DAYS = 90
 
 
-def _bootstrap_time_min():
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+def _bootstrap_cutoff():
+    return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
         days=_SYNC_BOOTSTRAP_WINDOW_DAYS
     )
-    return cutoff.isoformat().replace("+00:00", "Z")
+
+
+def _bootstrap_time_min():
+    return _bootstrap_cutoff().isoformat().replace("+00:00", "Z")
+
+
+def _is_within_bootstrap_window(recorded_at):
+    """Whether a tracked ref is recent enough that the bootstrap listing should cover it.
+
+    Without this, an id whose ref predates the window would be "missing from the listing" on
+    every reseed forever, without ever actually being confirmable one way or the other - paying
+    a targeted get() for it each time, growing with the whole ledger's history instead of its
+    recent activity. A ref with no recorded_at (from before this field existed) is treated as
+    outside the window: conservative, and consistent with how the ledger treats other entries
+    it has no information about.
+    """
+    if not recorded_at:
+        return False
+    try:
+        moment = datetime.datetime.fromisoformat(str(recorded_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return moment >= _bootstrap_cutoff()
 
 
 def _list_all_pages(client, calendar_id, sync_token=None, time_min=None):
@@ -748,7 +772,7 @@ def _confirm_missing_ids(client, calendar_id, missing_ids):
     return confirmed
 
 
-def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=None):
+def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
     """Ids that need to be treated as deleted on one calendar, via Calendar's incremental sync.
 
     This is the mechanism sync clients use: one cheap call returns only what changed since a
@@ -759,12 +783,16 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=Non
     The first call for a calendar (no token yet), or one made after a stored token has expired
     (Calendar answers 410 Gone), has no "since when" to diff against, so instead it does one
     bounded full listing (see _SYNC_BOOTSTRAP_WINDOW_DAYS) to seed a fresh token - covering
-    deletions that happened before this tool ever ran, or during the gap before a reseed. A
-    tracked id absent from that listing is not immediately assumed deleted, since it may simply
-    fall outside the listing's time window: it is instead confirmed with one targeted lookup
-    (see _confirm_missing_ids), so that window is a cost bound, not a source of false positives.
-    Any other API error is conservative: nothing is reported and the stored token, if any, is
-    left untouched.
+    deletions that happened before this tool ever ran, or during the gap before a reseed. Among
+    the tracked ids absent from that listing, only the recent ones (see
+    _is_within_bootstrap_window) are confirmed with one targeted lookup each (_confirm_missing_ids):
+    an id old enough to already be outside the listing's window is left alone rather than paying
+    for a lookup every single reseed, forever, as the ledger accumulates history. Any other API
+    error is conservative: nothing is reported and the stored token, if any, is left untouched.
+
+    `tracked_events` is {event_id: recorded_at} for this calendar - recorded_at is when this
+    tool created/confirmed the ref (see _extract_event_refs), used only to decide which missing
+    ids are worth confirming.
 
     Returns the set of event ids to treat as deleted.
     """
@@ -772,7 +800,7 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=Non
     tokens = _load_sync_tokens(path)
     token = tokens.get(calendar_id)
     client = api_dst.getClient()
-    tracked_event_ids = set(tracked_event_ids or ())
+    tracked_events = dict(tracked_events or {})
 
     def _bootstrap():
         try:
@@ -791,8 +819,15 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=Non
         cancelled_ids = {
             item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")
         }
-        missing_ids = tracked_event_ids - listed_ids
-        confirmed_missing = _confirm_missing_ids(client, calendar_id, missing_ids) if missing_ids else set()
+        missing_ids = set(tracked_events) - listed_ids
+        confirmable_ids = {
+            event_id
+            for event_id in missing_ids
+            if _is_within_bootstrap_window(tracked_events.get(event_id))
+        }
+        confirmed_missing = (
+            _confirm_missing_ids(client, calendar_id, confirmable_ids) if confirmable_ids else set()
+        )
         return cancelled_ids | confirmed_missing
 
     if not token:

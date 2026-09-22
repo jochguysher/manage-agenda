@@ -217,15 +217,23 @@ def remember_handled_mail(identity, path=None, events=None):
 
 
 def _extract_event_refs(calendar_result):
-    """Pull {calendar_id, event_id} pairs out of the per-event results of calendar publishing."""
+    """Pull {calendar_id, event_id, recorded_at} out of the per-event calendar publishing results.
+
+    recorded_at (when this tool created/confirmed the ref, not the event's own start time) lets
+    reconciliation later tell "old enough that a bootstrap listing wouldn't cover it anyway" apart
+    from "recent and worth a targeted check" - without it, that distinction is impossible and a
+    reseed's confirmation cost would grow with the whole ledger's history instead of its recent
+    activity.
+    """
     refs = []
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     for result in calendar_result or []:
         if not isinstance(result, dict):
             continue
         calendar_id = result.get("calendar_id")
         event_id = result.get("event_id") or (result.get("raw_response") or {}).get("id")
         if calendar_id and event_id:
-            refs.append({"calendar_id": calendar_id, "event_id": str(event_id)})
+            refs.append({"calendar_id": calendar_id, "event_id": str(event_id), "recorded_at": now})
     return refs
 
 
@@ -253,13 +261,13 @@ def reconcile_handled_events(args, path=None, sync_state_path=None):
         for ev in entry.get("events") or []:
             calendar_id, event_id = ev.get("calendar_id"), ev.get("event_id")
             if calendar_id and event_id:
-                tracked_by_calendar.setdefault(calendar_id, set()).add(event_id)
+                tracked_by_calendar.setdefault(calendar_id, {})[event_id] = ev.get("recorded_at")
 
     cancelled_by_calendar = {
         calendar_id: sync_calendar_changes(
-            api_dst, calendar_id, tracked_event_ids=tracked_ids, path=sync_state_path
+            api_dst, calendar_id, tracked_events=tracked_events, path=sync_state_path
         )
-        for calendar_id, tracked_ids in tracked_by_calendar.items()
+        for calendar_id, tracked_events in tracked_by_calendar.items()
     }
 
     still_handled = set()

@@ -1,3 +1,4 @@
+import datetime
 import json
 import unittest
 from pathlib import Path
@@ -6,7 +7,12 @@ from unittest.mock import MagicMock
 
 import googleapiclient.errors
 
-from manage_agenda.extraction import _load_sync_tokens, event_identity, sync_calendar_changes
+from manage_agenda.extraction import (
+    _is_within_bootstrap_window,
+    _load_sync_tokens,
+    event_identity,
+    sync_calendar_changes,
+)
 from manage_agenda.sources import (
     Args,
     _extract_event_refs,
@@ -20,6 +26,15 @@ from manage_agenda.sources import (
 
 def http_error(status):
     return googleapiclient.errors.HttpError(SimpleNamespace(status=status, reason=""), b"{}")
+
+
+def recent_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def old_iso(days=200):
+    moment = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    return moment.isoformat().replace("+00:00", "Z")
 
 
 class ScriptedCalendarClient:
@@ -48,7 +63,11 @@ class ScriptedCalendarClient:
 
     def get(self, calendarId, eventId):
         self.get_calls.append((calendarId, eventId))
-        outcome = self._get_responses.get((calendarId, eventId))
+        if (calendarId, eventId) not in self._get_responses:
+            raise AssertionError(
+                f"Unscripted get() for {(calendarId, eventId)} - add it to get_responses"
+            )
+        outcome = self._get_responses[(calendarId, eventId)]
         request = MagicMock()
         if isinstance(outcome, BaseException):
             request.execute.side_effect = outcome
@@ -110,7 +129,10 @@ class TestSyncCalendarChanges(unittest.TestCase):
         )
 
         result = sync_calendar_changes(
-            api, "cal-1", tracked_event_ids={"e-still-there", "e-gone"}, path=self.path
+            api,
+            "cal-1",
+            tracked_events={"e-still-there": recent_iso(), "e-gone": recent_iso()},
+            path=self.path,
         )
 
         self.assertEqual(result, {"e-gone"})
@@ -125,7 +147,9 @@ class TestSyncCalendarChanges(unittest.TestCase):
             get_responses={("cal-1", "e-far-future"): {"status": "confirmed"}},
         )
 
-        result = sync_calendar_changes(api, "cal-1", tracked_event_ids={"e-far-future"}, path=self.path)
+        result = sync_calendar_changes(
+            api, "cal-1", tracked_events={"e-far-future": recent_iso()}, path=self.path
+        )
 
         self.assertEqual(result, set())
         self.assertEqual(client.get_calls, [("cal-1", "e-far-future")])
@@ -133,7 +157,9 @@ class TestSyncCalendarChanges(unittest.TestCase):
     def test_confirmation_call_is_not_made_for_ids_already_seen_in_the_listing(self):
         api, client = _api([{"items": [{"id": "e-still-there", "status": "confirmed"}]}])
 
-        sync_calendar_changes(api, "cal-1", tracked_event_ids={"e-still-there"}, path=self.path)
+        sync_calendar_changes(
+            api, "cal-1", tracked_events={"e-still-there": recent_iso()}, path=self.path
+        )
 
         self.assertEqual(client.get_calls, [])
 
@@ -145,10 +171,35 @@ class TestSyncCalendarChanges(unittest.TestCase):
         )
 
         result = sync_calendar_changes(
-            api, "cal-1", tracked_event_ids={"e-still-there", "e-gone"}, path=self.path
+            api,
+            "cal-1",
+            tracked_events={"e-still-there": recent_iso(), "e-gone": recent_iso()},
+            path=self.path,
         )
 
         self.assertEqual(result, {"e-gone"})
+
+    def test_ids_older_than_the_bootstrap_window_are_never_confirmed(self):
+        """Discriminates the fix: without the recency filter, every tracked id missing from a
+        bounded listing gets its own get() call regardless of age, so a reseed's cost would grow
+        with the whole ledger's history instead of its recent activity."""
+        api, client = _api([{"items": []}])
+        tracked_events = {f"e-old-{i}": old_iso() for i in range(200)}
+
+        result = sync_calendar_changes(api, "cal-1", tracked_events=tracked_events, path=self.path)
+
+        self.assertEqual(result, set())
+        self.assertEqual(client.get_calls, [])
+
+    def test_a_ref_with_no_recorded_at_is_treated_as_outside_the_window(self):
+        api, client = _api([{"items": []}])
+
+        result = sync_calendar_changes(
+            api, "cal-1", tracked_events={"e-unknown-age": None}, path=self.path
+        )
+
+        self.assertEqual(result, set())
+        self.assertEqual(client.get_calls, [])
 
     def test_pagination_is_followed_until_the_last_page(self):
         self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
@@ -231,19 +282,23 @@ class TestExtractEventRefs(unittest.TestCase):
             {"success": True, "duplicate": True, "calendar_id": "primary", "event_id": ""},
             "not-a-dict",
         ]
-        self.assertEqual(
-            _extract_event_refs(calendar_result),
-            [{"calendar_id": "primary", "event_id": "abc"}],
-        )
+        refs = _extract_event_refs(calendar_result)
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0]["calendar_id"], "primary")
+        self.assertEqual(refs[0]["event_id"], "abc")
+
+    def test_records_when_the_ref_was_created(self):
+        calendar_result = [{"success": True, "calendar_id": "primary", "event_id": "abc"}]
+        refs = _extract_event_refs(calendar_result)
+        self.assertTrue(_is_within_bootstrap_window(refs[0]["recorded_at"]))
 
     def test_falls_back_to_raw_response_id(self):
         calendar_result = [
             {"success": True, "calendar_id": "primary", "raw_response": {"id": "xyz"}},
         ]
-        self.assertEqual(
-            _extract_event_refs(calendar_result),
-            [{"calendar_id": "primary", "event_id": "xyz"}],
-        )
+        refs = _extract_event_refs(calendar_result)
+        self.assertEqual(refs[0]["calendar_id"], "primary")
+        self.assertEqual(refs[0]["event_id"], "xyz")
 
     def test_none_gives_empty_list(self):
         self.assertEqual(_extract_event_refs(None), [])
@@ -422,7 +477,14 @@ class TestReconcileHandledEvents(unittest.TestCase):
         bootstrap listing is confirmed by a targeted lookup, not just "no baseline, report
         nothing"."""
         self._write_state(
-            {"msg-1": {"events": [{"calendar_id": "cal-1", "event_id": "ev-gone"}], "status": "created"}}
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "cal-1", "event_id": "ev-gone", "recorded_at": recent_iso()}
+                    ],
+                    "status": "created",
+                }
+            }
         )
         api, _client = _api(
             [{"items": [], "nextSyncToken": "tok-first"}],
@@ -435,6 +497,29 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
         self.assertEqual(still_handled, set())
         self.assertNotIn("msg-1", load_handled_mail_state(self.path))
+
+    def test_old_untraceable_events_never_trigger_a_confirmation_call_in_reconcile(self):
+        """Ties the age-skip to the real entry point: an old-enough tracked event, missing from
+        a first-ever bootstrap listing, is left alone rather than confirmed - and so stays
+        handled, since reconcile has no way to tell whether it was deleted."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "cal-1", "event_id": "ev-old", "recorded_at": old_iso()}
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        api, client = _api([{"items": [], "nextSyncToken": "tok-first"}])
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(still_handled, {"msg-1"})
+        self.assertEqual(client.get_calls, [])
 
 
 if __name__ == "__main__":
