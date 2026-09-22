@@ -134,6 +134,24 @@ TRANSLATIONS = {
         "en": "Update event status from busy to available",
         "fr": "Mettre à jour le statut d'un événement d'occupé à disponible",
     },
+    "cli.restore.help": {
+        "en": (
+            "Manually attempt to restore a manually-deleted event (identity from "
+            "'restore --list'). Never automatic - see on_user_delete."
+        ),
+        "fr": (
+            "Tente manuellement de restaurer un événement supprimé manuellement "
+            "(identité obtenue via « restore --list »). Jamais automatique - voir on_user_delete."
+        ),
+    },
+    "cli.restore.list_help": {
+        "en": "List identities with a deleted event that could be restored",
+        "fr": "Lister les identités ayant un événement supprimé restaurable",
+    },
+    "cli.restore.identity_required": {
+        "en": "An identity is required (see 'restore --list' to find one)",
+        "fr": "Une identité est requise (voir « restore --list » pour en trouver une)",
+    },
     "cli.install.help": {
         "en": (
             "Install the Playwright browser needed by this tool.\n\n"
@@ -517,6 +535,46 @@ TRANSLATIONS = {
     "sources.selected_source": {
         "en": "Selected source: {selected}",
         "fr": "Source sélectionnée : {selected}",
+    },
+    "sources.restore_list_entry": {
+        "en": "{identity}: {event_ids}",
+        "fr": "{identity} : {event_ids}",
+    },
+    "sources.restore_list_empty": {
+        "en": "No identity has a deleted event that could be restored",
+        "fr": "Aucune identité n'a d'événement supprimé restaurable",
+    },
+    "sources.restore_unknown_identity": {
+        "en": "{identity}: unknown identity (see 'restore --list')",
+        "fr": "{identity} : identité inconnue (voir « restore --list »)",
+    },
+    "sources.restore_nothing_to_restore": {
+        "en": "{identity}: no deleted event to restore for this identity",
+        "fr": "{identity} : aucun événement supprimé à restaurer pour cette identité",
+    },
+    "sources.restore_select_calendar_title": {
+        "en": "Select the calendar to restore the event on",
+        "fr": "Sélectionnez le calendrier sur lequel restaurer l'événement",
+    },
+    "sources.restore_succeeded": {
+        "en": "Restored {event_id} on {calendar_id}",
+        "fr": "Événement {event_id} restauré sur {calendar_id}",
+    },
+    "sources.restore_failed": {
+        "en": "Could not restore {event_id} on {calendar_id}",
+        "fr": "Impossible de restaurer {event_id} sur {calendar_id}",
+    },
+    "sources.restore_failed_hint": {
+        "en": (
+            "Calendar did not confirm the restore - this is a known unknown (see "
+            "docs/investigation-limite1.md, probe b). Use requeue to recreate the event "
+            "under a new id instead."
+        ),
+        "fr": (
+            "Calendar n'a pas confirmé la restauration - c'est une inconnue documentée (voir "
+            "docs/investigation-limite1.md, sonde b). Utilisez requeue pour recréer "
+            "l'événement sous un nouvel identifiant à la place."
+        ),
     },
     # --- events.py ---
     "events.action_copy": {

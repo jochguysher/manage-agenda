@@ -265,6 +265,30 @@ class TestCliCommands(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         mock_move.assert_called_once()
 
+    @patch("manage_agenda.cli.restore_deleted_event_cli")
+    def test_restore_command_with_an_identity(self, mock_restore):
+        result = self.runner.invoke(self.cli.cli, ["restore", "msg-1"])
+
+        self.assertEqual(result.exit_code, 0)
+        mock_restore.assert_called_once()
+        self.assertEqual(mock_restore.call_args.args[1], "msg-1")
+
+    @patch("manage_agenda.cli.list_restorable_identities_cli")
+    @patch("manage_agenda.cli.restore_deleted_event_cli")
+    def test_restore_command_list_flag_never_calls_restore(self, mock_restore, mock_list):
+        result = self.runner.invoke(self.cli.cli, ["restore", "--list"])
+
+        self.assertEqual(result.exit_code, 0)
+        mock_list.assert_called_once()
+        mock_restore.assert_not_called()
+
+    @patch("manage_agenda.cli.restore_deleted_event_cli")
+    def test_restore_command_without_an_identity_or_list_does_not_call_restore(self, mock_restore):
+        result = self.runner.invoke(self.cli.cli, ["restore"])
+
+        self.assertEqual(result.exit_code, 0)
+        mock_restore.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

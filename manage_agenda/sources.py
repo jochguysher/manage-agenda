@@ -310,6 +310,43 @@ def forget_handled_mail(identity, path=None):
     _save_state(path, state)
 
 
+def mark_events_restored(identity, restored_refs, path=None):
+    """Move `restored_refs` (a subset of the identity's cancelled_events, confirmed restored
+    by the manual `restore` command - see restore_deleted_event_cli) back into `events`, so
+    the identity is tracked exactly like any other "created" entry again: reconcile
+    re-confirms it via syncToken like any other tracked event, and dedup/purge treat it
+    normally from here on. Refs not in `restored_refs` (e.g. a multi-event identity where only
+    some events were restorable) stay in `cancelled_events`, untouched."""
+    if not identity or not restored_refs:
+        return
+    path = Path(path) if path else handled_mail_file()
+    state = _load_state(path)
+    entry = state.get(identity)
+    if entry is None:
+        return
+    restored_keys = {(ref.get("calendar_id"), ref.get("event_id")) for ref in restored_refs}
+    remaining_cancelled = [
+        ref
+        for ref in entry.get("cancelled_events") or []
+        if (ref.get("calendar_id"), ref.get("event_id")) not in restored_keys
+    ]
+    current_events = list(entry.get("events") or [])
+    seen_keys = {(ref.get("calendar_id"), ref.get("event_id")) for ref in current_events}
+    for ref in restored_refs:
+        key = (ref.get("calendar_id"), ref.get("event_id"))
+        if key not in seen_keys:
+            current_events.append(ref)
+            seen_keys.add(key)
+    entry["events"] = current_events
+    entry["status"] = "created"
+    if remaining_cancelled:
+        entry["cancelled_events"] = remaining_cancelled
+    elif "cancelled_events" in entry:
+        del entry["cancelled_events"]
+    state[identity] = entry
+    _save_state(path, state)
+
+
 def _extract_event_refs(calendar_result):
     """Pull {calendar_id, event_id, recorded_at, event_end} out of the per-event calendar
     publishing results.
@@ -524,6 +561,110 @@ def purge_expired_ledger_entries(
     if purged:
         _save_state(path, remaining)
     return purged
+
+
+def list_restorable_identities_cli(path=None):
+    """Print every ledger identity with at least one cancelled event (from an
+    on_user_delete="ignore" resolution) that `restore <identity>` could attempt to restore -
+    so an operator can find the identity string to pass it, without needing to read the
+    ledger file by hand."""
+    state = load_handled_mail_state(path)
+    found = False
+    for identity, entry in state.items():
+        cancelled = entry.get("cancelled_events") or []
+        if not cancelled:
+            continue
+        found = True
+        event_ids = ", ".join(str(ref.get("event_id", "")) for ref in cancelled)
+        print(t("sources.restore_list_entry", identity=identity, event_ids=event_ids))
+    if not found:
+        print(t("sources.restore_list_empty"))
+
+
+def _attempt_restore_one_event(client, calendar_id, event_id):
+    """Try events.patch(status="confirmed") on one cancelled event and verify it actually
+    took effect via a follow-up get() - Calendar's docs do not guarantee patch resurrects a
+    cancelled event, nor document how long a cancelled event remains fetchable at all (see
+    docs/investigation-limite1.md, probe (b), unresolved). Never trusts a 200 OK from patch()
+    alone: returns True only if the follow-up get() confirms status == "confirmed", and False
+    (never raises) on any other outcome, including a 404/410 (permanently gone) or an
+    ambiguous API error - restore is meant to fail visibly, not pretend success.
+    """
+    try:
+        client.events().patch(
+            calendarId=calendar_id, eventId=event_id, body={"status": "confirmed"}
+        ).execute()
+    except Exception as error:
+        # Deliberately a catch-all (network errors, auth failures, and Calendar API refusals
+        # all end up "not restored" the same way) - but logged with the exception type so a
+        # 401/403/connectivity failure is distinguishable, in the log, from Calendar actually
+        # refusing the patch.
+        logging.warning(f"restore: patch failed for {calendar_id}/{event_id}: {type(error).__name__}: {error}")
+        return False
+
+    try:
+        refreshed = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+    except Exception as error:
+        logging.warning(
+            f"restore: could not verify {calendar_id}/{event_id} after patch: "
+            f"{type(error).__name__}: {error}"
+        )
+        return False
+    return isinstance(refreshed, dict) and refreshed.get("status") == "confirmed"
+
+
+def restore_deleted_event_cli(args, identity):
+    """Manually attempt to restore a deleted event for one ledger identity.
+
+    Deliberately never part of the automatic on_user_delete resolution chain
+    (ignore/requeue, see reconcile_handled_events) - the amendment that demoted "restore" from
+    the automatic default reasoned that automatic restoration cannot tell an accidental
+    deletion from a deliberate one; only a human operator invoking this command explicitly
+    can decide that. Only identities with at least one on_user_delete="ignore" resolution
+    (tracked in `cancelled_events`) have anything to restore - see
+    list_restorable_identities_cli() to find one.
+
+    Since probe (b) has never been run against real data, whether events.patch(status=
+    "confirmed") actually resurrects a cancelled event, and for how long, is unverified - this
+    command checks the outcome itself per event (see _attempt_restore_one_event) rather than
+    assuming success, and reports failure plainly (the per-event prints, not the return
+    value, are the operator-facing signal).
+
+    Returns True only if every cancelled event for this identity was restored - False on a
+    partial restore too, even though the ledger *was* already updated for whichever ones did
+    succeed (see mark_events_restored). Callers that care about partial success should read
+    the ledger, not this return value.
+    """
+    entry = load_handled_mail_state().get(identity)
+    if entry is None:
+        print(t("sources.restore_unknown_identity", identity=identity))
+        return False
+    cancelled = entry.get("cancelled_events") or []
+    if not cancelled:
+        print(t("sources.restore_nothing_to_restore", identity=identity))
+        return False
+
+    api_cal = select_api(args, "gcalendar", rules=None, title=t("sources.restore_select_calendar_title"))
+    client = api_cal.getClient()
+
+    restored, failed = [], []
+    for ref in cancelled:
+        calendar_id, event_id = ref.get("calendar_id"), ref.get("event_id")
+        if not calendar_id or not event_id:
+            continue
+        if _attempt_restore_one_event(client, calendar_id, event_id):
+            restored.append(ref)
+            print(t("sources.restore_succeeded", calendar_id=calendar_id, event_id=event_id))
+        else:
+            failed.append(ref)
+            print(t("sources.restore_failed", calendar_id=calendar_id, event_id=event_id))
+
+    if restored:
+        mark_events_restored(identity, restored)
+    if failed:
+        print(t("sources.restore_failed_hint"))
+
+    return bool(restored) and not failed
 
 
 def unseen_messages(posts, handled=None, path=None):

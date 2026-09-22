@@ -24,6 +24,8 @@ from .sources import (
     Args,
     add_events_cli,
     list_folder,
+    list_restorable_identities_cli,
+    restore_deleted_event_cli,
 )
 
 # Click builds --help text when each command decorator runs, i.e. at import time. The first
@@ -474,6 +476,45 @@ def update_status(ctx, interactive, source, text):
 
 
 update_status.help = t("cli.update_status.help")
+
+
+@cli.command()
+@click.argument("identity", required=False)
+@click.option(
+    "--list",
+    "list_only",
+    is_flag=True,
+    default=False,
+    help=t("cli.restore.list_help"),
+)
+@click.option(
+    "-s",
+    "--source",
+    default=None,
+    help=t("cli.select_source_calendar_help"),
+)
+@click.pass_context
+def restore(ctx, identity, list_only, source):
+    if list_only:
+        list_restorable_identities_cli()
+        return
+    if not identity:
+        print(t("cli.restore.identity_required"))
+        return
+    verbose = ctx.obj["VERBOSE"]
+    args = Args(
+        interactive=False,
+        delete=None,
+        source=source,
+        verbose=verbose,
+        destination=None,
+        text=None,
+    )
+
+    restore_deleted_event_cli(args, identity)
+
+
+restore.help = t("cli.restore.help")
 
 BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
 
