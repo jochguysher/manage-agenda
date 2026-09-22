@@ -1,6 +1,5 @@
 import unittest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from manage_agenda.extraction import (
     _publish_event_to_calendar,
@@ -32,17 +31,6 @@ class TestEventIdentity(unittest.TestCase):
 
 
 class TestPublishSkipsDuplicates(unittest.TestCase):
-    def setUp(self):
-        self.key_file = Path("/tmp/manage-agenda-event-keys-test.json")
-        self.key_file.unlink(missing_ok=True)
-        patcher = patch("manage_agenda.extraction.event_key_file", return_value=self.key_file)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def tearDown(self):
-        self.key_file.unlink(missing_ok=True)
-        Path(str(self.key_file) + ".tmp").unlink(missing_ok=True)
-
     def _api(self, list_response):
         api = MagicMock()
         api.getClient.return_value.events.return_value.list.return_value.execute.return_value = (
@@ -87,3 +75,46 @@ class TestPublishSkipsDuplicates(unittest.TestCase):
         self.assertTrue(published)
         self.assertFalse(result.get("duplicate"))
         api.publishPost.assert_called_once()
+
+
+class TestRecreateAfterManualDeletion(unittest.TestCase):
+    """A local dedup cache used to survive a manual deletion and silently no-op the recreate.
+
+    find_existing_event must always ask Calendar instead of trusting a cache from an earlier
+    call, otherwise "recreate a deleted event" looks like "duplicate, skip" forever.
+    """
+
+    def test_second_publish_after_the_event_disappears_calls_the_api_again(self):
+        api = self._api({"items": []})
+        api.publishPost.return_value = {
+            "success": True,
+            "post_url": "https://calendar.example/first",
+            "raw_response": {"id": "e-first", "htmlLink": "https://calendar.example/first"},
+        }
+        published, result = _publish_event_to_calendar(api, dict(EVENT), "primary", source_id="msg-1")
+        self.assertTrue(published)
+        self.assertFalse(result.get("duplicate"))
+        self.assertEqual(api.publishPost.call_count, 1)
+
+        # The event was deleted from Calendar: every lookup now comes back empty.
+        api.getClient.return_value.events.return_value.list.return_value.execute.return_value = {
+            "items": []
+        }
+        api.publishPost.return_value = {
+            "success": True,
+            "post_url": "https://calendar.example/second",
+            "raw_response": {"id": "e-second", "htmlLink": "https://calendar.example/second"},
+        }
+        published_again, result_again = _publish_event_to_calendar(
+            api, dict(EVENT), "primary", source_id="msg-1"
+        )
+        self.assertTrue(published_again)
+        self.assertFalse(result_again.get("duplicate"))
+        self.assertEqual(api.publishPost.call_count, 2)
+
+    def _api(self, list_response):
+        api = MagicMock()
+        api.getClient.return_value.events.return_value.list.return_value.execute.return_value = (
+            list_response
+        )
+        return api

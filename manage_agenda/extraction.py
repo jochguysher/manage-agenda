@@ -504,33 +504,6 @@ def _process_event_with_llm_and_calendar(
     return None, None
 
 
-def event_key_file():
-    """Local record of event identities already created or found on a calendar."""
-    from manage_agenda.config import DATA_DIR
-
-    return Path(DATA_DIR) / "event_keys.json"
-
-
-def _read_id_set(path):
-    if not path.is_file():
-        return set()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    ids = data.get("ids") if isinstance(data, dict) else None
-    if not isinstance(ids, list):
-        return set()
-    return {str(item) for item in ids}
-
-
-def _write_id_set(path, ids):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"ids": sorted(ids)}, indent=2), encoding="utf-8")
-    temporary.replace(path)
-
-
 def _normalize_summary(event):
     return " ".join((event.get("summary") or "").casefold().split())
 
@@ -591,18 +564,6 @@ def _stamp_event_identity(event, source_id="", calendar_id=""):
     return slot, source
 
 
-def _remember_event_keys(event, source_id="", path=None, calendar_id=""):
-    slot, source = event_identity(event, source_id, calendar_id)
-    keys = {key for key in (slot, source) if key}
-    if not keys:
-        return
-    path = Path(path) if path else event_key_file()
-    known = _read_id_set(path)
-    if keys.issubset(known):
-        return
-    _write_id_set(path, known | keys)
-
-
 def _calendar_items(response):
     if not isinstance(response, dict):
         return []
@@ -635,12 +596,14 @@ def _same_slot(existing, event):
     ) == _start_token(event)
 
 
-def find_existing_event(api_dst, event, calendar_id, source_id="", key_file=None):
-    """Return an existing calendar event that is the same appointment, if one is known."""
+def find_existing_event(api_dst, event, calendar_id, source_id=""):
+    """Return an existing calendar event that is the same appointment, if one is known.
+
+    Always asks Calendar (by extendedProperty, then by time window) rather than trusting a
+    local cache: a cache that outlives a manually deleted event would make recreating that
+    event look like a no-op duplicate instead of actually recreating it.
+    """
     slot, source = event_identity(event, source_id, calendar_id)
-    known = _read_id_set(Path(key_file) if key_file else event_key_file())
-    if (slot and slot in known) or (source and source in known):
-        return {"duplicate": True, "htmlLink": ""}
 
     client = api_dst.getClient()
     for name, value in (("manageAgendaSlot", slot), ("manageAgendaSource", source)):
@@ -832,7 +795,6 @@ def _publish_event_to_calendar(api_dst, event, selected_calendar, source_id=""):
     _stamp_event_identity(event, source_id, selected_calendar)
     existing = find_existing_event(api_dst, event, selected_calendar, source_id)
     if existing:
-        _remember_event_keys(event, source_id, calendar_id=selected_calendar)
         link = existing.get("htmlLink", "") if isinstance(existing, dict) else ""
         event_id = existing.get("id", "") if isinstance(existing, dict) else ""
         return True, {
@@ -846,7 +808,6 @@ def _publish_event_to_calendar(api_dst, event, selected_calendar, source_id=""):
     def _insert(body):
         result = api_dst.publishPost(post={"event": body, "idCal": selected_calendar}, api=api_dst)
         if isinstance(result, dict) and result.get("success"):
-            _remember_event_keys(body, source_id, calendar_id=selected_calendar)
             result.setdefault("calendar_id", selected_calendar)
             result.setdefault("event_id", (result.get("raw_response") or {}).get("id", ""))
         return True, result
