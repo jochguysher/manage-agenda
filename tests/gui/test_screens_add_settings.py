@@ -1,0 +1,156 @@
+"""The Add and Settings screens: the Args the form builds, what it submits, and the
+config.yaml round trip (under conftest's isolated XDG_CONFIG_HOME)."""
+
+from unittest.mock import MagicMock, patch
+
+from manage_agenda.gui.bridge import Bridge
+from manage_agenda.gui.jobs import JobRunner
+from manage_agenda.gui.screens import add, settings
+from manage_agenda.sources import Args
+from manage_agenda.user_config import load_user_config, save_user_config
+
+MAIL = ("gmail", "set", "me@x", "posts")
+CAL = ("gcalendar", "set", "me@x", "posts")
+WEB = ("web/http", "set", "(Enter URLs or leave empty)")
+TEXT = ("text", "set", "(enter filenames or leave empty)")
+
+
+def _rules():
+    rules = MagicMock()
+    rules.selectRule.side_effect = lambda name, _sel="": {"gcalendar": [CAL]}.get(name, [])
+    rules.more = {}
+    return rules
+
+
+def _add_screen(qapp):
+    runner = JobRunner(Bridge())
+    screen = add.AddScreen(runner)
+    with patch.object(add, "load_rules", return_value=_rules()), patch.object(
+        add, "get_add_sources", return_value=([MAIL], [WEB, TEXT])
+    ):
+        screen.refresh()
+    return runner, screen
+
+
+def test_add_screen_lists_mail_accounts_then_web_and_text(qapp):
+    _runner, screen = _add_screen(qapp)
+    assert screen.sources == [MAIL, WEB, TEXT]
+    assert screen.selected_source() == MAIL
+    assert not screen.urls.isEnabled() and not screen.files.isEnabled()
+    screen.source.setCurrentIndex(1)
+    assert screen.urls.isEnabled() and not screen.files.isEnabled()
+    screen.source.setCurrentIndex(2)
+    assert screen.files.isEnabled()
+
+
+def test_add_screen_default_args_match_the_cli_defaults(qapp):
+    _runner, screen = _add_screen(qapp)
+    assert screen.build_args() == Args(interactive=True, debug_log_retention_days=7)
+
+
+def test_add_screen_args_follow_the_form(qapp):
+    _runner, screen = _add_screen(qapp)
+    screen.provider.setCurrentIndex(screen.provider.findData("gemini"))
+    screen.model.setText(" gemini-pro ")
+    screen.output.setCurrentText("file")
+    screen.rule.setCurrentIndex(screen.rule.findData("review"))
+    screen.force_refresh.setChecked(True)
+    screen.dry_run_ledger.setChecked(True)
+    screen.debug_log.setChecked(True)
+    screen.retention.setValue(30)
+    assert screen.build_args() == Args(
+        interactive=True,
+        ai="gemini",
+        model="gemini-pro",
+        output="file",
+        force_refresh=True,
+        rule="review",
+        dry_run_ledger=True,
+        debug_log_extractions=True,
+        debug_log_retention_days=30,
+    )
+
+
+def test_checked_calendars_pre_answer_the_calendar_question(qapp):
+    _runner, screen = _add_screen(qapp)
+    api = MagicMock()
+    screen.calendars.fill(api, [{"id": "c1", "summary": "One"}, {"id": "c2", "summary": "Two"}], ["c2"])
+    args = screen.build_args()
+    assert args.calendar_api is api
+    assert args.calendar_ids == ["c2"] and args.calendar_id == "c2"
+    screen.output.setCurrentText("file")
+    assert not hasattr(screen.build_args(), "calendar_api")
+
+
+def test_run_submits_add_events_cli_with_the_selection(qapp, pump):
+    runner, screen = _add_screen(qapp)
+    with patch.object(add, "add_events_cli") as add_cli:
+        screen.run()
+        assert pump(lambda: not runner.is_busy())
+    add_cli.assert_called_once()
+    args, rules, selected = add_cli.call_args.args
+    assert args.interactive is True and selected == MAIL and rules is screen.rules
+
+    screen.source.setCurrentIndex(1)
+    screen.urls.setText(" http://a http://b ")
+    assert screen.selection_for_run() == "http://a http://b"
+    screen.urls.setText("")
+    assert screen.selection_for_run() == WEB
+    screen.source.setCurrentIndex(2)
+    screen.files.setText("a.txt")
+    assert screen.selection_for_run() == "a.txt"
+
+
+def test_run_without_a_source_does_not_submit(qapp):
+    runner = JobRunner(Bridge())
+    screen = add.AddScreen(runner)
+    screen.run()
+    assert not runner.is_busy()
+    assert screen.message.text()
+
+
+def test_load_calendars_fills_the_picker_with_saved_ids_checked(qapp, pump):
+    runner, screen = _add_screen(qapp)
+    screen._saved_calendar_ids = ["c2"]
+    api = MagicMock()
+    calendars = [{"id": "c1", "summary": "One"}, {"id": "c2", "summary": "Two"}]
+    with patch.object(add, "fetch_calendars", return_value=(api, calendars)):
+        screen.load_calendars()
+        assert pump(lambda: not runner.is_busy())
+    assert screen.calendars.checked_ids() == ["c2"]
+    assert screen.calendars.api is api
+
+
+def test_settings_round_trip(qapp):
+    runner = JobRunner(Bridge())
+    screen = settings.SettingsScreen(runner)
+    save_user_config({"provider": "mistral", "model": "m", "calendar_account": list(CAL), "calendar": ["c1", "c2"], "language": "fr", "other": 1})
+    with patch.object(settings, "load_rules", return_value=_rules()):
+        screen.refresh()
+    assert screen.provider.currentData() == "mistral"
+    assert screen.model.text() == "m"
+    assert screen.account.current_key() == CAL
+    assert screen.calendar_ids.text() == "c1, c2"
+    assert screen.language.currentData() == "fr"
+
+    screen.provider.setCurrentIndex(screen.provider.findData("ollama"))
+    screen.model.setText("")
+    screen.calendar_ids.setText("c3")
+    screen.language.setCurrentIndex(0)
+    screen.save()
+    assert load_user_config() == {"other": 1, "provider": "ollama", "calendar_account": list(CAL), "calendar": ["c3"]}
+    assert screen.message.text()
+
+
+def test_settings_picker_fills_the_ids_field(qapp, pump):
+    runner = JobRunner(Bridge())
+    screen = settings.SettingsScreen(runner)
+    with patch.object(settings, "load_rules", return_value=_rules()):
+        screen.refresh()
+    api = MagicMock()
+    calendars = [{"id": "c1", "summary": "One"}, {"id": "c2", "summary": "Two"}]
+    with patch.object(settings, "fetch_calendars", return_value=(api, calendars)):
+        screen.load_calendars()
+        assert pump(lambda: not runner.is_busy())
+    screen.calendars.item(1).setCheckState(screen.calendars.item(1).checkState().Checked)
+    assert screen.calendar_ids.text() == "c2"

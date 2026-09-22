@@ -1503,4 +1503,157 @@ TRANSLATIONS = {
         "en": 'No account configured for this service.',
         "fr": 'Aucun compte configuré pour ce service.',
     },
+    # --- gui: the Add and Settings screens ---
+    'gui.add.source': {
+        "en": 'Source',
+        "fr": 'Source',
+    },
+    'gui.add.urls': {
+        "en": 'URLs',
+        "fr": 'URL',
+    },
+    'gui.add.urls_placeholder': {
+        "en": 'Space-separated URLs; empty: the links found in ~/notes',
+        "fr": 'URL séparées par des espaces ; vide : les liens trouvés dans ~/notes',
+    },
+    'gui.add.files': {
+        "en": 'Files',
+        "fr": 'Fichiers',
+    },
+    'gui.add.files_placeholder': {
+        "en": 'Space-separated file names; empty: every .txt in the text directory',
+        "fr": 'Noms de fichiers séparés par des espaces ; vide : tous les .txt du dossier texte',
+    },
+    'gui.add.model_box': {
+        "en": 'Model',
+        "fr": 'Modèle',
+    },
+    'gui.add.provider': {
+        "en": 'Provider',
+        "fr": 'Fournisseur',
+    },
+    'gui.add.model': {
+        "en": 'Model name',
+        "fr": 'Nom du modèle',
+    },
+    'gui.add.saved_or_default': {
+        "en": '(saved configuration, or default)',
+        "fr": '(configuration enregistrée, ou défaut)',
+    },
+    'gui.add.calendars': {
+        "en": 'Destination calendars',
+        "fr": 'Calendriers de destination',
+    },
+    'gui.add.account': {
+        "en": 'Account',
+        "fr": 'Compte',
+    },
+    'gui.add.load_calendars': {
+        "en": 'Load calendars',
+        "fr": 'Charger les calendriers',
+    },
+    'gui.add.calendars_note': {
+        "en": 'Check the calendars to write to. None checked: the saved choice is used, or you are asked when the run starts.',
+        "fr": 'Cochez les calendriers à alimenter. Aucun coché : le choix enregistré est utilisé, ou la question est posée au lancement.',
+    },
+    'gui.add.no_calendar_account': {
+        "en": 'No calendar account configured.',
+        "fr": 'Aucun compte de calendrier configuré.',
+    },
+    'gui.add.job_calendars': {
+        "en": 'Loading calendars',
+        "fr": 'Chargement des calendriers',
+    },
+    'gui.add.options': {
+        "en": 'Options',
+        "fr": 'Options',
+    },
+    'gui.add.output': {
+        "en": 'Output',
+        "fr": 'Sortie',
+    },
+    'gui.add.rule_mode': {
+        "en": 'IMAP rule mode',
+        "fr": 'Mode de règle IMAP',
+    },
+    'gui.add.rule_default': {
+        "en": '(default)',
+        "fr": '(défaut)',
+    },
+    'gui.add.dry_run_ledger': {
+        "en": 'Dry-run the ledger maintenance (reconcile, migrate, purge)',
+        "fr": 'Simuler la maintenance du registre (reconcile, migrate, purge)',
+    },
+    'gui.add.debug_log': {
+        "en": 'Keep debug extraction logs (prompts, model replies)',
+        "fr": "Conserver les journaux de debug de l'extraction (prompts, réponses du modèle)",
+    },
+    'gui.add.retention_days': {
+        "en": 'Debug log retention (days)',
+        "fr": 'Rétention des journaux de debug (jours)',
+    },
+    'gui.add.run': {
+        "en": 'Add events',
+        "fr": 'Ajouter les événements',
+    },
+    'gui.add.no_source': {
+        "en": 'Choose a source first.',
+        "fr": "Choisissez d'abord une source.",
+    },
+    'gui.add.job': {
+        "en": 'Adding events',
+        "fr": 'Ajout des événements',
+    },
+    'gui.settings.provider': {
+        "en": 'Provider',
+        "fr": 'Fournisseur',
+    },
+    'gui.settings.unset': {
+        "en": '(not set)',
+        "fr": '(non défini)',
+    },
+    'gui.settings.model': {
+        "en": 'Model',
+        "fr": 'Modèle',
+    },
+    'gui.settings.calendar_account': {
+        "en": 'Calendar account',
+        "fr": 'Compte de calendrier',
+    },
+    'gui.settings.calendars': {
+        "en": 'Calendars',
+        "fr": 'Calendriers',
+    },
+    'gui.settings.calendar_ids': {
+        "en": 'Calendar ids',
+        "fr": 'Identifiants de calendrier',
+    },
+    'gui.settings.calendar_ids_placeholder': {
+        "en": 'Comma-separated calendar ids (filled from the list above)',
+        "fr": 'Identifiants de calendrier séparés par des virgules (remplis depuis la liste ci-dessus)',
+    },
+    'gui.settings.language': {
+        "en": 'Interface language',
+        "fr": "Langue de l'interface",
+    },
+    'gui.settings.language_auto': {
+        "en": '(system locale)',
+        "fr": '(locale du système)',
+    },
+    'gui.settings.restart_note': {
+        "en": 'The language applies the next time manage-agenda starts.',
+        "fr": "La langue s'applique au prochain démarrage de manage-agenda.",
+    },
+    'gui.settings.save': {
+        "en": 'Save',
+        "fr": 'Enregistrer',
+    },
+    'gui.settings.reload': {
+        "en": 'Reload',
+        "fr": 'Recharger',
+    },
+    'gui.settings.saved': {
+        "en": 'Saved.',
+        "fr": 'Enregistré.',
+    },
 }

@@ -965,3 +965,16 @@ class TestRestorableIdentities(unittest.TestCase):
             "c": {},
         }
         self.assertEqual(restorable_identities(), {"a": ["e1", "e2"]})
+
+
+class TestAddEventsCliPreselected(unittest.TestCase):
+    @patch("manage_agenda.sources.run_add_source")
+    @patch("manage_agenda.sources.resolve_add_source")
+    @patch("manage_agenda.sources.select_llm")
+    def test_a_preselected_source_skips_the_choice(self, mock_llm, mock_resolve, mock_run):
+        from manage_agenda.sources import add_events_cli
+
+        rules = MagicMock()
+        add_events_cli(Args(interactive=True), rules, selected="gmail1")
+        mock_resolve.assert_not_called()
+        mock_run.assert_called_once_with(Args(interactive=True), mock_llm.return_value, "gmail1", rules=rules)

@@ -2740,8 +2740,11 @@ def run_add_source(args, model, selected, rules=None):
         process_email_cli(args, model, selected_source=selected, rules=rules)
 
 
-def add_events_cli(args, rules=None):
-    """Add entries to the calendar from various sources (email, web, text)."""
+def add_events_cli(args, rules=None, selected=None):
+    """Add entries to the calendar from various sources (email, web, text).
+
+    `selected` is a source already chosen (a value resolve_add_source() would return); the
+    GUI passes the one picked on its screen, so nothing asks for it again."""
     rules = rules or moduleRules.from_config()
 
     if getattr(args, "debug_log_extractions", False):
@@ -2755,6 +2758,7 @@ def add_events_cli(args, rules=None):
 
     echo(t("sources.selected_model", model_name=model.model_name))
 
-    selected = resolve_add_source(args, rules=rules)
+    if selected is None:
+        selected = resolve_add_source(args, rules=rules)
     if selected:
         run_add_source(args, model, selected, rules=rules)

@@ -21,11 +21,13 @@ from manage_agenda.gui import dialogs
 from manage_agenda.gui.bridge import Bridge, UIRequest
 from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.log_panel import LogPanel
+from manage_agenda.gui.screens.add import AddScreen
 from manage_agenda.gui.screens.auth import AuthScreen
 from manage_agenda.gui.screens.lists import ListsScreen
+from manage_agenda.gui.screens.settings import SettingsScreen
 from manage_agenda.i18n import t
 
-SCREEN_CLASSES = (ListsScreen, AuthScreen)
+SCREEN_CLASSES = (AddScreen, ListsScreen, AuthScreen, SettingsScreen)
 
 CLOSE_WAIT_MS = 5000
 
