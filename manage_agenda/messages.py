@@ -95,6 +95,26 @@ TRANSLATIONS = {
             "tout n'est écrit)"
         ),
     },
+    "cli.add.debug_log_extractions_help": {
+        "en": (
+            "Write per-message debug artifacts (raw LLM prompt/response, extracted event "
+            "JSON - plaintext, includes message content) under MSG_TXT_DIR/log/. Off by "
+            "default: nothing is written there at all unless this is passed. When on, "
+            "files are created 0600 and directories 0700, and old ones are purged per "
+            "--debug-log-retention-days on each run"
+        ),
+        "fr": (
+            "Écrit des artefacts de débogage par message (prompt/réponse LLM bruts, JSON "
+            "de l'événement extrait - texte en clair, contient le contenu du message) sous "
+            "MSG_TXT_DIR/log/. Désactivé par défaut : rien n'y est écrit sans cette option. "
+            "Une fois activé, les fichiers sont créés en 0600 et les dossiers en 0700, et "
+            "les anciens sont purgés selon --debug-log-retention-days à chaque exécution"
+        ),
+    },
+    "cli.add.debug_log_retention_days_help": {
+        "en": "How many days to keep --debug-log-extractions files before purging them",
+        "fr": "Nombre de jours de conservation des fichiers de --debug-log-extractions avant purge",
+    },
     "cli.auth.help": {
         "en": "Auth related operations",
         "fr": "Opérations liées à l'authentification",

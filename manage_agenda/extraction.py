@@ -84,7 +84,7 @@ def extract_json(text):
     return text
 
 
-def get_event_from_llm(model, prompt, post_id, verbose=False):
+def get_event_from_llm(model, prompt, post_id, verbose=False, debug_log_extractions=False):
     """Get event data from an LLM and parse its calendar JSON response."""
     from manage_agenda.exceptions import LLMError
     from manage_agenda.sources import print_first_lines
@@ -97,7 +97,9 @@ def get_event_from_llm(model, prompt, post_id, verbose=False):
     except LLMError as error:
         print(t("extraction.llm_api_error", error=error))
         return None, "ServiceError", time.time() - start_time
-    write_file(f"log/{model.model_name}/{post_id}_llm.txt", llm_response)
+    write_file(
+        f"log/{model.model_name}/{post_id}_llm.txt", llm_response, enabled=debug_log_extractions
+    )
     elapsed_time = time.time() - start_time
     print(
         t(
@@ -120,7 +122,9 @@ def get_event_from_llm(model, prompt, post_id, verbose=False):
         try:
             vcal_json = ast.literal_eval(extract_json(llm_response.replace("\n", " ")))
             write_file(
-                f"log/{model.model_name}/{post_id}_vcal_extracted.txt", json.dumps(vcal_json)
+                f"log/{model.model_name}/{post_id}_vcal_extracted.txt",
+                json.dumps(vcal_json),
+                enabled=debug_log_extractions,
             )
             if verbose:
                 print_first_lines(vcal_json, n=None, title=t("extraction.title_json"))
@@ -177,7 +181,9 @@ def get_event_from_llm_with_retry(model, prompt, post_id, args):
         and not json_error_occurred
         and retries < max_retries
     ):
-        event, vcal_json, elapsed_time = get_event_from_llm(model, prompt, post_id, args.verbose)
+        event, vcal_json, elapsed_time = get_event_from_llm(
+            model, prompt, post_id, args.verbose, getattr(args, "debug_log_extractions", False)
+        )
         if vcal_json == "ServiceError" or _is_occupancy_payload(event):
             return event, vcal_json, elapsed_time
         retries += 1
@@ -274,7 +280,7 @@ def _extract_event_with_llm_retry(
     total_elapsed_time = 0
     while True:
         prompt = _create_llm_prompt(prompt_content, reference_date_time)
-        write_file(f"log/{post_identifier}_prompt.txt", prompt)
+        write_file(f"log/{post_identifier}_prompt.txt", prompt, enabled=getattr(args, "debug_log_extractions", False))
         if args.verbose:
             print_first_lines(prompt, n=None, title=t("extraction.title_prompt"))
 
@@ -308,6 +314,7 @@ def _extract_event_with_llm_retry(
         write_file(
             f"log/{post_identifier}_fail.vcal",
             json.dumps(vcal_json) if vcal_json else "Failed extraction",
+            enabled=getattr(args, "debug_log_extractions", False),
         )
         if not args.interactive:
             return None, vcal_json, total_elapsed_time, False, False, False
@@ -331,6 +338,7 @@ def _extract_event_with_llm_retry(
     write_file(
         f"log/{model.model_name}/{post_identifier}_event_processed.vcal",
         json.dumps(event) if isinstance(event, (dict, list)) else str(event),
+        enabled=getattr(args, "debug_log_extractions", False),
     )
     if isinstance(event, (list, tuple)):
         for idx, single_event in enumerate(event, start=1):
@@ -339,11 +347,13 @@ def _extract_event_with_llm_retry(
                 json.dumps(single_event)
                 if isinstance(single_event, (dict, list))
                 else str(single_event),
+                enabled=getattr(args, "debug_log_extractions", False),
             )
     else:
         write_file(
             f"log/{post_identifier}.vcal",
             json.dumps(event) if isinstance(event, (dict, list)) else str(event),
+            enabled=getattr(args, "debug_log_extractions", False),
         )
     return event, vcal_json, total_elapsed_time, True, False, False
 
@@ -458,6 +468,7 @@ def _process_event_with_llm_and_calendar(
                 write_file(
                     f"log/{model.model_name}/{post_identifier}_{idx}.json",
                     json.dumps(single_event),
+                    enabled=getattr(args, "debug_log_extractions", False),
                 )
                 _display_event_info(
                     single_event, subject_for_print, elapsed_time, model, post_identifier
@@ -516,9 +527,13 @@ def _process_event_with_llm_and_calendar(
                         raise CalendarError(t("extraction.calendar_not_updated"))
                     published = True
                 else:
+                    # Not a debug artifact despite the log/ path: this is the actual "-o file"
+                    # output mode, the user's requested result, not an optional trail - it
+                    # always writes regardless of --debug-log-extractions.
                     write_file(
                         f"log/{model.model_name}/{post_identifier}_{idx}_times.json",
                         json.dumps(single_event),
+                        enabled=True,
                     )
                     calendar_result = f"{post_identifier}_{idx}_times.json"
                     published = True
@@ -544,7 +559,7 @@ def _process_event_with_llm_and_calendar(
                             )
                         )
                     success = True
-                    write_file(file_name, json.dumps(single_event))
+                    write_file(file_name, json.dumps(single_event), enabled=getattr(args, "debug_log_extractions", False))
 
         print(t("extraction.success_debug", success=success))
         if success:

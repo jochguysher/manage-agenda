@@ -164,10 +164,24 @@ evaluate.help = t("cli.evaluate.help")
     default=False,
     help=t("cli.add.dry_run_ledger_help"),
 )
+@click.option(
+    "--debug-log-extractions",
+    "debug_log_extractions",
+    is_flag=True,
+    default=False,
+    help=t("cli.add.debug_log_extractions_help"),
+)
+@click.option(
+    "--debug-log-retention-days",
+    "debug_log_retention_days",
+    type=int,
+    default=7,
+    help=t("cli.add.debug_log_retention_days_help"),
+)
 @click.pass_context
 def add(
     ctx, interactive, source, ai, model, force_refresh, destination, output, rule, reconfigure,
-    dry_run_ledger,
+    dry_run_ledger, debug_log_extractions, debug_log_retention_days,
 ):
     verbose = ctx.obj["VERBOSE"]
     args = Args(
@@ -184,6 +198,8 @@ def add(
         rule=rule,
         reconfigure=reconfigure,
         dry_run_ledger=dry_run_ledger,
+        debug_log_extractions=debug_log_extractions,
+        debug_log_retention_days=debug_log_retention_days,
     )
 
     add_events_cli(args)

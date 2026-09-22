@@ -47,6 +47,15 @@ class Args:
     # functions, each a new place to miss a spot, for a request that asked for the simpler
     # option.
     dry_run_ledger: bool = False
+    # Off by default: MSG_TXT_DIR/log/ debug artifacts (raw LLM prompt/response, extracted
+    # event JSON) hold plaintext message content and, being written on every processed
+    # message, grow without bound (see docs/investigation-limite1.md - "state bounded by
+    # current activity" is a hard constraint of this whole redesign). write_file() (base.py)
+    # writes nothing at all unless the caller passes enabled=True from this flag - no
+    # directory is even created. When True, purge_expired_log_files() (base.py) is also run
+    # once per add_events_cli() call to enforce debug_log_retention_days.
+    debug_log_extractions: bool = False
+    debug_log_retention_days: int = 7
 
 
 def get_add_sources(rules=None):
@@ -1791,7 +1800,7 @@ def _process_common_flow(
                 continue
 
             # 4. Save & Print (Common)
-            write_file(f"log/{post_id}_text.txt", content_text)
+            write_file(f"log/{post_id}_text.txt", content_text, enabled=getattr(args, "debug_log_extractions", False))
             if args.verbose:
                 print_first_10_lines(content_text, "content")
 
@@ -2210,6 +2219,13 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
 def add_events_cli(args, rules=None):
     """Add entries to the calendar from various sources (email, web, text)."""
     rules = rules or moduleRules.from_config()
+
+    if getattr(args, "debug_log_extractions", False):
+        from manage_agenda.base import purge_expired_log_files
+
+        purged = purge_expired_log_files(args.debug_log_retention_days)
+        if purged:
+            logging.info(f"Purged {purged} expired debug log file(s) under MSG_TXT_DIR/log/.")
 
     model = select_llm(args)
 

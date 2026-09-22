@@ -21,11 +21,23 @@ class TestUtilsBase(unittest.TestCase):
         # msg_txt_dir() is resolved fresh on every call (see manage_agenda.config), so it's
         # patched as the function base.py imported, not a module-level constant.
         with patch("manage_agenda.base.msg_txt_dir", return_value="/fake/dir/"):
-            write_file(filename, content)
+            write_file(filename, content, enabled=True)
 
         mock_open_file.assert_called_once_with("/fake/dir/test.txt", "w")
         mock_open_file().write.assert_called_once_with(content)
         mock_logging_info.assert_called_once_with(f"File written: {filename}")
+
+    @patch("builtins.open", new_callable=mock_open)
+    def test_write_file_does_nothing_when_not_enabled(self, mock_open_file):
+        """enabled defaults to False - no directory created, no file opened, no I/O at all.
+        This is the safety property --debug-log-extractions being off is supposed to
+        guarantee (see sources.Args.debug_log_extractions): a caller that forgets to pass
+        enabled=True fails safe - closed, not open."""
+        with patch("manage_agenda.base.msg_txt_dir", return_value="/fake/dir/"):
+            result = write_file("test.txt", "content")
+
+        self.assertFalse(result)
+        mock_open_file.assert_not_called()
 
     @patch("builtins.open", side_effect=OSError("Disk full"))
     @patch("logging.error")
@@ -37,7 +49,7 @@ class TestUtilsBase(unittest.TestCase):
         content = "This is a test."
 
         with patch("manage_agenda.base.msg_txt_dir", return_value="/fake/dir/"):
-            write_file(filename, content)
+            write_file(filename, content, enabled=True)
 
         mock_open_file.assert_called_once_with("/fake/dir/test.txt", "w")
         self.assertIn("Error writing file", mock_logging_error.call_args[0][0])

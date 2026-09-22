@@ -2,6 +2,7 @@
 Base utility functions for manage-agenda.
 """
 
+import datetime
 import logging
 import os
 import sys
@@ -14,13 +15,30 @@ LOGDIR = ""
 
 
 # --- File I/O ---
-def write_file(filename, content):
-    """Writes content to a file.
+def write_file(filename, content, enabled=False):
+    """Writes content to a file under msg_txt_dir() - in practice, always a `log/...` debug
+    artifact (every current caller passes one; see docs/investigation-limite1.md).
+
+    `enabled` defaults to False, meaning: no directory created, no file written, no I/O
+    attempted at all. Callers pass `enabled=args.debug_log_extractions` (see sources.Args) -
+    this content is plaintext message/event data, written once per processed message, so it
+    must stay off unless a user explicitly opts in, not merely unlisted/undocumented (see
+    docs/investigation-limite1.md - a debug flag threaded through every call site, not a
+    single "dry_run"-shaped toggle, because unlike the ledger's dry-run this one is meant to
+    stay on for a whole debugging session, and because a caller that forgets to pass
+    enabled=True fails safe - closed, not open).
+
+    When enabled, the created directory is chmod'd 0700 and the file 0600 - this holds real
+    email/event content, so it must never be left group/world-readable regardless of the
+    process umask.
 
     Args:
         filename (str): The name of the file.
         content (str): The content to write.
+        enabled (bool): Must be explicitly True for anything to be written.
     """
+    if not enabled:
+        return False
     try:
         # Resolved fresh on every call, not a module-level constant - see
         # manage_agenda.config.data_dir()'s docstring for why.
@@ -63,8 +81,10 @@ def write_file(filename, content):
         # Ensure the directory exists
         # Catch specific exceptions related to directory creation to distinguish
         # from other types of errors
+        dir_path = os.path.dirname(full_path)
         try:
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            os.makedirs(dir_path, exist_ok=True)
+            _chmod_debug_log_tree(default_data_dir, dir_path)
         except OSError as dir_error:
             # If directory creation fails, we log it but continue to try opening the file
             # This allows tests with fake directories to work while still providing security
@@ -72,11 +92,100 @@ def write_file(filename, content):
 
         with open(full_path, "w") as file:
             file.write(content)
+        try:
+            os.chmod(full_path, 0o600)
+        except OSError as chmod_error:
+            # Same "log but continue" reasoning as the mkdir above - e.g. `open` mocked out
+            # in a test with no real file underneath full_path to chmod.
+            logging.warning(f"Could not chmod {full_path} to 0600: {chmod_error}")
         logging.info(f"File written: {filename}")
         return True
     except Exception as e:
         logging.error(f"Error writing file {filename}: {e}")
         return False
+
+
+def _chmod_debug_log_tree(default_data_dir, dir_path):
+    """chmod 0700 every directory from default_data_dir/log down to dir_path (inclusive) -
+    never default_data_dir itself, which also holds the user's real .txt source files and
+    must keep its normal permissions. A no-op if dir_path isn't under .../log at all (a
+    future caller passing enabled=True with some other path is left alone, not assumed to
+    be the debug tree)."""
+    log_root = os.path.join(default_data_dir, "log")
+    try:
+        real_dir = os.path.realpath(dir_path)
+        real_log_root = os.path.realpath(log_root)
+        common = os.path.commonpath([real_dir, real_log_root])
+    except (OSError, ValueError):
+        return
+    if common != real_log_root:
+        return
+    try:
+        os.chmod(log_root, 0o700)
+        relative = os.path.relpath(real_dir, real_log_root)
+        if relative == os.curdir:
+            return
+        current = log_root
+        for part in Path(relative).parts:
+            current = os.path.join(current, part)
+            os.chmod(current, 0o700)
+    except OSError as chmod_error:
+        # Same "log but continue" reasoning as write_file()'s own mkdir/chmod guards - e.g.
+        # os.makedirs above only partially succeeded, leaving a directory in this chain
+        # missing. Must not escape as an uncaught exception: write_file()'s outer
+        # `except Exception` would turn that into a failed write, not a permissions warning.
+        logging.warning(f"Could not chmod debug log directory under {log_root}: {chmod_error}")
+
+
+def purge_expired_log_files(retention_days, today=None):
+    """Delete every file under msg_txt_dir()/log/ older than `retention_days`, except a
+    `*_times.json` file, then remove any subdirectory left empty by that. Only meaningful
+    while --debug-log-extractions is on (write_file() writes nothing there otherwise, so
+    there is nothing to purge) - the caller decides when to run this (see add_events_cli's
+    debug_log_extractions branch), not this function, which is a plain, unconditional sweep.
+
+    The `*_times.json` exclusion exists because that exact filename shape is not always a
+    debug artifact: _process_event_with_llm_and_calendar (extraction.py) writes
+    log/{model}/{post}_{idx}_times.json unconditionally (enabled=True, not gated by
+    --debug-log-extractions) as the actual result of `-o file` mode - the user's requested
+    output, not an optional trail. A second, gated `_times.json` write (a plain debug
+    duplicate, no model subdirectory) shares the same suffix and cannot be told apart from
+    the first by name alone; excluding the whole suffix is the conservative choice - it
+    never deletes real output, at the cost of leaving that one debug duplicate unpurged too.
+
+    Returns the number of files deleted.
+    """
+    log_root = Path(msg_txt_dir()) / "log"
+    if not log_root.is_dir():
+        return 0
+    today = today or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = today - datetime.timedelta(days=retention_days)
+    deleted = 0
+    for root, _dirs, files in os.walk(log_root, topdown=False):
+        for name in files:
+            if name.endswith("_times.json"):
+                continue
+            file_path = Path(root) / name
+            try:
+                mtime = datetime.datetime.fromtimestamp(
+                    file_path.stat().st_mtime, tz=datetime.timezone.utc
+                )
+            except OSError:
+                continue
+            if mtime < cutoff:
+                try:
+                    file_path.unlink()
+                    deleted += 1
+                except OSError as error:
+                    logging.warning(f"Could not purge expired log file {file_path}: {error}")
+        # Bottom-up (topdown=False), so a directory only just emptied by this same pass is
+        # already empty by the time we get here - safe to try removing every directory and
+        # let rmdir fail harmlessly on any that still has content.
+        try:
+            Path(root).rmdir()
+        except OSError:
+            pass
+    return deleted
 
 
 def setup_logging(verbose: bool = False) -> None:
