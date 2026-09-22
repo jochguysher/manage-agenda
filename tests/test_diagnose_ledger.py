@@ -3,6 +3,7 @@ convention as the probe scripts, which also aren't imported as a package)."""
 
 import importlib.util
 import json
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,12 @@ from unittest.mock import MagicMock
 import googleapiclient.errors
 import pytest
 
-from manage_agenda.sources import CalendarScope
+from manage_agenda.sources import (
+    EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED,
+    EXIT_CALENDAR_LIST_UNREADABLE,
+    EXIT_NO_CALENDAR_ACCOUNT,
+    CalendarScope,
+)
 
 _SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "diagnose_ledger.py"
 _spec = importlib.util.spec_from_file_location("diagnose_ledger", _SCRIPT_PATH)
@@ -247,13 +253,60 @@ class TestConnectCalendar:
         assert api is rules.selectRuleInteractive.return_value
         assert config.read_bytes() == before
 
-    def test_no_saved_account_exits_rather_than_picking_one(self, tmp_path):
+    def test_no_saved_account_and_one_configured_uses_it(self, tmp_path):
+        """The same rule as migrate-ledger and reconcile (select_calendar_account)."""
         rules = MagicMock()
+        key = ("gcalendar", "set", "only@example.com")
+        rules.more = {key: {"x": 1}}
+        rules.selectRule.return_value = [key]
 
-        with pytest.raises(SystemExit):
+        api = diagnose_ledger.connect_calendar(False, rules, config_path=tmp_path / "missing.yaml")
+
+        rules.selectRuleInteractive.assert_not_called()
+        rules.readConfigSrc.assert_called_once_with("", key, {"x": 1})
+        assert api is rules.readConfigSrc.return_value
+
+    def test_no_saved_account_and_several_configured_exits_rather_than_picking_one(self, tmp_path, capsys):
+        rules = MagicMock()
+        rules.selectRule.return_value = [("gcalendar", "set", "a@example.com"), ("gcalendar", "set", "b@example.com")]
+
+        with pytest.raises(SystemExit) as raised:
             diagnose_ledger.connect_calendar(False, rules, config_path=tmp_path / "missing.yaml")
 
+        assert raised.value.code == EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED
         rules.readConfigSrc.assert_not_called()
+        rules.selectRuleInteractive.assert_not_called()
+        captured = capsys.readouterr()
+        assert "-i" in captured.err and "a@example.com" in captured.err
+        assert captured.out == ""  # stdout is the report's channel: nothing on it
+
+    def test_no_account_at_all_exits_with_the_no_account_code(self, tmp_path):
+        rules = MagicMock()
+        rules.selectRule.return_value = []
+
+        with pytest.raises(SystemExit) as raised:
+            diagnose_ledger.connect_calendar(False, rules, config_path=tmp_path / "missing.yaml")
+
+        assert raised.value.code == EXIT_NO_CALENDAR_ACCOUNT
+        rules.readConfigSrc.assert_not_called()
+
+
+class TestMainExitCodes:
+    def test_an_unreadable_calendar_list_exits_with_its_code(self, tmp_path, monkeypatch):
+        ledger = tmp_path / "ledger.json"
+        ledger.write_text(json.dumps({"messages": {"msg-1": {"events": [], "status": "created"}}}), encoding="utf-8")
+        client = MagicMock()
+        client.calendarList.return_value.list.return_value.execute.side_effect = RuntimeError("unavailable")
+        api = MagicMock(src=("gcalendar", "set", "me@example.com"))
+        api.getClient.return_value = client
+        monkeypatch.setattr(diagnose_ledger, "connect_calendar", lambda interactive, rules: api)
+        monkeypatch.setattr("socialModules.moduleRules.moduleRules.from_config", classmethod(lambda cls: MagicMock()))
+        monkeypatch.setattr(sys, "argv", ["diagnose_ledger.py", "--ledger", str(ledger), "--tests-dir", str(tmp_path)])
+
+        with pytest.raises(SystemExit) as raised:
+            diagnose_ledger.main()
+
+        assert raised.value.code == EXIT_CALENDAR_LIST_UNREADABLE
 
 
 class TestRender(unittest.TestCase):

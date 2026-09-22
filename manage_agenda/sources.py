@@ -27,6 +27,7 @@ from manage_agenda.extraction import (
     _parse_iso_datetime,
     _process_event_with_llm_and_calendar,
 )
+from manage_agenda.exceptions import CalendarAccountChoiceRequired
 from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 from manage_agenda.web import reduce_html
@@ -1109,10 +1110,38 @@ def record_ledger_migration(account_key, path=None, now=None):
     temporary.replace(path)
 
 
+# Exit codes of the ledger maintenance commands (`migrate-ledger`, `reconcile`) and of
+# scripts/diagnose_ledger.py when they stop before doing anything - see
+# docs/investigation-limite1.md §12. 0 means the pass ran (dry or real). 1 and 2 are not
+# used on purpose: 1 is what an uncaught Python error produces, 2 is click's own code for a
+# usage error (unknown option, ...), so a script can tell each stop apart from both.
+EXIT_NO_CALENDAR_ACCOUNT = 3  # no account could be connected (none configured, not authorized)
+EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED = 4  # several accounts, none saved, no -i: nothing connected
+EXIT_LEDGER_MIGRATION_REQUIRED = 5  # reconcile: no migrate-ledger marker for this account
+EXIT_CALENDAR_LIST_UNREADABLE = 6  # migrate-ledger / diagnose: this account's calendarList failed
+
+
+def _connect_ledger_account(args, rules, no_account_message):
+    """select_calendar_account() for a ledger maintenance command: (api, 0) once connected,
+    else (None, exit code) with exactly one message printed - the one asking for -i when
+    several accounts are configured and none saved (CalendarAccountChoiceRequired, nothing
+    else printed), or `no_account_message` after the connection's own diagnostic."""
+    try:
+        api = select_calendar_account(args, rules)
+    except CalendarAccountChoiceRequired as error:
+        print(error)
+        return None, EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED
+    if not api or ledger_migration_account_key(args) is None:
+        print(no_account_message)
+        return None, EXIT_NO_CALENDAR_ACCOUNT
+    return api, 0
+
+
 def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
     """The explicit `migrate-ledger` command: migrate_legacy_ledger_entries() for the calendar
-    account select_calendar_account() connects - the saved one `add` uses, or with -i any
-    configured account, the saved one never being changed - then - on a real pass
+    account select_calendar_account() connects - the saved one `add` uses, else the only
+    configured one, or with -i any configured account, the saved one never being changed -
+    then - on a real pass
     only - stamp that account's marker so `add` starts running reconcile/migrate/purge
     automatically from then on (see process_email_cli and docs/investigation-limite1.md §12).
 
@@ -1133,22 +1162,21 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
     command for their own account later still migrates them. If this account's calendar list
     can't be read, nothing runs and nothing is stamped.
 
-    Returns True when the pass ran (dry or real), False when nothing could run."""
+    Returns 0 when the pass ran (dry or real), else the EXIT_* code of what stopped it
+    (EXIT_NO_CALENDAR_ACCOUNT, EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED,
+    EXIT_CALENDAR_LIST_UNREADABLE) - the command's exit code, with one message printed."""
     rules = rules or moduleRules.from_config()
-    if not select_calendar_account(args, rules):
-        print(t("sources.migrate_ledger_no_calendar"))
-        return False
+    _api, code = _connect_ledger_account(args, rules, t("sources.migrate_ledger_no_calendar"))
+    if code:
+        return code
     account_key = ledger_migration_account_key(args)
-    if account_key is None:
-        print(t("sources.migrate_ledger_no_calendar"))
-        return False
     # Resolved once, before anything runs: without this account's calendar list, nothing can
     # be told apart as "mine", so a pass would migrate nothing - and stamping the marker on
     # that would open the gate for `add` with no migration ever done. Abort instead.
     args.calendar_scope = calendar_scope_for(args, rules)
     if args.calendar_scope.owned_ids is None:
         print(t("sources.migrate_ledger_calendar_list_failed", account=account_key))
-        return False
+        return EXIT_CALENDAR_LIST_UNREADABLE
     dry_run = bool(getattr(args, "dry_run_ledger", False))
     report = {}
     count = migrate_legacy_ledger_entries(args, path=path, dry_run=dry_run, report=report)
@@ -1161,20 +1189,21 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
     }
     if dry_run:
         print(t("sources.migrate_ledger_dry_run_done", **details))
-        return True
+        return 0
     record_ledger_migration(account_key, path=marker_path)
     logging.info(
         f"migrate-ledger: {count} ref(s) migrated for {account_key}, {details['skipped']} "
         f"skipped, {details['attached']} legacy 'primary' ref(s) attached; marker stamped."
     )
     print(t("sources.migrate_ledger_done", **details))
-    return True
+    return 0
 
 
 def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
     """The `reconcile` command: the ledger side of `add`, and nothing else - for the calendar
-    account select_calendar_account() connects (the saved one `add` uses, or with -i any
-    configured account, the saved one never being changed), behind the same gate
+    account select_calendar_account() connects (the saved one `add` uses, else the only
+    configured one, or with -i any configured account, the saved one never being changed),
+    behind the same gate
     (ledger_migrated_for). No mail account is opened: no scan, no extraction, no LLM, no
     Calendar publish, no mailbox marking, no remember_handled_mail.
 
@@ -1192,23 +1221,22 @@ def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
     The requeue un-marking (_requeue_pending_imap_messages) is a mailbox action, so it is not
     run here: an entry this command moves to pending_requeue is un-marked by the next `add`.
 
-    Returns True when the pass ran (dry or real), False when nothing could run - no calendar
-    account, or the gate still closed (no Calendar call at all then)."""
+    Returns 0 when the pass ran (dry or real), else the EXIT_* code of what stopped it
+    (EXIT_NO_CALENDAR_ACCOUNT, EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED, or
+    EXIT_LEDGER_MIGRATION_REQUIRED for the gate still closed - no Calendar call at all then)
+    - the command's exit code, with one message printed."""
     rules = rules or moduleRules.from_config()
-    if not select_calendar_account(args, rules):
-        print(t("sources.reconcile_no_calendar"))
-        return False
+    _api, code = _connect_ledger_account(args, rules, t("sources.reconcile_no_calendar"))
+    if code:
+        return code
     account_key = ledger_migration_account_key(args)
-    if account_key is None:
-        print(t("sources.reconcile_no_calendar"))
-        return False
     if not ledger_migrated_for(account_key):
         logging.warning(
             f"Ledger not migrated yet for calendar account {account_key}: reconcile skipped. Run "
             "'manage-agenda migrate-ledger --dry-run-ledger', then 'manage-agenda migrate-ledger'."
         )
         print(t("sources.reconcile_migration_required", account=account_key))
-        return False
+        return EXIT_LEDGER_MIGRATION_REQUIRED
     # Same as process_email_cli: which refs are this account's. An unreadable calendar list
     # doesn't abort here (unlike migrate-ledger) - the trio already degrades safely without it.
     args.calendar_scope = calendar_scope_for(args, rules)
@@ -1227,7 +1255,7 @@ def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
         f"{purged_count} ledger entry(ies) purged for {account_key}."
     )
     print(t("sources.reconcile_dry_run_done" if dry_run else "sources.reconcile_done", **details))
-    return True
+    return 0
 
 
 def list_restorable_identities_cli(path=None):

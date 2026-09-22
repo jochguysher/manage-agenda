@@ -7,7 +7,7 @@ import pickle
 from socialModules.configMod import safe_get, select_from_list
 from socialModules.moduleRules import moduleRules
 
-from manage_agenda.exceptions import CalendarError
+from manage_agenda.exceptions import CalendarAccountChoiceRequired, CalendarError
 from manage_agenda.i18n import t
 from manage_agenda.interactive import select_many, select_one
 
@@ -55,11 +55,12 @@ def select_calendar_account(args, rules=None, config_path=None):
     `-i` (args.interactive) ALWAYS offers the choice, even with a calendar_account saved:
     migrating or reconciling another account's refs is exactly what -i is for. Without -i: the
     saved calendar_account `add` uses; with none saved, the only configured gcalendar account
-    when there is exactly one; with several configured, nothing is guessed - a message asks
-    for -i and None is returned before any account is connected (readConfigSrc can trigger
-    OAuth, so "no Calendar call" means stopping before it, not just skipping getClient()).
-    Never "the first configured account": ledger maintenance marks an account as migrated,
-    and that must never land on an account picked by configuration order.
+    when there is exactly one; with several configured, nothing is guessed -
+    CalendarAccountChoiceRequired is raised (its message asks for -i; the caller prints it
+    and nothing else) before any account is connected (readConfigSrc can trigger OAuth, so
+    "no Calendar call" means stopping before it, not just skipping getClient()). Never "the
+    first configured account": ledger maintenance marks an account as migrated, and that must
+    never land on an account picked by configuration order.
 
     Never writes the user config, unlike prepare_calendar(): choosing an account for one
     maintenance run must never change the account `add` publishes to. No destination
@@ -78,13 +79,12 @@ def select_calendar_account(args, rules=None, config_path=None):
         if not account_name:
             configured = list(rules.selectRule(["gcalendar"], "") or [])
             if len(configured) > 1:
-                print(
+                raise CalendarAccountChoiceRequired(
                     t(
                         "connections.calendar_account_choice_required",
                         accounts=", ".join(calendar_account_key(src) or str(src) for src in configured),
                     )
                 )
-                return None
             if configured:
                 account_name = configured[0]
         if account_name:

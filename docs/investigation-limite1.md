@@ -671,7 +671,9 @@ refuses to do any ledger maintenance until it has been done.
 - Connects to one calendar account:
   - without `-i`: the saved `calendar_account` (the one `add` uses); with none saved, the
     only configured `gcalendar` account when there is exactly one; with several configured,
-    nothing is guessed: a message naming the accounts asks for `-i`, and the command stops
+    nothing is guessed: one message naming the accounts asks for `-i` (and nothing else is
+    printed - `select_calendar_account` raises `CalendarAccountChoiceRequired`, so the
+    command doesn't add its generic "no calendar account" line), and the command stops
     before connecting any account (`readConfigSrc` can trigger OAuth) - no Calendar call,
     no ledger write, no marker. Never "the first configured account": a migration marker
     must not land on an account picked by configuration order;
@@ -698,6 +700,20 @@ refuses to do any ledger maintenance until it has been done.
   migrate still runs inside every automatic `add` afterwards, always before purge, and
   retries them there.
 - No calendar account available → nothing runs, nothing is stamped.
+
+**Exit codes** (`sources.EXIT_*`; `migrate-ledger`, `reconcile` and
+`scripts/diagnose_ledger.py` share them, so a script can tell each stop apart). The two
+commands' functions return the code and the click wrapper exits with it; the diagnostic
+calls `sys.exit` with the same values. 0: the pass ran (dry or real). 1 and 2 are left to
+what already produces them - an uncaught Python error, and click's usage error (unknown
+option) - so they are never used for a deliberate stop.
+
+| code | constant | when |
+|---|---|---|
+| 3 | `EXIT_NO_CALENDAR_ACCOUNT` | no account could be connected: none configured, not authorized, no usable account key |
+| 4 | `EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED` | several accounts configured, none saved, no `-i` - nothing connected |
+| 5 | `EXIT_LEDGER_MIGRATION_REQUIRED` | `reconcile` only: no `migrate-ledger` marker for this account - no Calendar call |
+| 6 | `EXIT_CALENDAR_LIST_UNREADABLE` | `migrate-ledger` and the diagnostic: this account's calendar list could not be read - nothing migrated, nothing stamped |
 
 **The marker is per calendar account**, in `data_dir()/ledger_migration.json`
 (`{"accounts": {key: first-run timestamp}}`, the same shape as `imap_marker_history.json`).
@@ -799,8 +815,10 @@ deleted event, almost at once.
    `systemctl --user list-timers --all`, `which -a manage-agenda`). With the editable install,
    they run the working tree, not a frozen release.
 2. Back up `~/.local/share/manage-agenda`, `~/.config/manage-agenda` and `MSG_TXT_DIR/log`.
-3. `scripts/diagnose_ledger.py` (the saved calendar account by default; `-i` always offers
-   the choice and, like everything this script does, changes nothing), then
+3. `scripts/diagnose_ledger.py` (the same account rule as the two commands, through
+   `select_calendar_account`: the saved calendar account by default, else the only
+   configured one, a stop asking for `-i` with several; `-i` always offers the choice and,
+   like everything this script does, changes nothing; same exit codes), then
    clean up the ledger by hand. It reports `calendar_inaccessible` for refs that aren't this
    account's, without querying them. Those are **not** `not_found` and not a cleanup signal:
    rerun with `-i` for the other account. A real entry of another account never shows up as
@@ -929,8 +947,12 @@ additions only, and existing keys were preserved (§7).
   call; after migration it runs and forgets the entry.
 - `tests/test_diagnose_ledger.py`: `calendar_inaccessible` for each of the three reasons,
   never queried; `not_found` only on this account's own calendar; the saved account is read
-  back from its list form; no saved account and no `-i` → exit, not a guess; with an account
-  saved, `-i` still offers the choice and leaves the config file byte-identical.
+  back from its list form; no saved account and no `-i` → the only configured account, or
+  with several an exit with `EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED` (message on stderr,
+  nothing on stdout, `readConfigSrc` never called), or with none
+  `EXIT_NO_CALENDAR_ACCOUNT`; an unreadable calendar list exits `main()` with
+  `EXIT_CALENDAR_LIST_UNREADABLE`; with an account saved, `-i` still offers the choice and
+  leaves the config file byte-identical.
 - `tests/test_connections.py`: the saved rule key read back as a list still resolves.
 - Sync tokens (`tests/test_event_deletion_detection.py`, and end to end through `add` in
   `tests/test_ledger_migration_gate.py`):
@@ -977,8 +999,14 @@ additions only, and existing keys were preserved (§7).
 - Nothing saved, no `-i` (`TestLedgerAccountSelectionWithoutSavedAccount`, same setup): with
   one configured account, `migrate-ledger` and `reconcile` use it (never the interactive
   chooser, still nothing saved); with two configured, both commands print the message naming
-  the accounts and `-i`, `readConfigSrc` is never called, no Calendar call is made, and the
-  ledger, the token file and the marker file are untouched.
+  the accounts and `-i` - and only that message, no "no calendar account available" line -
+  exit with `EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED`, `readConfigSrc` is never called, no
+  Calendar call is made, and the ledger, the token file and the marker file are untouched.
+- Exit codes: no calendar account → `EXIT_NO_CALENDAR_ACCOUNT` for both commands; the gate
+  closed (no marker, or another account's) → `EXIT_LEDGER_MIGRATION_REQUIRED` from
+  `reconcile`; an unreadable calendar list → `EXIT_CALENDAR_LIST_UNREADABLE` from
+  `migrate-ledger`, through the real CLI; `tests/test_cli.py`: each wrapper exits with
+  whatever code its function returns, and 0 stays 0.
 - Migration ignores the bootstrap window (`tests/test_migration.py`): a legacy ref recorded
   200 days ago for an event ending in 2030 is patched and gets its `event_end`; a purge run
   right after keeps the entry, while the same entry without the backfill is purged.

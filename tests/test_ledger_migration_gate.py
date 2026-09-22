@@ -16,6 +16,10 @@ from click.testing import CliRunner
 from manage_agenda import cli
 from manage_agenda.extraction import calendar_sync_state_file, migrate_one_legacy_event
 from manage_agenda.sources import (
+    EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED,
+    EXIT_CALENDAR_LIST_UNREADABLE,
+    EXIT_LEDGER_MIGRATION_REQUIRED,
+    EXIT_NO_CALENDAR_ACCOUNT,
     Args,
     CalendarScope,
     _extract_event_refs,
@@ -316,8 +320,18 @@ class TestMigrateLedgerCommand:
             patch("manage_agenda.sources.moduleRules"),
             patch("manage_agenda.sources.select_calendar_account", return_value=False),
         ):
-            assert migrate_ledger_cli(args) is False
+            assert migrate_ledger_cli(args) == EXIT_NO_CALENDAR_ACCOUNT
 
+        assert not ledger_migration_file().exists()
+
+    def test_no_calendar_account_is_the_commands_exit_code(self):
+        with (
+            patch("manage_agenda.sources.moduleRules"),
+            patch("manage_agenda.sources.select_calendar_account", return_value=None),
+        ):
+            result = CliRunner().invoke(cli.cli, ["migrate-ledger"])
+
+        assert result.exit_code == EXIT_NO_CALENDAR_ACCOUNT, result.output
         assert not ledger_migration_file().exists()
 
     def test_a_cancelled_event_is_never_patched_and_stays_unmigrated(self):
@@ -351,7 +365,7 @@ class TestAddAfterMigration:
             patch("manage_agenda.sources.moduleRules"),
             patch("manage_agenda.sources.select_calendar_account", side_effect=_prepare_calendar_with(api)),
         ):
-            assert migrate_ledger_cli(Args(interactive=False)) is True
+            assert migrate_ledger_cli(Args(interactive=False)) == 0
 
         _mock_flow, handled = _run_add(api, None)
 
@@ -528,11 +542,21 @@ class TestOtherCalendarAccountsEntries:
             patch("manage_agenda.sources.moduleRules"),
             patch("manage_agenda.sources.select_calendar_account", side_effect=_prepare_calendar_with(api)),
         ):
-            assert migrate_ledger_cli(Args(interactive=False)) is False
+            assert migrate_ledger_cli(Args(interactive=False)) == EXIT_CALENDAR_LIST_UNREADABLE
 
         assert client.get_calls == [] and client.patch_calls == []
         assert ledger.read_bytes() == before
         assert not ledger.with_suffix(".json.bak").exists()
+        assert not ledger_migrated_for(ACCOUNT_KEY)
+
+    def test_an_unreadable_calendar_list_is_the_commands_exit_code(self):
+        _write_ledger({"msg-1": _entry(_ref("cal-1", "ev-1"))})
+        client = FakeCalendarClient(events_by_id={("cal-1", "ev-1"): _live("ev-1")}, calendar_ids=None)
+
+        result = _migrate(_calendar_api(client))
+
+        assert result.exit_code == EXIT_CALENDAR_LIST_UNREADABLE, result.output
+        assert ACCOUNT_KEY in result.output
         assert not ledger_migrated_for(ACCOUNT_KEY)
 
 
@@ -939,7 +963,7 @@ class TestReconcileCommand:
 
         result, spies, rules = _reconcile(_calendar_api(client))
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == EXIT_LEDGER_MIGRATION_REQUIRED, result.output
         assert client.list_calls == [] and client.get_calls == []
         assert ledger.read_bytes() == before
         assert not ledger.with_suffix(".json.bak").exists()
@@ -953,8 +977,9 @@ class TestReconcileCommand:
         record_ledger_migration(OTHER_KEY)
         client = FakeCalendarClient()
 
-        _reconcile(_calendar_api(client))
+        result, _spies, _rules = _reconcile(_calendar_api(client))
 
+        assert result.exit_code == EXIT_LEDGER_MIGRATION_REQUIRED, result.output
         assert client.list_calls == []
         assert ledger.read_bytes() == before
 
@@ -969,7 +994,7 @@ class TestReconcileCommand:
         ):
             result = CliRunner().invoke(cli.cli, ["reconcile"])
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == EXIT_NO_CALENDAR_ACCOUNT, result.output
         assert ledger.read_bytes() == before
 
     def test_migrate_retries_run_before_purge_like_in_add(self):
@@ -1169,9 +1194,11 @@ class TestLedgerAccountSelectionWithoutSavedAccount:
             "migrate-ledger", saved_api=_calendar_api(client), configured=(ACCOUNT_SRC, OTHER_SRC)
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED, result.output
         assert "-i" in result.output
         assert ACCOUNT_KEY in result.output and OTHER_KEY in result.output
+        # One message only: the generic "no calendar account available" line would contradict it.
+        assert "No calendar account available" not in result.output
         rules.readConfigSrc.assert_not_called()  # no account connected at all
         rules.selectRuleInteractive.assert_not_called()
         assert client.get_calls == [] and client.patch_calls == []
@@ -1210,8 +1237,9 @@ class TestLedgerAccountSelectionWithoutSavedAccount:
             "reconcile", saved_api=_calendar_api(client, src=OTHER_SRC), configured=(ACCOUNT_SRC, OTHER_SRC)
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED, result.output
         assert "-i" in result.output
+        assert "No calendar account available" not in result.output
         rules.readConfigSrc.assert_not_called()
         rules.selectRuleInteractive.assert_not_called()
         assert client.list_calls == [] and client.get_calls == []

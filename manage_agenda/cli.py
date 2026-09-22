@@ -574,7 +574,9 @@ def migrate_ledger(ctx, interactive, dry_run_ledger):
         dry_run_ledger=dry_run_ledger,
     )
 
-    migrate_ledger_cli(args)
+    code = migrate_ledger_cli(args)
+    if code:
+        ctx.exit(code)
 
 
 migrate_ledger.help = t("cli.migrate_ledger.help")
@@ -608,7 +610,9 @@ def reconcile(ctx, interactive, dry_run_ledger):
         dry_run_ledger=dry_run_ledger,
     )
 
-    reconcile_ledger_cli(args)
+    code = reconcile_ledger_cli(args)
+    if code:
+        ctx.exit(code)
 
 
 reconcile.help = t("cli.reconcile.help")

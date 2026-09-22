@@ -33,6 +33,14 @@ class CalendarError(ManageAgendaError):
     pass
 
 
+class CalendarAccountChoiceRequired(CalendarError):
+    """Raised by connections.select_calendar_account() when several calendar accounts are
+    configured, none is saved and -i was not given: nothing is guessed and no account is
+    connected. str(error) is the user-facing message asking for -i."""
+
+    pass
+
+
 class EmailError(ManageAgendaError):
     """Raised when email operations fail."""
 

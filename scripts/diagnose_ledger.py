@@ -1,7 +1,10 @@
 """Read-only diagnostic for the handled-mail ledger (handled_mail_ids.json).
 
-Works for ONE calendar account at a time: the one `add` uses (the saved calendar_account),
-or one chosen interactively with -i. Every tracked event ref is first checked against that
+Works for ONE calendar account at a time, chosen by the rule every ledger maintenance command
+shares (manage_agenda.connections.select_calendar_account): the one `add` uses (the saved
+calendar_account), else the only configured one, or one chosen interactively with -i; with
+several configured and none saved, it stops and asks for -i, connecting nothing. Every
+tracked event ref is first checked against that
 account (see manage_agenda.sources.CalendarScope.owner_of - the same rule migrate-ledger and
 reconcile use), then, only if it belongs to it, looked up with events.get() and classified:
   - calendar_inaccessible: the ref is not this account's - recorded for another calendar
@@ -54,7 +57,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from manage_agenda.connections import select_calendar_account  # noqa: E402
+from manage_agenda.exceptions import CalendarAccountChoiceRequired  # noqa: E402
 from manage_agenda.sources import (  # noqa: E402
+    EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED,
+    EXIT_CALENDAR_LIST_UNREADABLE,
+    EXIT_NO_CALENDAR_ACCOUNT,
     Args,
     calendar_scope_for,
     handled_mail_file,
@@ -65,28 +73,21 @@ _COMMON_REAL_IDENTIFIERS = {"primary", "INBOX", "Sent", "Trash", "Drafts", "Arch
 
 
 def connect_calendar(interactive, rules, config_path=None):
-    """The calendar account to diagnose, authenticated: chosen interactively with -i, else the
-    saved calendar_account `add` uses - never silently the first configured one, which could
-    be a different account than the ledger's. Read-only: unlike prepare_calendar(), nothing
-    is ever saved. Exits if no account can be resolved."""
-    from manage_agenda.connections import select_api
-    from manage_agenda.user_config import load_user_config
-
-    if interactive:
-        api_dst = select_api(
-            Args(interactive=True), "gcalendar", rules=rules, title="Select the calendar account to diagnose"
-        )
-    else:
-        account = load_user_config(config_path).get("calendar_account")
-        if isinstance(account, list):
-            account = tuple(account)  # config.yaml stores the rule-key tuple as a list
-        if not account:
-            print("No saved calendar account - rerun with -i to choose one.", file=sys.stderr)
-            sys.exit(1)
-        api_dst = rules.readConfigSrc("", account, rules.more.get(account, {}))
-    if api_dst is None or api_dst.getClient() is None:
-        print("Could not authenticate a Google Calendar account. Run `manage-agenda auth -i` first.")
-        sys.exit(1)
+    """The calendar account to diagnose, authenticated, by the one selection rule of the whole
+    tool (select_calendar_account, as `migrate-ledger` and `reconcile`): with -i always a
+    choice; else the saved calendar_account `add` uses, else the only configured account -
+    never silently the first of several, which could be a different account than the
+    ledger's. Read-only: unlike prepare_calendar(), nothing is ever saved. Exits with the
+    same codes as the commands when no account can be resolved."""
+    args = Args(interactive=interactive)
+    try:
+        api_dst = select_calendar_account(args, rules, config_path=config_path)
+    except CalendarAccountChoiceRequired as error:
+        print(error, file=sys.stderr)
+        sys.exit(EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED)
+    if api_dst is None:
+        print("Could not authenticate a Google Calendar account. Run `manage-agenda auth -i` first.", file=sys.stderr)
+        sys.exit(EXIT_NO_CALENDAR_ACCOUNT)
     return api_dst
 
 
@@ -227,7 +228,7 @@ def main():
         "-i",
         "--interactive",
         action="store_true",
-        help="Choose the calendar account to diagnose. Default: the saved one `add` uses.",
+        help="Choose the calendar account to diagnose. Default: the saved one `add` uses, else the only configured one.",
     )
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
     parser.add_argument("--output", default=None, help="Output file path. Default: stdout.")
@@ -261,7 +262,7 @@ def main():
             "another account's, so nothing is classified.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        sys.exit(EXIT_CALENDAR_LIST_UNREADABLE)
     if not scope.sole_account:
         print(
             "Several calendar accounts are configured (or they could not be counted): legacy "
