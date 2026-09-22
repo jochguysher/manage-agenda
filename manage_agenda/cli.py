@@ -2,7 +2,7 @@ import os
 
 import click
 
-from .base import install_playwright_browser, setup_logging
+from .base import BROWSERS, install_playwright_browser, setup_logging
 from .connections import (
     authorize,
     complete_desktop_oauth,
@@ -615,7 +615,6 @@ def reconcile(ctx, interactive, dry_run_ledger):
 
 reconcile.help = t("cli.reconcile.help")
 
-BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
 
 @cli.command()
 @click.option(

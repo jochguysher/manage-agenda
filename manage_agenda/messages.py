@@ -1656,4 +1656,129 @@ TRANSLATIONS = {
         "en": 'Saved.',
         "fr": 'Enregistré.',
     },
+    # --- gui: calendar operations, ledger, evaluate, install ---
+    'gui.calendar_ops.operation': {
+        "en": 'Operation',
+        "fr": 'Opération',
+    },
+    'gui.calendar_ops.source_calendar': {
+        "en": 'Source calendar id',
+        "fr": 'Identifiant du calendrier source',
+    },
+    'gui.calendar_ops.destination_calendar': {
+        "en": 'Destination calendar id',
+        "fr": 'Identifiant du calendrier de destination',
+    },
+    'gui.calendar_ops.text_filter': {
+        "en": 'Title filter',
+        "fr": 'Filtre sur le titre',
+    },
+    'gui.calendar_ops.ask_placeholder': {
+        "en": '(empty: asked when the run starts)',
+        "fr": '(vide : demandé au lancement)',
+    },
+    'gui.calendar_ops.note': {
+        "en": 'The account, the calendars, the filter and the events are asked in dialogs when not given here, as `-i` does on the terminal.',
+        "fr": "Le compte, les calendriers, le filtre et les événements sont demandés dans des dialogues s'ils ne sont pas donnés ici, comme `-i` sur le terminal.",
+    },
+    'gui.calendar_ops.run': {
+        "en": 'Run',
+        "fr": 'Lancer',
+    },
+    'gui.calendar_ops.job': {
+        "en": 'Calendar {operation}',
+        "fr": 'Calendrier : {operation}',
+    },
+    'gui.ledger.maintenance': {
+        "en": 'Maintenance',
+        "fr": 'Maintenance',
+    },
+    'gui.ledger.dry_run': {
+        "en": 'Dry run: report, change nothing',
+        "fr": 'Simulation : rapporter sans rien changer',
+    },
+    'gui.ledger.choose_account': {
+        "en": 'Choose the calendar account (otherwise the saved one, or the only one configured)',
+        "fr": 'Choisir le compte de calendrier (sinon celui enregistré, ou le seul configuré)',
+    },
+    'gui.ledger.reconcile': {
+        "en": 'Reconcile',
+        "fr": 'Réconcilier',
+    },
+    'gui.ledger.migrate': {
+        "en": 'Migrate ledger',
+        "fr": 'Migrer le registre',
+    },
+    'gui.ledger.exit_code_note': {
+        "en": "The command's exit code is shown in the status bar: 0 ran, 3 no account, 4 choose an account, 5 migration required, 6 calendar list unreadable.",
+        "fr": "Le code de sortie de la commande s'affiche dans la barre d'état : 0 exécuté, 3 aucun compte, 4 choisir un compte, 5 migration requise, 6 liste des calendriers illisible.",
+    },
+    'gui.ledger.job': {
+        "en": 'Ledger {command}',
+        "fr": 'Registre : {command}',
+    },
+    'gui.ledger.restore': {
+        "en": 'Restore a deleted event',
+        "fr": 'Restaurer un événement supprimé',
+    },
+    'gui.ledger.column_identity': {
+        "en": 'Identity',
+        "fr": 'Identité',
+    },
+    'gui.ledger.column_events': {
+        "en": 'Cancelled events',
+        "fr": 'Événements annulés',
+    },
+    'gui.ledger.restore_list': {
+        "en": 'Reload',
+        "fr": 'Recharger',
+    },
+    'gui.ledger.restore_run': {
+        "en": 'Restore selected',
+        "fr": 'Restaurer la sélection',
+    },
+    'gui.ledger.restore_select_one': {
+        "en": 'Select an identity first.',
+        "fr": "Sélectionnez d'abord une identité.",
+    },
+    'gui.evaluate.type': {
+        "en": 'Input',
+        "fr": 'Entrée',
+    },
+    'gui.evaluate.output': {
+        "en": 'Output',
+        "fr": 'Sortie',
+    },
+    'gui.evaluate.prompt': {
+        "en": 'Prompt',
+        "fr": 'Prompt',
+    },
+    'gui.evaluate.prompt_placeholder': {
+        "en": 'Text to send to every Ollama model',
+        "fr": 'Texte à envoyer à chaque modèle Ollama',
+    },
+    'gui.evaluate.run': {
+        "en": 'Evaluate',
+        "fr": 'Évaluer',
+    },
+    'gui.evaluate.job': {
+        "en": 'Model evaluation',
+        "fr": 'Évaluation des modèles',
+    },
+    'gui.install.browser': {
+        "en": 'Browser',
+        "fr": 'Navigateur',
+    },
+    'gui.install.note': {
+        "en": 'Downloads the browser engine Playwright uses for web pages; progress goes to the log.',
+        "fr": 'Télécharge le moteur de navigateur que Playwright utilise pour les pages web ; la progression va dans le journal.',
+    },
+    'gui.install.run': {
+        "en": 'Install',
+        "fr": 'Installer',
+    },
+    'gui.install.job': {
+        "en": 'Browser installation',
+        "fr": 'Installation du navigateur',
+    },
 }

@@ -23,11 +23,24 @@ from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.log_panel import LogPanel
 from manage_agenda.gui.screens.add import AddScreen
 from manage_agenda.gui.screens.auth import AuthScreen
+from manage_agenda.gui.screens.calendar_ops import CalendarOpsScreen
+from manage_agenda.gui.screens.evaluate import EvaluateScreen
+from manage_agenda.gui.screens.install import InstallScreen
+from manage_agenda.gui.screens.ledger import LedgerScreen
 from manage_agenda.gui.screens.lists import ListsScreen
 from manage_agenda.gui.screens.settings import SettingsScreen
 from manage_agenda.i18n import t
 
-SCREEN_CLASSES = (AddScreen, ListsScreen, AuthScreen, SettingsScreen)
+SCREEN_CLASSES = (
+    AddScreen,
+    CalendarOpsScreen,
+    LedgerScreen,
+    EvaluateScreen,
+    AuthScreen,
+    ListsScreen,
+    InstallScreen,
+    SettingsScreen,
+)
 
 CLOSE_WAIT_MS = 5000
 

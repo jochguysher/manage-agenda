@@ -362,6 +362,10 @@ def format_time(seconds):
     return f"{int(h)}h {int(m)}m {s:.2f}s"
 
 
+# The browser engines `playwright install` accepts.
+BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
+
+
 def install_playwright_browser(browser, on_output=None):
     """Run `python -m playwright install <browser>` as a child process, streaming its output
     line by line to `on_output` (echo by default), and return its exit code.
