@@ -678,12 +678,14 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
     ambiguous API error) is retried on a future run, matching the conservative pattern used
     throughout this module.
 
-    Scoped to refs within the sync bootstrap window (_is_within_bootstrap_window - the same
-    window reconcile's bootstrap falls back to for a ref with no event_end, see
-    extraction._should_confirm_missing) - a ref older than that is left alone: it is
-    either already purged or close to it regardless of whether it ever gets the origin stamp,
-    so spending an API call on it buys nothing for the "state bounded by current activity"
-    goal this whole redesign exists for.
+    Not bounded by any recorded_at window: every un-migrated ref of this account is attempted,
+    however old its recorded_at. The 90-day bootstrap window (_is_within_bootstrap_window)
+    exists to bound reconcile's recurring cost; migration is a one-off over a finite ledger,
+    and its event_end backfill is exactly what an old ref needs - a message recorded 200 days
+    ago for an event still to come would otherwise purge on the short recorded_at fallback
+    (see _entry_purge_after) while its event is live. After the first real pass, the recurring
+    calls from `add`/`reconcile` only cost a get() per ref left for retry (skipped and
+    migrated refs make no API call).
 
     event_end backfill source, as actually implemented: the live event's own `end` field via
     events.get() (needed anyway to check/patch it) - not a `_times.json` log-file fallback.
@@ -727,7 +729,7 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
     report.setdefault("attached", 0)
     prefix = "DRY RUN " if dry_run else ""
 
-    from manage_agenda.extraction import _is_within_bootstrap_window, migrate_one_legacy_event
+    from manage_agenda.extraction import migrate_one_legacy_event
 
     if not dry_run and path.is_file():
         backup_path = path.with_suffix(path.suffix + ".bak")
@@ -760,8 +762,6 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
         generation = entry.get("generation", 0)
         for index, ref in enumerate(events):
             if not isinstance(ref, dict) or ref.get("migrated"):
-                continue
-            if not _is_within_bootstrap_window(ref.get("recorded_at")):
                 continue
             calendar_id, event_id = ref.get("calendar_id"), ref.get("event_id")
             if not calendar_id or not event_id:

@@ -796,7 +796,9 @@ def _bootstrap_time_min():
 
 def _is_within_bootstrap_window(recorded_at):
     """Whether a tracked ref is recent enough that the bootstrap listing should cover it - the
-    fallback _should_confirm_missing() uses for a ref with no event_end (migrate's scope, too).
+    fallback _should_confirm_missing() uses for a ref with no event_end. Reconcile only:
+    migration (sources.migrate_legacy_ledger_entries) attempts every un-migrated ref, whatever
+    its age.
 
     Without this, an id whose ref predates the window would be "missing from the listing" on
     every reseed forever, without ever actually being confirmable one way or the other - paying

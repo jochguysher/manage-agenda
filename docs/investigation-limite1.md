@@ -351,11 +351,14 @@ never a full-ledger sweep every run.
   `_get_event_if_present`).
 - **Never changes an event's own id**: only `events.patch()` is used, never delete+recreate;
   the patch body never includes an `id` field.
-- **Scoped to the sync bootstrap window** (`_is_within_bootstrap_window`, the same 90-day
-  window `reconcile_handled_events`'s own bootstrap diff trusts): an older, never-migrated ref
-  is left alone - it is either already purged or close to it regardless of whether it ever
-  gets the origin stamp, so spending an API call on it buys nothing for the "state bounded by
-  current activity" goal.
+- **Not bounded by the sync bootstrap window** (since §12's last revision; it used to skip any
+  ref whose `recorded_at` was older than the 90 days `_is_within_bootstrap_window` covers).
+  Every un-migrated ref of the account is attempted, whatever its age. The window bounds
+  reconcile's *recurring* cost; migration is a one-off over a finite ledger, and its
+  `event_end` backfill is exactly what an old ref needs: a message recorded 200 days ago for an
+  event still to come would otherwise purge on the short `recorded_at` fallback while its
+  event is live. After the first real pass, the recurring calls from `add`/`reconcile` cost
+  one `events.get()` per ref left for retry; skipped and migrated refs make no API call.
 - **Existing `extendedProperties.private` keys are preserved**: the patch body is built by
   reading the event's current `private` map (via the same `events.get()` used to check it)
   and adding the new keys to a copy of it, rather than sending only the new keys - whether
@@ -386,8 +389,7 @@ Three gaps found in review of §§3-7, closed before any real data is touched:
 **No entry may be exempt from purging forever.** `purge_expired_ledger_entries()`'s
 `_entry_purge_after()` returned `None` (never purge) for an entry with no `event_end`
 anywhere *and* no `recorded_at` - only possible for a pre-`recorded_at` legacy entry whose
-events are also gone/inaccessible/outside the migration bootstrap window, so migration never
-backfills `event_end` for it either. Fixed: such an entry now gets exactly one grace pass -
+events are also gone or inaccessible, so migration never backfills `event_end` for it either. Fixed: such an entry now gets exactly one grace pass -
 `recorded_at` is stamped to "now" (never overwriting a real one) on the call that finds no
 signal, so it purges via the normal `no_event_margin_days` on a later call. Tested for both
 the legacy `{"ids": [...]}` format and a "created" entry whose ref simply predates
@@ -667,8 +669,12 @@ refuses to do any ledger maintenance until it has been done.
 
 **`manage-agenda migrate-ledger [-i] [--dry-run-ledger]`** (`sources.migrate_ledger_cli`):
 - Connects to one calendar account:
-  - without `-i`: the saved `calendar_account` (the one `add` uses), otherwise the first
-    configured `gcalendar` account;
+  - without `-i`: the saved `calendar_account` (the one `add` uses); with none saved, the
+    only configured `gcalendar` account when there is exactly one; with several configured,
+    nothing is guessed: a message naming the accounts asks for `-i`, and the command stops
+    before connecting any account (`readConfigSrc` can trigger OAuth) - no Calendar call,
+    no ledger write, no marker. Never "the first configured account": a migration marker
+    must not land on an account picked by configuration order;
   - with `-i`: **always** a choice among the configured `gcalendar` accounts, even when one is
     saved - that is how another account's refs are migrated or reconciled;
   - the saved account is **never** changed, with or without `-i`
@@ -679,7 +685,8 @@ refuses to do any ledger maintenance until it has been done.
 - Runs `migrate_legacy_ledger_entries()` only: no reconcile, no purge. Only this calendar
   account's refs are touched (see "Only this calendar account's refs" below). Everything
   else is counted as "left alone", never marked migrated, and migrated later by running the
-  command for its own account (`-i` to pick it).
+  command for its own account (`-i` to pick it). Every un-migrated ref of the account is
+  attempted, however old its `recorded_at` (§7): the 90-day window only bounds reconcile.
 - Reads the account's calendar list first. If that fails, nothing runs and nothing is
   stamped. Without it no ref can be told apart as this account's, and stamping a pass that
   migrated nothing would open the gate with no migration ever done.
@@ -754,8 +761,10 @@ the owner can attach such a ref by hand, by adding `"calendar_account": "<key>"`
 **`manage-agenda reconcile [-i] [--dry-run-ledger]`** (`sources.reconcile_ledger_cli`): the
 ledger side of `add`, and nothing else. `add --dry-run-ledger` is not a safe preview: it keeps
 the ledger untouched, but still scans, extracts, publishes and marks new messages (§9).
-- Same account selection as `migrate-ledger` (by default the saved account `add` uses; `-i`
-  always offers the choice; the saved account is never changed). Same gate as `add`:
+- Same account selection as `migrate-ledger` (by default the saved account `add` uses, else
+  the only configured one; with several configured and none saved it stops and asks for
+  `-i`, connecting nothing; `-i` always offers the choice; the saved account is never
+  changed). Same gate as `add`:
   without the account's migration marker it prints the `migrate-ledger` instructions and
   makes no Calendar call at all. No calendar account → nothing runs.
 - Runs `reconcile_migrate_and_purge()`, exactly as `add` does: Calendar sync + reconcile,
@@ -878,8 +887,9 @@ A looked-up ref gets one `events.get()` (`_confirm_missing_ids`): `status: "canc
 confirmed deletion, resolved through `on_user_delete`. 404/410 → `unknown_event`, never a
 deletion. Still live, or any other error → nothing reported, the entry is untouched. A ref not
 looked up is untouched too. Either way the lookups stay bounded by current activity (events
-still to come or recently ended), never by the ledger's whole history. Migrate keeps its own
-`recorded_at`-window scope (unchanged).
+still to come or recently ended), never by the ledger's whole history. Migrate has no such
+window (§7): it is a one-off over the finite ledger, and it is what gives an old ref the
+`event_end` this rule then keys on.
 
 The 404 is only trusted once the calendar is known to be visible. A calendar this account
 can't see fails at the listing itself, before any `events.get()`: nothing is reported for any
@@ -964,3 +974,11 @@ additions only, and existing keys were preserved (§7).
   stamps B only, A is never connected, and the config file stays byte-identical; without
   `-i` the saved A is used and B's ref left alone; `-i` with nothing saved saves nothing;
   `reconcile -i` reconciles B with A saved, config unchanged.
+- Nothing saved, no `-i` (`TestLedgerAccountSelectionWithoutSavedAccount`, same setup): with
+  one configured account, `migrate-ledger` and `reconcile` use it (never the interactive
+  chooser, still nothing saved); with two configured, both commands print the message naming
+  the accounts and `-i`, `readConfigSrc` is never called, no Calendar call is made, and the
+  ledger, the token file and the marker file are untouched.
+- Migration ignores the bootstrap window (`tests/test_migration.py`): a legacy ref recorded
+  200 days ago for an event ending in 2030 is patched and gets its `event_end`; a purge run
+  right after keeps the entry, while the same entry without the backfill is purged.

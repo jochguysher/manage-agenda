@@ -13,6 +13,7 @@ from manage_agenda.sources import (
     CalendarScope,
     load_handled_mail_state,
     migrate_legacy_ledger_entries,
+    purge_expired_ledger_entries,
 )
 
 
@@ -213,7 +214,12 @@ class TestMigrateLegacyLedgerEntries(unittest.TestCase):
         self.assertTrue(ref["migrated"])
         self.assertEqual(ref["event_end"], "2026-09-22T16:00:00-04:00")
 
-    def test_a_ref_outside_the_bootstrap_window_is_left_alone(self):
+    def test_an_old_ref_with_a_future_event_is_migrated_and_survives_purge(self):
+        """Migration is not bounded by the 90-day bootstrap window: that window bounds
+        reconcile's recurring cost, while migration is a one-off over a finite ledger. A
+        legacy ref recorded 200 days ago for an event still to come gets its event_end
+        backfilled - without it, purge would drop the entry on the short recorded_at
+        fallback while its event is live."""
         self._write_state(
             {
                 "msg-1": {
@@ -221,18 +227,45 @@ class TestMigrateLegacyLedgerEntries(unittest.TestCase):
                         {"calendar_id": "primary", "event_id": "e1", "recorded_at": self._old_iso()}
                     ],
                     "status": "created",
+                    "recorded_at": self._old_iso(),
                 }
             }
         )
-        existing = {"id": "e1", "end": {"dateTime": "2026-09-22T16:00:00-04:00"}}
+        existing = {"id": "e1", "end": {"dateTime": "2030-01-15T16:00:00-04:00"}}
         args = self._args_with_client(existing)
 
         migrated = migrate_legacy_ledger_entries(args, path=self.path)
 
-        self.assertEqual(migrated, 0)
+        self.assertEqual(migrated, 1)
         ref = load_handled_mail_state(self.path)["msg-1"]["events"][0]
-        self.assertNotIn("migrated", ref)
-        args.calendar_api.getClient.return_value.events.return_value.get.assert_not_called()
+        self.assertTrue(ref["migrated"])
+        self.assertEqual(ref["event_end"], "2030-01-15T16:00:00-04:00")
+        args.calendar_api.getClient.return_value.events.return_value.patch.assert_called_once()
+
+        purged = purge_expired_ledger_entries(path=self.path)
+
+        self.assertEqual(purged, 0)
+        self.assertIn("msg-1", load_handled_mail_state(self.path))
+
+    def test_without_migration_the_same_old_entry_would_be_purged(self):
+        """The control for the test above: the 200-day-old entry with no event_end purges on
+        recorded_at + 7 days, so the backfill is what keeps it."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "recorded_at": self._old_iso()}
+                    ],
+                    "status": "created",
+                    "recorded_at": self._old_iso(),
+                }
+            }
+        )
+
+        purged = purge_expired_ledger_entries(path=self.path)
+
+        self.assertEqual(purged, 1)
+        self.assertNotIn("msg-1", load_handled_mail_state(self.path))
 
     def test_an_already_migrated_ref_is_never_touched_again(self):
         self._write_state(

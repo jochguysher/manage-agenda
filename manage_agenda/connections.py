@@ -54,7 +54,12 @@ def select_calendar_account(args, rules=None, config_path=None):
 
     `-i` (args.interactive) ALWAYS offers the choice, even with a calendar_account saved:
     migrating or reconciling another account's refs is exactly what -i is for. Without -i: the
-    saved calendar_account `add` uses, else the first configured gcalendar account.
+    saved calendar_account `add` uses; with none saved, the only configured gcalendar account
+    when there is exactly one; with several configured, nothing is guessed - a message asks
+    for -i and None is returned before any account is connected (readConfigSrc can trigger
+    OAuth, so "no Calendar call" means stopping before it, not just skipping getClient()).
+    Never "the first configured account": ledger maintenance marks an account as migrated,
+    and that must never land on an account picked by configuration order.
 
     Never writes the user config, unlike prepare_calendar(): choosing an account for one
     maintenance run must never change the account `add` publishes to. No destination
@@ -63,14 +68,30 @@ def select_calendar_account(args, rules=None, config_path=None):
     from manage_agenda.user_config import load_user_config
 
     rules = rules or moduleRules.from_config()
-    account_name = None if args.interactive else load_user_config(config_path).get("calendar_account")
-    if isinstance(account_name, list):
-        # See prepare_calendar(): config.yaml stores the rule-key tuple as a list.
-        account_name = tuple(account_name)
-    if account_name:
-        api = rules.readConfigSrc("", account_name, rules.more.get(account_name, {}))
-    else:
+    if args.interactive:
         api = select_api(args, "gcalendar", rules=rules, title=t("connections.select_calendar_title"))
+    else:
+        account_name = load_user_config(config_path).get("calendar_account")
+        if isinstance(account_name, list):
+            # See prepare_calendar(): config.yaml stores the rule-key tuple as a list.
+            account_name = tuple(account_name)
+        if not account_name:
+            configured = list(rules.selectRule(["gcalendar"], "") or [])
+            if len(configured) > 1:
+                print(
+                    t(
+                        "connections.calendar_account_choice_required",
+                        accounts=", ".join(calendar_account_key(src) or str(src) for src in configured),
+                    )
+                )
+                return None
+            if configured:
+                account_name = configured[0]
+        if account_name:
+            api = rules.readConfigSrc("", account_name, rules.more.get(account_name, {}))
+        else:
+            logging.warning("No gcalendar sources configured.")
+            api = None
     if api is None or api.getClient() is None:
         print(missing_calendar_message(api))
         return None

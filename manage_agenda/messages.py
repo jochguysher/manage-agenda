@@ -383,6 +383,17 @@ TRANSLATIONS = {
             "Puis exécutez : uv run manage-agenda auth -i"
         ),
     },
+    "connections.calendar_account_choice_required": {
+        "en": (
+            "Several calendar accounts are configured ({accounts}) and none is saved: run "
+            "with -i to choose the one to work on. Nothing was connected."
+        ),
+        "fr": (
+            "Plusieurs comptes de calendrier sont configurés ({accounts}) et aucun n'est "
+            "sauvegardé : relancez avec -i pour choisir celui à traiter. Aucune connexion "
+            "n'a été ouverte."
+        ),
+    },
     "connections.no_calendars_found": {
         "en": "No calendars found in your Google Calendar account",
         "fr": "Aucun calendrier trouvé dans votre compte Google Calendar",
