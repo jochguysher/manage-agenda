@@ -4,29 +4,50 @@ import logging
 import os
 import pickle
 
-from socialModules.configMod import safe_get, select_from_list
+from socialModules.configMod import safe_get
 from socialModules.moduleRules import moduleRules
 
 from manage_agenda.exceptions import CalendarAccountChoiceRequired, CalendarError
 from manage_agenda.i18n import t
-from manage_agenda.interactive import select_many, select_one
+from manage_agenda.ui import echo, get_ui, select_many, select_one
 
 logger = logging.getLogger(__name__)
+
+
+def select_rule_interactive(rules, service, title=""):
+    """Let the user pick one configured socialModules account of `service` (a name, or a
+    list of names) and connect it: what `rules.selectRuleInteractive()` did, minus its own
+    terminal prompt, so the choice goes through the UI port like every other one.
+
+    Returns the connected api object - or, as socialModules does, the bare rule key when
+    readConfigSrc() gives nothing back - and None when nothing was chosen."""
+    services = list(service) if isinstance(service, (list, tuple)) else [service]
+    candidates = []
+    for name in services:
+        candidates.extend(rules.selectRule(name, "") or [])
+    chosen = get_ui().choose_one(candidates, title=title)
+    if chosen is None:
+        return None
+    echo(t("connections.selected_rule", rule=chosen))
+    api = rules.readConfigSrc("", chosen, rules.more.get(chosen))
+    return api or chosen
 
 
 def authorize(args, rules=None):
     """Authorize and return a configured service connection."""
     rules = rules or moduleRules.from_config()
     if args.interactive:
-        print(t("connections.choose_service_to_authorize"))
-        print(t("connections.gcalendar_service_description"))
-        print(t("connections.gmail_service_description"))
-        _choice, service = select_from_list(
+        echo(t("connections.choose_service_to_authorize"))
+        echo(t("connections.gcalendar_service_description"))
+        echo(t("connections.gmail_service_description"))
+        service = get_ui().choose_one(
             ["gcalendar", "gmail"],
             title=t("connections.google_service_title"),
             default="gcalendar",
         )
-        return rules.selectRuleInteractive(service, title=t("connections.account_title"))
+        if service is None:
+            return None
+        return select_rule_interactive(rules, service, title=t("connections.account_title"))
 
     rules_all = rules.selectRule("", "")
     if not rules_all:
@@ -95,7 +116,7 @@ def select_calendar_account(args, rules=None, config_path=None):
             logger.warning("No gcalendar sources configured.")
             api = None
     if api is None or api.getClient() is None:
-        print(missing_calendar_message(api))
+        echo(missing_calendar_message(api))
         return None
     args.calendar_api = api
     return api
@@ -136,7 +157,7 @@ def prepare_calendar(args, rules=None, config_path=None):
         # A calendar id resolved from a flag or saved config is only usable together with a
         # working account connection - checked here too, not just inside select_calendars(),
         # since a resolved calendar id skips that call entirely below.
-        print(missing_calendar_message(api))
+        echo(missing_calendar_message(api))
         return False
 
     if explicit_calendar:
@@ -151,12 +172,12 @@ def prepare_calendar(args, rules=None, config_path=None):
         try:
             calendar_ids = select_calendars(api, title=t("connections.select_calendars_title"), args=args)
         except CalendarError as error:
-            print(error)
+            echo(error)
             return False
         prompted = True
 
     if not calendar_ids:
-        print(missing_calendar_message(api))
+        echo(missing_calendar_message(api))
         return False
 
     args.calendar_api = api
@@ -179,7 +200,7 @@ def select_api(args, api_type, rules=None, title=""):
     )
 
     if args.interactive:
-        return rules.selectRuleInteractive(service, title=title)
+        return select_rule_interactive(rules, service, title=title)
 
     sources = rules.selectRule(service, "")
     if not sources:
@@ -268,13 +289,13 @@ def complete_desktop_oauth(api_src):
         flow = InstalledAppFlow.from_client_secrets_file(path, scopes=scopes)
         credentials = flow.run_local_server(port=0)
     except Exception as error:
-        print(f"{type(error).__name__}: {error}")
+        echo(f"{type(error).__name__}: {error}")
         return False
     token_path = api_src.confTokenName((api_src.getServer(), api_src.getNick()))
     with open(token_path, "wb") as handle:
         pickle.dump(credentials, handle)
     os.chmod(token_path, 0o600)
-    print(t("connections.google_token_saved", token_path=token_path))
+    echo(t("connections.google_token_saved", token_path=token_path))
     return True
 
 

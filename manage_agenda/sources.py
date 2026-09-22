@@ -10,7 +10,6 @@ from pathlib import Path
 
 import dateparser
 from socialModules import moduleHtml
-from socialModules.configMod import select_from_list
 from socialModules.moduleContent import display_posts
 from socialModules.moduleRules import moduleRules
 
@@ -21,6 +20,7 @@ from manage_agenda.connections import (
     prepare_calendar,
     select_api,
     select_calendar_account,
+    select_rule_interactive,
 )
 from manage_agenda.exceptions import CalendarAccountChoiceRequired
 from manage_agenda.extraction import (
@@ -30,6 +30,7 @@ from manage_agenda.extraction import (
 )
 from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
+from manage_agenda.ui import echo, get_ui
 from manage_agenda.web import reduce_html
 
 logger = logging.getLogger(__name__)
@@ -91,12 +92,12 @@ def print_first_lines(content, content_type="content", *, n=10, title=None):
         else:
             content = str(content)
     header = title or t("sources.first_n_lines_header", n=n, content_type=content_type)
-    print(t("sources.section_header", header=header))
+    echo(t("sources.section_header", header=header))
     for i, line in enumerate(content.splitlines()):
         if n is not None and i >= n:
             break
-        print(line)
-    print("-------------------------------------\n")
+        echo(line)
+    echo("-------------------------------------\n")
 
 
 # Backward-compatible alias
@@ -123,9 +124,9 @@ def _get_msgs_from_folder(args, source_name, rules=None):
 
     if not posts:
         if not os.path.exists(target_dir):
-            print(t("sources.no_such_directory", target_dir=target_dir))
+            echo(t("sources.no_such_directory", target_dir=target_dir))
         else:
-            print(t("sources.no_posts_in_directory", target_dir=target_dir))
+            echo(t("sources.no_posts_in_directory", target_dir=target_dir))
         posts = None
 
     return None, posts
@@ -1131,10 +1132,10 @@ def _connect_ledger_account(args, rules, no_account_message):
     try:
         api = select_calendar_account(args, rules)
     except CalendarAccountChoiceRequired as error:
-        print(error)
+        echo(error)
         return None, EXIT_CALENDAR_ACCOUNT_CHOICE_REQUIRED
     if not api or ledger_migration_account_key(args) is None:
-        print(no_account_message)
+        echo(no_account_message)
         return None, EXIT_NO_CALENDAR_ACCOUNT
     return api, 0
 
@@ -1177,7 +1178,7 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
     # that would open the gate for `add` with no migration ever done. Abort instead.
     args.calendar_scope = calendar_scope_for(args, rules)
     if args.calendar_scope.owned_ids is None:
-        print(t("sources.migrate_ledger_calendar_list_failed", account=account_key))
+        echo(t("sources.migrate_ledger_calendar_list_failed", account=account_key))
         return EXIT_CALENDAR_LIST_UNREADABLE
     dry_run = bool(getattr(args, "dry_run_ledger", False))
     report = {}
@@ -1190,14 +1191,14 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
         "log_file": log_file_path(),
     }
     if dry_run:
-        print(t("sources.migrate_ledger_dry_run_done", **details))
+        echo(t("sources.migrate_ledger_dry_run_done", **details))
         return 0
     record_ledger_migration(account_key, path=marker_path)
     logger.info(
         f"migrate-ledger: {count} ref(s) migrated for {account_key}, {details['skipped']} "
         f"skipped, {details['attached']} legacy 'primary' ref(s) attached; marker stamped."
     )
-    print(t("sources.migrate_ledger_done", **details))
+    echo(t("sources.migrate_ledger_done", **details))
     return 0
 
 
@@ -1237,7 +1238,7 @@ def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
             f"Ledger not migrated yet for calendar account {account_key}: reconcile skipped. Run "
             "'manage-agenda migrate-ledger --dry-run-ledger', then 'manage-agenda migrate-ledger'."
         )
-        print(t("sources.reconcile_migration_required", account=account_key))
+        echo(t("sources.reconcile_migration_required", account=account_key))
         return EXIT_LEDGER_MIGRATION_REQUIRED
     # Same as process_email_cli: which refs are this account's. An unreadable calendar list
     # doesn't abort here (unlike migrate-ledger) - the trio already degrades safely without it.
@@ -1256,26 +1257,33 @@ def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
         f"{'DRY RUN ' if dry_run else ''}reconcile: {migrated_count} ref(s) migrated, "
         f"{purged_count} ledger entry(ies) purged for {account_key}."
     )
-    print(t("sources.reconcile_dry_run_done" if dry_run else "sources.reconcile_done", **details))
+    echo(t("sources.reconcile_dry_run_done" if dry_run else "sources.reconcile_done", **details))
     return 0
 
 
-def list_restorable_identities_cli(path=None):
-    """Print every ledger identity with at least one cancelled event (from an
-    on_user_delete="ignore" resolution) that `restore <identity>` could attempt to restore -
-    so an operator can find the identity string to pass it, without needing to read the
-    ledger file by hand."""
+def restorable_identities(path=None):
+    """{identity: [event_id, ...]} for every ledger identity with at least one cancelled
+    event (from an on_user_delete="ignore" resolution) that `restore <identity>` could
+    attempt to restore - the data behind list_restorable_identities_cli(), for a UI that
+    shows it as a table."""
     state = load_handled_mail_state(path)
-    found = False
+    found = {}
     for identity, entry in state.items():
         cancelled = entry.get("cancelled_events") or []
-        if not cancelled:
-            continue
-        found = True
-        event_ids = ", ".join(str(ref.get("event_id", "")) for ref in cancelled)
-        print(t("sources.restore_list_entry", identity=identity, event_ids=event_ids))
+        if cancelled:
+            found[identity] = [str(ref.get("event_id", "")) for ref in cancelled]
+    return found
+
+
+def list_restorable_identities_cli(path=None):
+    """Print every ledger identity `restore <identity>` could attempt to restore - so an
+    operator can find the identity string to pass it, without needing to read the ledger
+    file by hand."""
+    found = restorable_identities(path)
+    for identity, event_ids in found.items():
+        echo(t("sources.restore_list_entry", identity=identity, event_ids=", ".join(event_ids)))
     if not found:
-        print(t("sources.restore_list_empty"))
+        echo(t("sources.restore_list_empty"))
 
 
 def _attempt_restore_one_event(client, calendar_id, event_id):
@@ -1334,11 +1342,11 @@ def restore_deleted_event_cli(args, identity):
     """
     entry = load_handled_mail_state().get(identity)
     if entry is None:
-        print(t("sources.restore_unknown_identity", identity=identity))
+        echo(t("sources.restore_unknown_identity", identity=identity))
         return False
     cancelled = entry.get("cancelled_events") or []
     if not cancelled:
-        print(t("sources.restore_nothing_to_restore", identity=identity))
+        echo(t("sources.restore_nothing_to_restore", identity=identity))
         return False
 
     api_cal = select_api(args, "gcalendar", rules=None, title=t("sources.restore_select_calendar_title"))
@@ -1351,15 +1359,15 @@ def restore_deleted_event_cli(args, identity):
             continue
         if _attempt_restore_one_event(client, calendar_id, event_id):
             restored.append(ref)
-            print(t("sources.restore_succeeded", calendar_id=calendar_id, event_id=event_id))
+            echo(t("sources.restore_succeeded", calendar_id=calendar_id, event_id=event_id))
         else:
             failed.append(ref)
-            print(t("sources.restore_failed", calendar_id=calendar_id, event_id=event_id))
+            echo(t("sources.restore_failed", calendar_id=calendar_id, event_id=event_id))
 
     if restored:
         mark_events_restored(identity, restored)
     if failed:
-        print(t("sources.restore_failed_hint"))
+        echo(t("sources.restore_failed_hint"))
 
     return bool(restored) and not failed
 
@@ -1952,15 +1960,15 @@ def _fetch_imap_matches(api_src, folder, criteria, handled=None):
     """
     client = api_src.getClient()
     if client is None:
-        print(t("sources.imap_not_connected"))
+        echo(t("sources.imap_not_connected"))
         return None
     typ, _data = client.select(folder)
     if typ != "OK":
-        print(t("sources.could_not_open_folder", folder=folder))
+        echo(t("sources.could_not_open_folder", folder=folder))
         return None
     typ, data = client.search(None, criteria)
     if typ != "OK" or not data or not data[0]:
-        print(t("sources.no_messages_match", criteria=criteria))
+        echo(t("sources.no_messages_match", criteria=criteria))
         return None
     # Highest sequence numbers are the most recently arrived - and this descending order is
     # also a safety invariant folder-mode marking depends on (see
@@ -1991,7 +1999,7 @@ def _fetch_imap_matches(api_src, folder, criteria, handled=None):
         if len(posts) >= IMAP_MATCH_LIMIT:
             break
     if skipped:
-        print(t("sources.skipped_handled_messages", skipped=skipped))
+        echo(t("sources.skipped_handled_messages", skipped=skipped))
     return posts or None
 
 
@@ -2007,7 +2015,7 @@ def _get_emails_from_folder(args, api_src, folder=None, source_details=None, han
         folder = folder or configured_folder or "INBOX"
         criteria = build_imap_from_search(parse_from_list(source_details.get("from", "")))
         if criteria is None:
-            print(t("sources.no_sender_rules", folder=folder))
+            echo(t("sources.no_sender_rules", folder=folder))
             return None
         from manage_agenda.scheduling import combine_imap_search, imap_age_criteria
 
@@ -2032,7 +2040,7 @@ def _get_emails_from_folder(args, api_src, folder=None, source_details=None, han
     api_src.setLabels()
     label = api_src.getLabels(folder)
     if not label:
-        print(t("sources.no_posts_with_label", folder=folder))
+        echo(t("sources.no_posts_with_label", folder=folder))
     else:
         api_src.setChannel(folder)
         api_src.setPosts()
@@ -2045,11 +2053,11 @@ def list_folder(args, service):
     """List posts from the selected folder for a supported service."""
     rules = moduleRules.from_config()
     if service in ["email", "imap", "gmail"]:
-        api_src = rules.selectRuleInteractive(service=service, title=t("sources.select_mail_account"))
+        api_src = select_rule_interactive(rules, service, title=t("sources.select_mail_account"))
         posts = _get_emails_from_folder(args, api_src)
     elif service == "gcalendar":
-        api_src = rules.selectRuleInteractive(
-            service=service, title=t("sources.select_calendar_account")
+        api_src = select_rule_interactive(
+            rules, service, title=t("sources.select_calendar_account")
         )
         posts = _get_events_from_calendar(args, api_src)
     else:
@@ -2113,9 +2121,7 @@ def _delete_email(args, api_src, post_id, source_name, rules=None):
     """Deletes an email, handling interactive confirmation and connection errors."""
     delete_confirmed = False
     if args.interactive:
-        confirmation = input(t("sources.confirm_remove_label"))
-        if confirmation.lower() == "y":
-            delete_confirmed = True
+        delete_confirmed = get_ui().confirm(t("sources.confirm_remove_label"))
     else:
         delete_confirmed = True
 
@@ -2124,10 +2130,10 @@ def _delete_email(args, api_src, post_id, source_name, rules=None):
         label = None
         for attempt in range(max_retries + 1):
             try:
-                print(t("sources.service_debug", service=api_src.service.lower()))
+                echo(t("sources.service_debug", service=api_src.service.lower()))
                 res = ""
                 if "imap" not in api_src.service.lower():
-                    print(t("sources.label_debug", label=api_src.getChannel()))
+                    echo(t("sources.label_debug", label=api_src.getChannel()))
                     logger.info(f"label: {api_src.getChannel()}")
                     folder = api_src.getChannel()
                     label = api_src.getLabels(folder)
@@ -2167,12 +2173,13 @@ def _is_post_too_old(args, time_difference, max_days=7):
         return False
     if time_difference.days > max_days:
         if args.interactive:
-            confirmation = input(t("sources.confirm_process_old_post", days=time_difference.days))
-            if confirmation.lower() != "y":
+            if not get_ui().confirm(
+                t("sources.confirm_process_old_post", days=time_difference.days)
+            ):
                 return True
         else:
             if args.verbose:
-                print(t("sources.too_old_skipping", days=time_difference.days))
+                echo(t("sources.too_old_skipping", days=time_difference.days))
             return True
     return False
 
@@ -2213,7 +2220,7 @@ def _process_common_flow(
             # 1. Metadata
             post_id, post_title, post_date, dedup_identity, generation = metadata_extractor(item, i)
 
-            print(t("sources.processing_title", post_title=post_title), flush=True)
+            echo(t("sources.processing_title", post_title=post_title), flush=True)
 
             # 2. Check Age
             post_date_time, time_difference = _get_post_datetime_and_diff(post_date)
@@ -2246,8 +2253,8 @@ def _process_common_flow(
                     generation=generation,
                 )
             except (LLMError, CalendarError) as error:
-                print(error)
-                print(t("sources.stopping_scan"))
+                echo(error)
+                echo(t("sources.stopping_scan"))
                 return processed_any_event
             finished = True
 
@@ -2257,6 +2264,12 @@ def _process_common_flow(
                 if item_cleaner:
                     item_cleaner(item, i, post_id)
         finally:
+            # `finished` is only set once the item's extraction and publication returned:
+            # a UserCancelled raised from a prompt inside them (the date review, the
+            # retry/snippet choice) skips on_item_done, so nothing is marked in the mailbox
+            # and nothing is recorded in the ledger for an item the user backed out of. A
+            # cancel inside item_cleaner's "remove the label?" question comes after the
+            # event was published, so that item is recorded - correctly.
             if finished and on_item_done:
                 on_item_done(item, i, calendar_result)
 
@@ -2267,11 +2280,16 @@ def process_txt_cli(args, model, source_name=None, rules=None):
     """Processes txt files and creates calendar events."""
 
     if not source_name:
-        source_name = input(
-            t("sources.enter_filenames", msg_txt_dir=msg_txt_dir())
-        ).split()
+        # Only ask with -i: without it, every *.txt under msg_txt_dir() is processed, which
+        # is what an empty answer meant anyway (and what a headless run can only mean).
+        if getattr(args, "interactive", False):
+            source_name = get_ui().ask_text(
+                t("sources.enter_filenames", msg_txt_dir=msg_txt_dir())
+            ).split()
+        else:
+            source_name = []
         if not source_name:
-            print(t("sources.no_filenames_entered", msg_txt_dir=msg_txt_dir()))
+            echo(t("sources.no_filenames_entered", msg_txt_dir=msg_txt_dir()))
 
     api_src, posts = _get_msgs_from_folder(args, source_name, rules=rules)
 
@@ -2356,7 +2374,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         api_src = select_api(args, "email", rules=rules)
 
     if not prepare_calendar(args, rules):
-        print(t("sources.no_message_read_fix_calendar"))
+        echo(t("sources.no_message_read_fix_calendar"))
         return False
 
     # --dry-run-ledger (args.dry_run_ledger) covers reconcile/migrate/purge only - the
@@ -2393,7 +2411,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
                 "migrate/purge skipped. Run 'manage-agenda migrate-ledger --dry-run-ledger', "
                 "then 'manage-agenda migrate-ledger'."
             )
-            print(t("sources.ledger_migration_required", account=calendar_account))
+            echo(t("sources.ledger_migration_required", account=calendar_account))
     # Loaded once, after reconcile/migrate/purge - metadata_extractor below does one dict
     # lookup per message instead of re-reading the ledger file each time, and is also where a
     # pending_requeue entry (identity intentionally left out of `handled` above) is found for
@@ -2423,7 +2441,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         account_key = imap_marker_account_key(selected_source, source_details)
         if not check_marker_mode_transition(account_key, imap_marker_mode):
             marker_transition_blocked = True
-            print(
+            echo(
                 t(
                     "sources.marker_migration_required",
                     account=account_key,
@@ -2455,7 +2473,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     if posts:
         posts, skipped = unseen_messages(posts, handled=handled)
         if skipped:
-            print(t("sources.skipped_handled_messages", skipped=skipped))
+            echo(t("sources.skipped_handled_messages", skipped=skipped))
 
     if posts:
 
@@ -2539,13 +2557,13 @@ def _get_pages_from_urls(args, urls):
 
     page = moduleHtml.moduleHtml()
     if args.verbose:
-        print(t("sources.urls_debug", urls=urls))
+        echo(t("sources.urls_debug", urls=urls))
     page.setUrl(urls)
     page.setApiPosts()
     posts = page.getPosts()
 
     if not posts:
-        print(t("sources.no_posts_with_urls", urls=urls))
+        echo(t("sources.no_posts_with_urls", urls=urls))
         posts = None
 
     return page, posts
@@ -2590,17 +2608,17 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
     urls_input = None
     if not urls:
         if args.interactive:
-            urls_input = input(t("sources.enter_urls")).split()
+            urls_input = get_ui().ask_text(t("sources.enter_urls")).split()
         if not urls_input or not args.interactive:
-            print(t("sources.no_urls_entered"))
+            echo(t("sources.no_urls_entered"))
             url_to_notes = _get_links_from_notes()
             if not url_to_notes:
-                print(t("sources.no_links_found"))
+                echo(t("sources.no_links_found"))
                 return False
-            print(t("sources.found_notes", url_to_notes=url_to_notes))
+            echo(t("sources.found_notes", url_to_notes=url_to_notes))
             urls = list(url_to_notes.keys())
-            print(t("sources.found_total_links", count=len(urls)))
-            print(t("sources.found_links", urls=urls))
+            echo(t("sources.found_total_links", count=len(urls)))
+            echo(t("sources.found_links", urls=urls))
         else:
             urls = urls_input
 
@@ -2648,7 +2666,7 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
         def content_extractor(post, i, post_date_time, post_title):
             web_content_reduced = reduce_html(urls[i], post, force_refresh=force_refresh)
             if not web_content_reduced:
-                print(t("sources.could_not_process_url", url=urls[i]))
+                echo(t("sources.could_not_process_url", url=urls[i]))
                 return None
 
             date_message = str(post_date_time).split(" ")[0]
@@ -2663,7 +2681,7 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
             url = urls[i]
             if url in url_to_notes and manager:
                 for note_title in url_to_notes[url]:
-                    print(t("sources.deleting_note", note_title=note_title))
+                    echo(t("sources.deleting_note", note_title=note_title))
                     manager.delete_note(note_title)
 
         return _process_common_flow(
@@ -2671,6 +2689,55 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
         )
 
     return False  # Default return if something went wrong before the main logic
+
+
+def resolve_add_source(args, rules=None):
+    """The source `add` reads from: a configured mail account rule key, or one of the
+    web/text pseudo-sources (see get_add_sources). -s/--source picks by name (and --rule
+    narrows IMAP rules by mode); with -i and no such narrowing, the user chooses; None when
+    nothing matches and nothing was asked."""
+    rules = rules or moduleRules.from_config()
+    sources, more_options = get_add_sources(rules=rules)
+    if args.verbose:
+        echo(t("sources.source_debug", source=args.source))
+        logger.debug(f"Sources: {sources}")
+        logger.debug(f"More options: {more_options}")
+    matches = []
+    if args.source:
+        matches = [item for item in sources if args.source in item]
+        if not matches and more_options:
+            matches = [item for item in more_options if args.source in str(item)]
+    mode = _imap_rule_mode(args)
+    if mode and matches:
+        tagged = [item for item in matches if (rules.more.get(item) or {}).get("mode") == mode]
+        if tagged:
+            matches = tagged
+    if args.interactive and not (args.source == "imap" and mode):
+        return get_ui().choose_one(
+            list(sources) + list(more_options), title=t("sources.sources_of_information_title")
+        )
+    return matches[0] if matches else None
+
+
+def run_add_source(args, model, selected, rules=None):
+    """Process `selected` (a value resolve_add_source() returned) with `model`: web pages,
+    text files, or a mail account."""
+    rules = rules or moduleRules.from_config()
+    echo(t("sources.selected_source", selected=selected))
+    if hasattr(selected, "__iter__") and (("web" in str(selected)) or ("http" in str(selected))):
+        url_list = None
+        if isinstance(selected, str) and "http" in selected:
+            url_list = selected.split(" ")
+        process_web_cli(args, model, urls=url_list, force_refresh=args.force_refresh, rules=rules)
+    elif hasattr(selected, "__iter__") and (
+        ("text" in str(selected)) or os.path.exists(str(selected))
+    ):
+        file_list = None
+        if isinstance(selected, str) and "." in selected:
+            file_list = selected.split(" ")
+        process_txt_cli(args, model, source_name=file_list, rules=rules)
+    else:
+        process_email_cli(args, model, selected_source=selected, rules=rules)
 
 
 def add_events_cli(args, rules=None):
@@ -2686,46 +2753,8 @@ def add_events_cli(args, rules=None):
 
     model = select_llm(args)
 
-    print(t("sources.selected_model", model_name=model.model_name))
+    echo(t("sources.selected_model", model_name=model.model_name))
 
-    sources, more_options = get_add_sources(rules=rules)
-    if args.verbose:
-        print(t("sources.source_debug", source=args.source))
-        logger.debug(f"Sources: {sources}")
-        logger.debug(f"More options: {more_options}")
-    matches = []
-    if args.source:
-        matches = [item for item in sources if args.source in item]
-        if not matches and more_options:
-            matches = [item for item in more_options if args.source in str(item)]
-    mode = _imap_rule_mode(args)
-    if mode and matches:
-        tagged = [item for item in matches if (rules.more.get(item) or {}).get("mode") == mode]
-        if tagged:
-            matches = tagged
-    if args.interactive and not (args.source == "imap" and mode):
-        sel, selected = select_from_list(
-            sources, more_options=more_options, title=t("sources.sources_of_information_title")
-        )
-    else:
-        selected = matches[0] if matches else None
+    selected = resolve_add_source(args, rules=rules)
     if selected:
-        print(t("sources.selected_source", selected=selected))
-        if hasattr(selected, "__iter__") and (
-            ("web" in str(selected)) or ("http" in str(selected))
-        ):
-            url_list = None
-            if isinstance(selected, str) and "http" in selected:
-                url_list = selected.split(" ")
-            process_web_cli(
-                args, model, urls=url_list, force_refresh=args.force_refresh, rules=rules
-            )
-        elif hasattr(selected, "__iter__") and (
-            ("text" in str(selected)) or os.path.exists(str(selected))
-        ):
-            file_list = None
-            if isinstance(selected, str) and "." in selected:
-                file_list = selected.split(" ")
-            process_txt_cli(args, model, source_name=file_list, rules=rules)
-        else:
-            process_email_cli(args, model, selected_source=selected, rules=rules)
+        run_add_source(args, model, selected, rules=rules)

@@ -1,10 +1,8 @@
 import os
-import sys
-from runpy import run_module
 
 import click
 
-from .base import setup_logging
+from .base import install_playwright_browser, setup_logging
 from .connections import (
     authorize,
     complete_desktop_oauth,
@@ -627,9 +625,28 @@ BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
     type=click.Choice(BROWSERS, case_sensitive=False),
     help=t("cli.install.browser_help"),
 )
-def install(browser):
-    sys.argv = ["playwright", "install", browser]
-    run_module("playwright", run_name="__main__")
+@click.pass_context
+def install(ctx, browser):
+    code = install_playwright_browser(browser)
+    if code:
+        print(t("cli.install.failed", code=code))
+        ctx.exit(code)
 
 
 install.help = t("cli.install.help")
+
+
+@cli.command()
+@click.pass_context
+def gui(ctx):
+    # PySide6 is an optional extra (`pip install 'manage-agenda[gui]'`): imported here, and
+    # only here, so every other command works without it.
+    try:
+        from manage_agenda.gui.app import run
+    except ImportError as error:
+        print(t("cli.gui.not_installed", error=error))
+        ctx.exit(1)
+    ctx.exit(run(verbose=ctx.obj["VERBOSE"]))
+
+
+gui.help = t("cli.gui.help")

@@ -334,13 +334,14 @@ class TestProcessEmailCli(unittest.TestCase):
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
+    @patch("manage_agenda.sources.select_rule_interactive")
     @patch("manage_agenda.sources.moduleRules")
     def test_list_gcalendar_folder_with_posts(
-        self, mock_module_rules, mock_get_events, mock_display_posts
+        self, mock_module_rules, mock_select_rule, mock_get_events, mock_display_posts
     ):
         mock_api_src = MagicMock()
         events = ["post1", "post2"]
-        mock_module_rules.from_config.return_value.selectRuleInteractive.return_value = mock_api_src
+        mock_select_rule.return_value = mock_api_src
         mock_get_events.return_value = events
         args = self.Args(
             interactive=False,
@@ -351,20 +352,21 @@ class TestProcessEmailCli(unittest.TestCase):
             text="",
         )
         list_folder(args, "gcalendar")
-        mock_module_rules.from_config.return_value.selectRuleInteractive.assert_called_once_with(
-            service="gcalendar", title="Select calendar account"
+        mock_select_rule.assert_called_once_with(
+            mock_module_rules.from_config.return_value, "gcalendar", title="Select calendar account"
         )
         mock_get_events.assert_called_once_with(args, mock_api_src)
         mock_display_posts.assert_called_once_with(mock_api_src, events)
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
+    @patch("manage_agenda.sources.select_rule_interactive")
     @patch("manage_agenda.sources.moduleRules")
     def test_list_gcalendar_folder_without_posts(
-        self, mock_module_rules, mock_get_events, mock_display_posts
+        self, mock_module_rules, mock_select_rule, mock_get_events, mock_display_posts
     ):
         mock_api_src = MagicMock()
-        mock_module_rules.from_config.return_value.selectRuleInteractive.return_value = mock_api_src
+        mock_select_rule.return_value = mock_api_src
         mock_get_events.return_value = None
         args = self.Args(
             interactive=False,
@@ -375,20 +377,21 @@ class TestProcessEmailCli(unittest.TestCase):
             text="",
         )
         list_folder(args, "gcalendar")
-        mock_module_rules.from_config.return_value.selectRuleInteractive.assert_called_once_with(
-            service="gcalendar", title="Select calendar account"
+        mock_select_rule.assert_called_once_with(
+            mock_module_rules.from_config.return_value, "gcalendar", title="Select calendar account"
         )
         mock_get_events.assert_called_once_with(args, mock_api_src)
         mock_display_posts.assert_called_once_with(mock_api_src, None)
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_emails_from_folder")
+    @patch("manage_agenda.sources.select_rule_interactive")
     @patch("manage_agenda.sources.moduleRules")
     def test_list_gmail_folder_with_posts(
-        self, mock_module_rules, mock_get_emails, mock_display_posts
+        self, mock_module_rules, mock_select_rule, mock_get_emails, mock_display_posts
     ):
         mock_api_src = MagicMock()
-        mock_module_rules.from_config.return_value.selectRuleInteractive.return_value = mock_api_src
+        mock_select_rule.return_value = mock_api_src
         mock_get_emails.return_value = ["post1", "post2"]
         args = self.Args(
             interactive=False,
@@ -400,20 +403,21 @@ class TestProcessEmailCli(unittest.TestCase):
         )
         list_folder(args, "gmail")
         mock_module_rules.from_config.assert_called_once()
-        mock_module_rules.from_config.return_value.selectRuleInteractive.assert_called_once_with(
-            service="gmail", title="Select mail account"
+        mock_select_rule.assert_called_once_with(
+            mock_module_rules.from_config.return_value, "gmail", title="Select mail account"
         )
         mock_get_emails.assert_called_once_with(args, mock_api_src)
         mock_display_posts.assert_called_once_with(mock_api_src, ["post1", "post2"])
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_emails_from_folder")
+    @patch("manage_agenda.sources.select_rule_interactive")
     @patch("manage_agenda.sources.moduleRules")
     def test_list_gmail_folder_without_posts(
-        self, mock_module_rules, mock_get_emails, mock_display_posts
+        self, mock_module_rules, mock_select_rule, mock_get_emails, mock_display_posts
     ):
         mock_api_src = MagicMock()
-        mock_module_rules.from_config.return_value.selectRuleInteractive.return_value = mock_api_src
+        mock_select_rule.return_value = mock_api_src
         mock_get_emails.return_value = None
         args = self.Args(
             interactive=False,
@@ -425,8 +429,8 @@ class TestProcessEmailCli(unittest.TestCase):
         )
         list_folder(args, "gmail")
         mock_module_rules.from_config.assert_called_once()
-        mock_module_rules.from_config.return_value.selectRuleInteractive.assert_called_once_with(
-            service="gmail", title="Select mail account"
+        mock_select_rule.assert_called_once_with(
+            mock_module_rules.from_config.return_value, "gmail", title="Select mail account"
         )
         mock_get_emails.assert_called_once_with(args, mock_api_src)
         mock_display_posts.assert_called_once_with(mock_api_src, None)
@@ -648,9 +652,10 @@ class TestSourceUtilities(unittest.TestCase):
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
+    @patch("manage_agenda.sources.select_rule_interactive")
     @patch("manage_agenda.sources.moduleRules")
     def test_list_gcalendar_folder_with_posts(
-        self, mock_module_rules, mock_get_events, mock_display_posts
+        self, mock_module_rules, mock_select_rule, mock_get_events, mock_display_posts
     ):
         """Test listing a calendar folder with posts."""
         args = Args(interactive=False, delete=False, verbose=False)
@@ -659,7 +664,7 @@ class TestSourceUtilities(unittest.TestCase):
             {"id": "1", "date": "2024-01-01", "title": "Event 1"},
             {"id": "2", "date": "2024-01-02", "title": "Event 2"},
         ]
-        mock_module_rules.from_config.return_value.selectRuleInteractive.return_value = mock_api_src
+        mock_select_rule.return_value = mock_api_src
         mock_get_events.return_value = events
 
         list_folder(args, "gcalendar")
@@ -669,14 +674,15 @@ class TestSourceUtilities(unittest.TestCase):
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
+    @patch("manage_agenda.sources.select_rule_interactive")
     @patch("manage_agenda.sources.moduleRules")
     def test_list_gcalendar_folder_without_posts(
-        self, mock_module_rules, mock_get_events, mock_display_posts
+        self, mock_module_rules, mock_select_rule, mock_get_events, mock_display_posts
     ):
         """Test listing a calendar folder when no events are found."""
         args = Args(interactive=False, delete=False, verbose=False)
         mock_api_src = MagicMock()
-        mock_module_rules.from_config.return_value.selectRuleInteractive.return_value = mock_api_src
+        mock_select_rule.return_value = mock_api_src
         mock_get_events.return_value = None
 
         list_folder(args, "gcalendar")
@@ -753,22 +759,23 @@ class TestSourceUtilities(unittest.TestCase):
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_emails_from_folder")
+    @patch("manage_agenda.sources.select_rule_interactive")
     @patch("manage_agenda.sources.moduleRules")
     def test_list_gmail_folder_with_posts(
-        self, mock_module_rules, mock_get_emails, mock_display_posts
+        self, mock_module_rules, mock_select_rule, mock_get_emails, mock_display_posts
     ):
         """Test listing a Gmail folder with posts."""
         args = Args(interactive=False, delete=False, verbose=False)
 
         mock_api_src = MagicMock()
         posts = [{"id": "1"}, {"id": "2"}]
-        mock_module_rules.from_config.return_value.selectRuleInteractive.return_value = mock_api_src
+        mock_select_rule.return_value = mock_api_src
         mock_get_emails.return_value = posts
 
         list_folder(args, "gmail")
 
-        mock_module_rules.from_config.return_value.selectRuleInteractive.assert_called_once_with(
-            service="gmail", title="Select mail account"
+        mock_select_rule.assert_called_once_with(
+            mock_module_rules.from_config.return_value, "gmail", title="Select mail account"
         )
         mock_get_emails.assert_called_once_with(args, mock_api_src)
         mock_display_posts.assert_called_once_with(mock_api_src, posts)
@@ -810,3 +817,151 @@ class TestApiFailureLeavesMessagePending(unittest.TestCase):
         result, remembered = self._flow(MagicMock(return_value=(None, None)))
         self.assertFalse(result)
         self.assertEqual(remembered, ["mail-1", "mail-2"])
+
+
+class TestPromptsThroughThePort(unittest.TestCase):
+    """The prompts of the add flow go through manage_agenda.ui, and a cancel from one of
+    them leaves nothing half-recorded."""
+
+    @patch("manage_agenda.sources._get_msgs_from_folder", return_value=(None, None))
+    def test_process_txt_cli_does_not_ask_for_filenames_without_i(self, mock_folder):
+        from manage_agenda.sources import process_txt_cli
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        with use_ui(ScriptedUI()) as ui:
+            process_txt_cli(Args(interactive=False), MagicMock())
+
+        self.assertEqual(ui.calls, [])
+        mock_folder.assert_called_once()
+        self.assertEqual(mock_folder.call_args.args[1], [])
+
+    @patch("manage_agenda.sources._get_msgs_from_folder", return_value=(None, None))
+    def test_process_txt_cli_asks_for_filenames_with_i(self, mock_folder):
+        from manage_agenda.sources import process_txt_cli
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        with use_ui(ScriptedUI([("ask_text", " a.txt  b.txt ")])) as ui:
+            process_txt_cli(Args(interactive=True), MagicMock())
+
+        self.assertEqual([call.kind for call in ui.calls], ["ask_text"])
+        self.assertEqual(mock_folder.call_args.args[1], ["a.txt", "b.txt"])
+
+    def _run_flow(self, process_result, item_cleaner, on_item_done):
+        """One item through _process_common_flow; `process_result` is what the extraction
+        step returns, or an exception it raises."""
+        from manage_agenda.sources import _process_common_flow
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        process = MagicMock(side_effect=process_result) if isinstance(
+            process_result, BaseException
+        ) else MagicMock(return_value=process_result)
+        with patch(
+            "manage_agenda.sources._process_event_with_llm_and_calendar", process
+        ), patch(
+            "manage_agenda.sources._get_post_datetime_and_diff",
+            return_value=(now, datetime.timedelta(0)),
+        ):
+            return _process_common_flow(
+                Args(interactive=True),
+                MagicMock(),
+                ["item"],
+                metadata_extractor=lambda item, i: ("id-1", "title", now, "identity-1", 0),
+                content_extractor=lambda item, i, date, title: "some text",
+                item_cleaner=item_cleaner,
+                on_item_done=on_item_done,
+            )
+
+    def test_cancel_during_extraction_marks_and_records_nothing(self):
+        """A UserCancelled from the date review (or the retry/snippet choice) escapes the
+        flow - it is not an LLMError/CalendarError - before `finished` is set, so neither
+        item_cleaner (the mailbox) nor on_item_done (the ledger) runs for that item."""
+        from manage_agenda.exceptions import UserCancelled
+
+        item_cleaner, on_item_done = MagicMock(), MagicMock()
+        with self.assertRaises(UserCancelled):
+            self._run_flow(UserCancelled(), item_cleaner, on_item_done)
+        item_cleaner.assert_not_called()
+        on_item_done.assert_not_called()
+
+    def test_cancel_in_the_cleanup_question_still_records_the_published_item(self):
+        """The "remove the label?" question comes after the event was published: a cancel
+        there still lets on_item_done record what was created."""
+        from manage_agenda.exceptions import UserCancelled
+
+        item_cleaner = MagicMock(side_effect=UserCancelled())
+        on_item_done = MagicMock()
+        with self.assertRaises(UserCancelled):
+            self._run_flow((["event"], [{"success": True}]), item_cleaner, on_item_done)
+        on_item_done.assert_called_once()
+        self.assertEqual(on_item_done.call_args.args[2], [{"success": True}])
+
+
+class TestAddSourceResolution(unittest.TestCase):
+    """add_events_cli's source choice and dispatch, split into resolve_add_source() and
+    run_add_source() so a GUI can drive them with its own selection."""
+
+    WEB = ("web/http", "set", "(Enter URLs or leave empty)")
+    TEXT = ("text", "set", "(enter filenames or leave empty)")
+
+    def _rules(self):
+        rules = MagicMock()
+        rules.more = {}
+        return rules
+
+    @patch("manage_agenda.sources.get_add_sources")
+    def test_flag_picks_by_name_without_asking(self, mock_sources):
+        from manage_agenda.sources import resolve_add_source
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        mock_sources.return_value = (["gmail1", "imap1"], [self.WEB, self.TEXT])
+        with use_ui(ScriptedUI()) as ui:
+            self.assertEqual(resolve_add_source(Args(source="imap"), self._rules()), "imap1")
+            self.assertEqual(resolve_add_source(Args(source="web"), self._rules()), self.WEB)
+            self.assertIsNone(resolve_add_source(Args(source="nothing"), self._rules()))
+            self.assertIsNone(resolve_add_source(Args(), self._rules()))
+        self.assertEqual(ui.calls, [])
+
+    @patch("manage_agenda.sources.get_add_sources")
+    def test_interactive_offers_accounts_then_web_and_text(self, mock_sources):
+        from manage_agenda.sources import resolve_add_source
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        mock_sources.return_value = (["gmail1", "imap1"], [self.WEB, self.TEXT])
+        with use_ui(ScriptedUI([("choose_one", 3)])) as ui:
+            self.assertEqual(resolve_add_source(Args(interactive=True), self._rules()), self.TEXT)
+        self.assertEqual(ui.calls[0].payload["options"], ["gmail1", "imap1", self.WEB, self.TEXT])
+
+    @patch("manage_agenda.sources.process_email_cli")
+    @patch("manage_agenda.sources.process_txt_cli")
+    @patch("manage_agenda.sources.process_web_cli")
+    def test_run_add_source_dispatches(self, mock_web, mock_txt, mock_email):
+        from manage_agenda.sources import run_add_source
+
+        args, model, rules = Args(force_refresh=True), MagicMock(), self._rules()
+        run_add_source(args, model, self.WEB, rules)
+        mock_web.assert_called_once_with(args, model, urls=None, force_refresh=True, rules=rules)
+        run_add_source(args, model, "http://a http://b", rules)
+        self.assertEqual(mock_web.call_args.kwargs["urls"], ["http://a", "http://b"])
+        run_add_source(args, model, self.TEXT, rules)
+        mock_txt.assert_called_once_with(args, model, source_name=None, rules=rules)
+        run_add_source(args, model, ("imap", "set", "me@host", "posts"), rules)
+        mock_email.assert_called_once_with(
+            args, model, selected_source=("imap", "set", "me@host", "posts"), rules=rules
+        )
+
+
+class TestRestorableIdentities(unittest.TestCase):
+    @patch("manage_agenda.sources.load_handled_mail_state")
+    def test_only_identities_with_cancelled_events(self, mock_state):
+        from manage_agenda.sources import restorable_identities
+
+        mock_state.return_value = {
+            "a": {"cancelled_events": [{"event_id": "e1"}, {"event_id": "e2"}]},
+            "b": {"cancelled_events": []},
+            "c": {},
+        }
+        self.assertEqual(restorable_identities(), {"a": ["e1", "e2"]})

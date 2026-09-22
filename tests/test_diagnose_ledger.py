@@ -7,7 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import googleapiclient.errors
 import pytest
@@ -246,11 +246,12 @@ class TestConnectCalendar:
         before = config.read_bytes()
         rules = MagicMock()
 
-        api = diagnose_ledger.connect_calendar(True, rules, config_path=config)
+        with patch("manage_agenda.connections.select_rule_interactive") as select_rule:
+            api = diagnose_ledger.connect_calendar(True, rules, config_path=config)
 
-        rules.selectRuleInteractive.assert_called_once()
+        select_rule.assert_called_once()
         rules.readConfigSrc.assert_not_called()
-        assert api is rules.selectRuleInteractive.return_value
+        assert api is select_rule.return_value
         assert config.read_bytes() == before
 
     def test_no_saved_account_and_one_configured_uses_it(self, tmp_path):

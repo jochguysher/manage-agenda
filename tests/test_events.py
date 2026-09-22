@@ -200,3 +200,86 @@ class TestEvents(unittest.TestCase):
 
         mock_client.events().insert.assert_called()
         mock_client.events().delete.assert_called()
+
+
+class TestUpdateEventStatusThroughThePort(unittest.TestCase):
+    """update_event_status_cli asks through the UI port, and no longer needs a text filter
+    to run non-interactively."""
+
+    def _api(self):
+        api = MagicMock()
+        api.getPosts.return_value = [
+            {"id": "e1", "summary": "Busy one", "transparency": "opaque"},
+            {"id": "e2", "summary": "Free one", "transparency": "transparent"},
+            {"id": "e3", "summary": "Busy two"},
+        ]
+        api.getPostTitle.side_effect = lambda event: event.get("summary")
+        return api
+
+    @patch("manage_agenda.events.display_posts")
+    @patch("manage_agenda.events.connections.select_api")
+    def test_non_interactive_without_text_offers_every_busy_event(self, mock_select_api, _display):
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        api = self._api()
+        mock_select_api.return_value = api
+        args = Args(interactive=False, source="cal-1", text=None)
+
+        with use_ui(ScriptedUI([("select_events", [1])])) as ui:
+            update_event_status_cli(args)
+
+        # Only "busy" (opaque, or unset) events are offered: e1 and e3.
+        offered = ui.calls[0].payload["events"]
+        self.assertEqual([event["id"] for event in offered], ["e1", "e3"])
+        self.assertEqual(ui.calls[0].payload["labels"], ["Busy one", "Busy two"])
+        update = api.getClient.return_value.events.return_value.update
+        update.assert_called_once()
+        self.assertEqual(update.call_args.kwargs["calendarId"], "cal-1")
+        self.assertEqual(update.call_args.kwargs["body"]["id"], "e3")
+        self.assertEqual(update.call_args.kwargs["body"]["transparency"], "transparent")
+
+    @patch("manage_agenda.events.display_posts")
+    @patch("manage_agenda.events.connections.select_api")
+    def test_interactive_asks_for_the_text_filter_first(self, mock_select_api, _display):
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        mock_select_api.return_value = self._api()
+        args = Args(interactive=True, source="cal-1", text=None)
+
+        with use_ui(ScriptedUI([("ask_text", "two"), ("select_events", [])])) as ui:
+            update_event_status_cli(args)
+
+        self.assertEqual([call.kind for call in ui.calls], ["ask_text", "select_events"])
+        self.assertEqual([e["id"] for e in ui.calls[1].payload["events"]], ["e3"])
+
+
+class TestCalendarOperationsThroughThePort(unittest.TestCase):
+    @patch("manage_agenda.events.display_posts")
+    @patch("manage_agenda.events.connections.select_api")
+    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    def test_clean_asks_the_operation_through_choose_action(
+        self, _select_cal, mock_select_api, _display
+    ):
+        from manage_agenda.events import clean_events_cli
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        api = MagicMock()
+        api.getPosts.return_value = [
+            {"id": "e1", "summary": "Old meeting", "start": {"dateTime": "2024-01-15T10:00:00"}, "end": {"dateTime": "2024-01-15T11:00:00"}}
+        ]
+        api.getPostTitle.return_value = "Old meeting"
+        mock_select_api.return_value = api
+        args = Args(interactive=True)
+
+        answers = [("ask_text", ""), ("select_events", "all"), ("choose_action", "1")]
+        with use_ui(ScriptedUI(answers)) as ui:
+            clean_events_cli(args)
+
+        self.assertEqual([call.kind for call in ui.calls], ["ask_text", "select_events", "choose_action"])
+        self.assertEqual([key for key, _label in ui.calls[2].payload["actions"]], ["0", "1", "2"])
+        # "1" is copy: an insert on the destination, no delete on the source.
+        api.getClient.return_value.events.return_value.insert.assert_called_once()
+        api.getClient.return_value.events.return_value.delete.assert_not_called()

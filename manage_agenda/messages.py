@@ -1187,4 +1187,55 @@ TRANSLATIONS = {
         "en": "Visit",
         "fr": "Visite",
     },
+    # --- UI port: prompts that used to be inline input()/select_from_list calls ---
+    "cli.gui.help": {
+        "en": "Open the desktop window (needs the 'gui' extra: pip install 'manage-agenda[gui]')",
+        "fr": "Ouvre la fenêtre de bureau (nécessite l'extra 'gui' : pip install 'manage-agenda[gui]')",
+    },
+    "cli.gui.not_installed": {
+        "en": (
+            "The desktop window needs PySide6, which is not installed: "
+            "pip install 'manage-agenda[gui]' ({error})"
+        ),
+        "fr": (
+            "La fenêtre de bureau nécessite PySide6, qui n'est pas installé : "
+            "pip install 'manage-agenda[gui]' ({error})"
+        ),
+    },
+    "cli.install.failed": {
+        "en": "Browser installation failed (exit code {code}).",
+        "fr": "L'installation du navigateur a échoué (code de sortie {code}).",
+    },
+    "llm.starting_ollama": {
+        "en": "Ollama is not running; starting `ollama serve`...",
+        "fr": "Ollama ne tourne pas ; lancement de `ollama serve`...",
+    },
+    "llm.ollama_unreachable": {
+        "en": "Could not reach Ollama after starting it: {error}",
+        "fr": "Impossible de joindre Ollama après l'avoir lancé : {error}",
+    },
+    "llm.no_ollama_models": {
+        "en": "Ollama has no models installed (try `ollama pull <model>`).",
+        "fr": "Ollama n'a aucun modèle installé (essayez `ollama pull <modèle>`).",
+    },
+    "llm.no_model_selected": {
+        "en": "No model selected.",
+        "fr": "Aucun modèle sélectionné.",
+    },
+    "connections.selected_rule": {
+        "en": "Selected rule: {rule}",
+        "fr": "Règle sélectionnée : {rule}",
+    },
+    "extraction.action_retry": {
+        "en": "Retry with the same text",
+        "fr": "Réessayer avec le même texte",
+    },
+    "extraction.action_provide_snippet": {
+        "en": "Provide a text snippet for the LLM to focus on",
+        "fr": "Fournir un extrait de texte sur lequel le LLM doit se concentrer",
+    },
+    "extraction.action_skip": {
+        "en": "Skip this item",
+        "fr": "Ignorer cet élément",
+    },
 }

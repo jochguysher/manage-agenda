@@ -13,6 +13,8 @@ from manage_agenda.llm import (
     load_config,
 )
 from manage_agenda.sources import Args
+from manage_agenda.ui import use_ui
+from manage_agenda.ui.fake import ScriptedUI
 from manage_agenda.user_config import load_user_config, save_user_config
 
 
@@ -55,26 +57,78 @@ class TestLLMClient(unittest.TestCase):
 
 
 class TestOllamaClient(unittest.TestCase):
-    @patch("manage_agenda.llm.select_from_list")
     @patch("manage_agenda.llm.OllamaClient.list_models")
-    def test_ollama_init_with_model_name(self, mock_list_models, mock_select):
+    def test_ollama_init_with_model_name(self, mock_list_models):
         """Test OllamaClient initialization with model name."""
-        client = OllamaClient(model_name="llama2")
+        with use_ui(ScriptedUI()) as ui:
+            client = OllamaClient(model_name="llama2")
         self.assertEqual(client.model_name, "llama2")
         mock_list_models.assert_not_called()
-        mock_select.assert_not_called()
+        self.assertEqual(ui.calls, [])
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "llama2"))
     @patch("manage_agenda.llm.OllamaClient.list_models")
-    def test_ollama_init_without_model_name(self, mock_list_models, mock_select):
+    def test_ollama_init_without_model_name(self, mock_list_models):
         """Test OllamaClient initialization without model name."""
         mock_list_models.return_value = [{"model": "llama2"}, {"model": "mistral"}]
 
-        client = OllamaClient(model_name="")
+        with use_ui(ScriptedUI([("choose_one", 0)])) as ui:
+            client = OllamaClient(model_name="")
 
         mock_list_models.assert_called_once()
-        mock_select.assert_called_once()
-        self.assertIsNotNone(client.model_name)
+        self.assertEqual([call.kind for call in ui.calls], ["choose_one"])
+        self.assertEqual(ui.calls[0].payload["identifier"], "model")
+        self.assertEqual(client.model_name, "llama2")
+
+    @patch("manage_agenda.llm.OllamaClient.list_models")
+    def test_ollama_nothing_chosen_is_an_llm_error(self, mock_list_models):
+        mock_list_models.return_value = [{"model": "llama2"}]
+        from manage_agenda.exceptions import LLMError
+
+        with use_ui(ScriptedUI([("choose_one", None)])), self.assertRaises(LLMError):
+            OllamaClient(model_name="")
+
+    @patch("manage_agenda.llm.time.sleep")
+    @patch("manage_agenda.llm.subprocess.Popen")
+    @patch("manage_agenda.llm.OllamaClient.list_models")
+    def test_ollama_start_is_bounded(self, mock_list_models, mock_popen, mock_sleep):
+        """A server that never answers: `ollama serve` is spawned once, polled
+        OLLAMA_START_ATTEMPTS times, then LLMError - the old loop respawned forever."""
+        from manage_agenda import llm
+        from manage_agenda.exceptions import LLMError
+
+        mock_list_models.side_effect = ConnectionError("refused")
+        with patch.object(llm, "OLLAMA_START_ATTEMPTS", 3), use_ui(ScriptedUI()) as ui:
+            with self.assertRaises(LLMError):
+                OllamaClient(model_name="")
+
+        mock_popen.assert_called_once()
+        self.assertEqual(mock_popen.call_args.args[0], ["ollama", "serve"])
+        self.assertEqual(mock_sleep.call_count, 3)
+        self.assertEqual(mock_list_models.call_count, 4)  # the first try plus 3 polls
+        self.assertEqual([call.kind for call in ui.calls], [])
+
+    @patch("manage_agenda.llm.time.sleep")
+    @patch("manage_agenda.llm.subprocess.Popen")
+    @patch("manage_agenda.llm.OllamaClient.list_models")
+    def test_ollama_start_succeeds_once_the_server_answers(
+        self, mock_list_models, mock_popen, mock_sleep
+    ):
+        models = [{"model": "llama2"}]
+        mock_list_models.side_effect = [ConnectionError("refused"), ConnectionError("x"), models]
+
+        with use_ui(ScriptedUI([("choose_one", 0)])):
+            client = OllamaClient(model_name="")
+
+        mock_popen.assert_called_once()
+        self.assertEqual(client.model_name, "llama2")
+
+    @patch("manage_agenda.llm.subprocess.Popen", side_effect=FileNotFoundError("no ollama"))
+    @patch("manage_agenda.llm.OllamaClient.list_models", side_effect=ConnectionError("refused"))
+    def test_ollama_binary_missing_is_an_llm_error(self, mock_list_models, mock_popen):
+        from manage_agenda.exceptions import LLMError
+
+        with use_ui(ScriptedUI()), self.assertRaises(LLMError):
+            OllamaClient(model_name="")
 
     @patch("manage_agenda.llm.chat")
     def test_ollama_generate_text_success(self, mock_chat):
@@ -128,7 +182,6 @@ class TestGeminiClient(unittest.TestCase):
         mock_genai_client.assert_called_once_with(api_key="fake_api_key")
 
     @patch("manage_agenda.llm.genai.Client")
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "models/gemini-pro"))
     @patch("manage_agenda.llm.GeminiClient.list_models")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
@@ -137,7 +190,6 @@ class TestGeminiClient(unittest.TestCase):
         mock_exists,
         mock_load_config,
         mock_list_models,
-        mock_select,
         mock_genai_client,
     ):
         """Test GeminiClient initialization without model name."""
@@ -148,10 +200,15 @@ class TestGeminiClient(unittest.TestCase):
 
         mock_model_obj = MagicMock()
         mock_model_obj.name = "models/gemini-pro"
-        mock_list_models.return_value = [mock_model_obj]
+        other_model = MagicMock()
+        other_model.name = "models/embedding-001"
+        mock_list_models.return_value = [other_model, mock_model_obj]
 
-        client = GeminiClient(model_name="")
+        with use_ui(ScriptedUI([("choose_one", 0)])) as ui:
+            client = GeminiClient(model_name="")
 
+        # Only the gemini models are offered (what select_from_list's selector did).
+        self.assertEqual(ui.calls[0].payload["options"], [mock_model_obj])
         self.assertEqual(client.model_name, "gemini-pro")
 
     @patch("manage_agenda.llm.genai.Client")
@@ -225,11 +282,10 @@ class TestGeminiClient(unittest.TestCase):
 
 
 class TestMistralClient(unittest.TestCase):
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "mistral-small"))
     @patch("manage_agenda.llm.Mistral")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
-    def test_mistral_init(self, mock_exists, mock_load_config, mock_mistral, mock_select):
+    def test_mistral_init(self, mock_exists, mock_load_config, mock_mistral):
         """Test MistralClient initialization."""
         mock_config = MagicMock()
         mock_config.sections.return_value = ["section1"]
@@ -245,12 +301,31 @@ class TestMistralClient(unittest.TestCase):
 
         _ = MistralClient(model_name="mistral-small")
 
-    @patch("manage_agenda.llm.select_from_list")
+    @patch("manage_agenda.llm.Mistral")
+    @patch("manage_agenda.llm.load_config")
+    @patch("os.path.exists", return_value=True)
+    def test_mistral_init_without_model_name_prompts(
+        self, mock_exists, mock_load_config, mock_mistral
+    ):
+        mock_config = MagicMock()
+        mock_config.sections.return_value = ["section1"]
+        mock_config.get.return_value = "fake_api_key"
+        mock_load_config.return_value = mock_config
+        mock_models = MagicMock()
+        mock_models.data = [MagicMock(id="mistral-small"), MagicMock(id="mistral-large")]
+        mock_mistral.return_value.models.list.return_value = mock_models
+
+        with use_ui(ScriptedUI([("choose_one", 1)])) as ui:
+            client = MistralClient(model_name="")
+
+        self.assertEqual(ui.calls[0].payload["identifier"], "id")
+        self.assertEqual(client.model_name, "mistral-large")
+
     @patch("manage_agenda.llm.Mistral")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
     def test_mistral_with_a_model_name_does_not_prompt(
-        self, mock_exists, mock_load_config, mock_mistral, mock_select
+        self, mock_exists, mock_load_config, mock_mistral
     ):
         """A given model_name used to be silently ignored (self.model_name was never set from
         it before the "do we need to prompt" check), so MistralClient always prompted even
@@ -260,17 +335,17 @@ class TestMistralClient(unittest.TestCase):
         mock_config.get.return_value = "fake_api_key"
         mock_load_config.return_value = mock_config
 
-        client = MistralClient(model_name="mistral-small-latest")
+        with use_ui(ScriptedUI()) as ui:
+            client = MistralClient(model_name="mistral-small-latest")
 
-        mock_select.assert_not_called()
+        self.assertEqual(ui.calls, [])
         self.assertEqual(client.model_name, "mistral-small-latest")
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "mistral-small"))
     @patch("manage_agenda.llm.Mistral")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
     def test_mistral_generate_text_success(
-        self, mock_exists, mock_load_config, mock_mistral_class, mock_select
+        self, mock_exists, mock_load_config, mock_mistral_class
     ):
         """Test MistralClient generate_text success."""
         mock_config = MagicMock()
@@ -295,12 +370,11 @@ class TestMistralClient(unittest.TestCase):
 
         self.assertEqual(result, "Mistral response")
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "mistral-small"))
     @patch("manage_agenda.llm.Mistral")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
     def test_mistral_generate_text_error(
-        self, mock_exists, mock_load_config, mock_mistral_class, mock_select
+        self, mock_exists, mock_load_config, mock_mistral_class
     ):
         """Test MistralClient generate_text error handling."""
         mock_config = MagicMock()

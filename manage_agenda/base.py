@@ -5,11 +5,13 @@ Base utility functions for manage-agenda.
 import datetime
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 from manage_agenda.config import config, log_file_path, msg_txt_dir
 from manage_agenda.i18n import t
+from manage_agenda.ui import echo
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +307,7 @@ def setup_logging(verbose: bool = False) -> None:
     second command in the same process, tests) replaces the handlers a previous call added
     rather than stacking a second copy of each - so every record is written once.
     """
-    print(t("base.setting_logging"))
+    echo(t("base.setting_logging"))
 
     # Determine log file location - log_file_path() is resolved fresh on every call (see its
     # docstring), so a test's LOG_FILE env var override, set at any time, is always picked up.
@@ -358,3 +360,25 @@ def format_time(seconds):
     m, s = divmod(seconds, 60)
     h, m = divmod(m, 60)
     return f"{int(h)}h {int(m)}m {s:.2f}s"
+
+
+def install_playwright_browser(browser, on_output=None):
+    """Run `python -m playwright install <browser>` as a child process, streaming its output
+    line by line to `on_output` (echo by default), and return its exit code.
+
+    A child process rather than playwright's own entry point in this one: that entry point
+    reads sys.argv and calls sys.exit(), which a GUI cannot survive."""
+    report = on_output or echo
+    command = [sys.executable, "-m", "playwright", "install", browser]
+    logger.info(f"Running: {' '.join(command)}")
+    try:
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+    except OSError as error:
+        report(f"{type(error).__name__}: {error}")
+        return 1
+    assert process.stdout is not None
+    for line in process.stdout:
+        report(line.rstrip("\n"))
+    return process.wait()

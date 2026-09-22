@@ -259,11 +259,13 @@ def reduce_html(url, post, force_refresh=False):
         elif len(words) == 1 and any(char.isdigit() for char in words[0]):
             newResult = newResult + "\n" + line
 
-    print(t("web.orig_debug", result=result))
-    print(t("web.end_orig_debug"))
+    # Whole-page dumps: debug diagnostics, not the interface - they went to stdout on every
+    # URL, which a GUI's log panel could not absorb. The log file gets them at DEBUG (-v).
+    logger.debug(t("web.orig_debug", result=result))
+    logger.debug(t("web.end_orig_debug"))
     result = newResult
-    print(t("web.res_debug", result=result))
-    print(t("web.end_res_debug"))
+    logger.debug(t("web.res_debug", result=result))
+    logger.debug(t("web.end_res_debug"))
 
     # if extra_script_data:
     #     result = f"{result}\n\n--- Extra Data Found in Scripts ---\n{extra_script_data}"

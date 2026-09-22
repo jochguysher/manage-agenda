@@ -1073,13 +1073,17 @@ class TestLedgerAccountSelection:
     def _invoke(self, command, *extra, interactive_api=None, saved_api=None, configured=(ACCOUNT_SRC, OTHER_SRC)):
         """`saved_api` is what readConfigSrc returns - the saved account, or the only
         configured one; `configured` the gcalendar accounts socialModules knows."""
-        with patch("manage_agenda.sources.moduleRules") as mock_rules:
+        with patch("manage_agenda.sources.moduleRules") as mock_rules, patch(
+            "manage_agenda.connections.select_rule_interactive", return_value=interactive_api
+        ) as select_rule:
             rules = mock_rules.from_config.return_value
             rules.more = {}
             rules.selectRule.return_value = list(configured)
-            rules.selectRuleInteractive.return_value = interactive_api
             rules.readConfigSrc.return_value = saved_api
             result = CliRunner().invoke(cli.cli, [command, *extra])
+            # The interactive account choice, as a MagicMock attribute of `rules` so the
+            # tests below can assert on it exactly as they did on selectRuleInteractive.
+            rules.selectRuleInteractive = select_rule
         return result, rules
 
     def _ledger_with_one_ref_of_account_b(self):

@@ -127,3 +127,45 @@ class TestSetupLogging:
             handler.flush()
         assert second.read_text(encoding="utf-8").count("once") == 1
         assert "once" not in first.read_text(encoding="utf-8")
+
+
+class TestInstallPlaywrightBrowser:
+    def test_streams_the_child_output_and_returns_its_code(self):
+        from manage_agenda.base import install_playwright_browser
+
+        process = unittest.mock.MagicMock()
+        process.stdout = iter(["Downloading firefox\n", "done\n"])
+        process.wait.return_value = 0
+        lines = []
+        with patch("manage_agenda.base.subprocess.Popen", return_value=process) as popen:
+            code = install_playwright_browser("firefox", on_output=lines.append)
+
+        assert code == 0
+        assert lines == ["Downloading firefox", "done"]
+        command = popen.call_args.args[0]
+        assert command[0] == sys.executable
+        assert command[1:] == ["-m", "playwright", "install", "firefox"]
+
+    def test_a_missing_interpreter_or_module_is_reported_not_raised(self):
+        from manage_agenda.base import install_playwright_browser
+
+        lines = []
+        with patch("manage_agenda.base.subprocess.Popen", side_effect=OSError("no python")):
+            code = install_playwright_browser("firefox", on_output=lines.append)
+
+        assert code == 1
+        assert lines == ["OSError: no python"]
+
+    def test_defaults_to_echo(self):
+        from manage_agenda.base import install_playwright_browser
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        process = unittest.mock.MagicMock()
+        process.stdout = iter(["line\n"])
+        process.wait.return_value = 2
+        with patch("manage_agenda.base.subprocess.Popen", return_value=process), use_ui(
+            ScriptedUI()
+        ) as ui:
+            assert install_playwright_browser("webkit") == 2
+        assert ui.output == ["line"]

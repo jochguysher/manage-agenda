@@ -15,6 +15,8 @@ from manage_agenda.connections import (
 )
 from manage_agenda.exceptions import CalendarError
 from manage_agenda.sources import Args
+from manage_agenda.ui import use_ui
+from manage_agenda.ui.fake import ScriptedUI
 from manage_agenda.user_config import load_user_config, save_user_config
 
 
@@ -169,13 +171,17 @@ class TestConnections(unittest.TestCase):
         )
         mock_rules = MagicMock()
         mock_module_rules.from_config.return_value = mock_rules
-        with patch(
-            "manage_agenda.connections.select_from_list",
-            return_value=(1, "gmail"),
-        ):
-            authorize(args)
+        mock_rules.selectRule.return_value = ["gmail-rule"]
+        mock_rules.more = {"gmail-rule": {"k": "v"}}
+        answers = [("choose_one", "gmail"), ("choose_one", "gmail-rule")]
+        with use_ui(ScriptedUI(answers)) as ui:
+            result = authorize(args)
         mock_module_rules.from_config.assert_called_once()
-        mock_rules.selectRuleInteractive.assert_called_once_with("gmail", title="Account")
+        mock_rules.selectRule.assert_called_once_with("gmail", "")
+        mock_rules.readConfigSrc.assert_called_once_with("", "gmail-rule", {"k": "v"})
+        self.assertIs(result, mock_rules.readConfigSrc.return_value)
+        self.assertEqual([call.kind for call in ui.calls], ["choose_one", "choose_one"])
+        self.assertEqual(ui.calls[1].payload["title"], "Account")
 
     @patch("manage_agenda.connections.moduleRules")
     def test_select_api_interactive(self, mock_module_rules):
@@ -188,8 +194,22 @@ class TestConnections(unittest.TestCase):
             text="",
         )
         mock_rules = MagicMock()
-        select_api(args, "gmail", rules=mock_rules)
-        mock_rules.selectRuleInteractive.assert_called_once_with(["gmail"], title="")
+        mock_rules.selectRule.return_value = ["rule-a", "rule-b"]
+        mock_rules.more = {"rule-b": {"k": "v"}}
+        with use_ui(ScriptedUI([("choose_one", 1)])) as ui:
+            result = select_api(args, "gmail", rules=mock_rules)
+        mock_rules.selectRule.assert_called_once_with("gmail", "")
+        mock_rules.readConfigSrc.assert_called_once_with("", "rule-b", {"k": "v"})
+        self.assertIs(result, mock_rules.readConfigSrc.return_value)
+        self.assertEqual(ui.calls[0].payload["options"], ["rule-a", "rule-b"])
+
+    def test_select_api_interactive_nothing_chosen(self):
+        args = Args(interactive=True)
+        mock_rules = MagicMock()
+        mock_rules.selectRule.return_value = ["rule-a"]
+        with use_ui(ScriptedUI([("choose_one", None)])):
+            self.assertIsNone(select_api(args, "gmail", rules=mock_rules))
+        mock_rules.readConfigSrc.assert_not_called()
 
     @patch("manage_agenda.connections.moduleRules")
     def test_select_api_non_interactive(self, mock_module_rules):
@@ -209,8 +229,7 @@ class TestConnections(unittest.TestCase):
         mock_rules.selectRule.assert_called_once_with(["gmail"], "")
         mock_rules.readConfigSrc.assert_called_once_with("", "test_rule", {"key": "value"})
 
-    @patch("manage_agenda.connections.select_from_list")
-    def test_select_calendar_no_calendars(self, mock_select_from_list):
+    def test_select_calendar_no_calendars(self):
         """Test select_calendar when no calendars are found."""
         from manage_agenda.exceptions import CalendarError
 
@@ -222,8 +241,7 @@ class TestConnections(unittest.TestCase):
 
         self.assertIn("No calendars found", str(context.exception))
 
-    @patch("manage_agenda.connections.select_from_list")
-    def test_select_calendar_no_writable(self, mock_select_from_list):
+    def test_select_calendar_no_writable(self):
         """Test select_calendar when no writable calendars exist."""
         from manage_agenda.exceptions import CalendarError
 
@@ -242,10 +260,15 @@ class TestConnections(unittest.TestCase):
         args = Args(interactive=True)
         mock_rules = MagicMock()
         mock_module_rules.from_config.return_value = mock_rules
+        mock_rules.selectRule.side_effect = lambda name, _sel: {"gmail": ["g1"], "imap": ["i1"]}[name]
+        mock_rules.more = {}
 
-        result = select_api(args, "email")
+        with use_ui(ScriptedUI([("choose_one", "i1")])) as ui:
+            result = select_api(args, "email")
         self.assertIsNotNone(result)
-        mock_rules.selectRuleInteractive.assert_called_once()
+        # Both mail services' accounts are offered together.
+        self.assertEqual(ui.calls[0].payload["options"], ["g1", "i1"])
+        mock_rules.readConfigSrc.assert_called_once_with("", "i1", None)
 
     @patch("manage_agenda.connections.moduleRules")
     def test_select_api_email_non_interactive(self, mock_module_rules):
