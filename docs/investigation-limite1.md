@@ -199,13 +199,28 @@ redesign exists to prevent. A `processed_marker` configured on such an account i
 (treated as a config mistake) and logged, not silently accepted; accounts on that path keep
 using `_delete_email` (label removal) exactly as before.
 
-**"folder" mode, as shipped, is mark-only**: moving a message to the dedicated folder on
-success works end-to-end (MOVE when advertised, else COPY + capability-gated safe deletion -
-see below), but the COPYUID locator is not yet captured or stored in the ledger, so a future
-`requeue` resolution cannot yet relocate a moved message back by UID - it would need to fall
-back to the `UID SEARCH HEADER Message-ID` path from the start. Capturing the locator is
-deferred to the commit that implements requeue's actual un-marking step (see §6-adjacent
-"Per-marker behavior" below), since that is the first consumer of it.
+**Requeue's un-marking step, shipped**: `on_user_delete=requeue` (see reconcile_handled_events)
+marks an entry `pending_requeue`; `process_email_cli` now attempts to un-mark that identity's
+source message in the *current* account's folder on every run, unconditionally (not gated on
+whether this run's scan found anything new). A miss is expected and harmless when the
+identity belongs to a different account - it stays `pending_requeue` and is retried on that
+account's next run (self-correcting; no cross-account tracking added to the ledger).
+`flag_seen` mode needs no physical action here - reconcile already excludes a
+`pending_requeue` identity from `still_handled`, and `flag_seen` exclusion is ledger-only, so
+the message is already visible again on the very next scan.
+
+`keyword` mode un-marks by a bounded `UID SEARCH HEADER Message-ID` in the source folder (no
+locator needed, matching "Per-marker behavior" below - the message never moved). `folder` mode
+now captures the COPYUID locator at move time (stored on the ledger entry via
+`remember_handled_mail`) and consumes it at un-mark time: if the locator's folder and
+`UIDVALIDITY` still match, it relocates the message straight back by UID; otherwise it falls
+back to the same bounded Message-ID search, in the dedicated folder. Both paths treat a
+hash-fallback identity (no real Message-ID existed - see `mail_identity()`) or an ambiguous
+(zero- or multi-match) search the same way: left pending, logged, never guessed at. A formal
+`source_lost` status is not introduced by this commit - an un-marking attempt that never
+succeeds simply lets the entry expire via the existing no_event-style purge fallback
+(`recorded_at` + the short margin), which is functionally equivalent to giving up without new
+purge logic.
 
 **Default marker per account**, chosen from probe (f)'s result for that specific account:
 `keyword` if `PERMANENTFLAGS` advertises `\*` **and** a STORE/FETCH round trip confirms the

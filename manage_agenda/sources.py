@@ -153,6 +153,10 @@ def _load_state(path):
     earns the entry the longer purge margin (see _entry_purge_after) and so a future manual
     `restore` command has an id to act on. A "requeue" resolution clears them instead - it
     deliberately abandons the old ids, computing a fresh one from the bumped generation.
+
+    `imap_locator` ({"folder": ..., "uidvalidity": ..., "uid": ...}), when present, is the
+    COPYUID-derived locator folder-mode marking captured at move time - see
+    remember_handled_mail(). Consumed (and then cleared) by the requeue un-marking step.
     """
     if not path.is_file():
         return {}
@@ -174,13 +178,23 @@ def _load_state(path):
                 except (TypeError, ValueError):
                     generation = 0
                 recorded_at = entry.get("recorded_at")
+                imap_locator = entry.get("imap_locator")
             else:
-                events, cancelled_events, status, generation, recorded_at = [], [], "no_event", 0, None
+                events, cancelled_events, status, generation, recorded_at, imap_locator = (
+                    [],
+                    [],
+                    "no_event",
+                    0,
+                    None,
+                    None,
+                )
             parsed = {"events": events, "status": status, "generation": generation}
             if cancelled_events:
                 parsed["cancelled_events"] = cancelled_events
             if isinstance(recorded_at, str) and recorded_at:
                 parsed["recorded_at"] = recorded_at
+            if isinstance(imap_locator, dict) and imap_locator:
+                parsed["imap_locator"] = imap_locator
             state[str(identity)] = parsed
         return state
     ids = data.get("ids") if isinstance(data, dict) else None
@@ -225,12 +239,19 @@ def load_handled_mail_ids(path=None):
     return set(load_handled_mail_state(path).keys())
 
 
-def remember_handled_mail(identity, path=None, events=None):
+def remember_handled_mail(identity, path=None, events=None, imap_locator=None):
     """Record that a message identity was handled, with the Calendar events it created, if any.
 
     `events` is a list of {"calendar_id": ..., "event_id": ..., "event_end": ...}. Without it,
     the message is recorded as handled with no known event (its identity is skipped, but never
     un-skipped, since there is nothing to check against Calendar).
+
+    `imap_locator` (e.g. {"folder": ..., "uidvalidity": ..., "uid": ...}), when given, is
+    stored on the entry - the COPYUID-derived locator folder-mode marking captured while
+    moving the message, so a future requeue can relocate it by UID instead of searching (see
+    _imap_move_to_folder_safely / the un-marking step in process_email_cli). Always passed
+    alongside `events` in the same call - never a separate call for the same identity, or the
+    "already recorded, nothing changed" early-return below would silently drop it.
 
     `recorded_at` is stamped once, the first time this identity is recorded, and never touched
     again on later calls (e.g. adding more events to an already-known identity) - it is the
@@ -245,6 +266,9 @@ def remember_handled_mail(identity, path=None, events=None):
     entry = state.get(
         identity, {"events": [], "status": "no_event", "generation": 0, "recorded_at": now}
     )
+    locator_changed = bool(imap_locator) and entry.get("imap_locator") != imap_locator
+    if imap_locator:
+        entry["imap_locator"] = imap_locator
     if events:
         merged = list(entry.get("events") or [])
         # Dedup by (calendar_id, event_id), not whole-dict equality: two refs for the same
@@ -256,13 +280,33 @@ def remember_handled_mail(identity, path=None, events=None):
             if key not in seen_keys:
                 merged.append(ref)
                 seen_keys.add(key)
-        if merged == entry.get("events") and entry.get("status") == "created" and identity in state:
+        if (
+            merged == entry.get("events")
+            and entry.get("status") == "created"
+            and identity in state
+            and not locator_changed
+        ):
             return
         entry["events"] = merged
         entry["status"] = "created"
-    elif identity in state:
+    elif identity in state and not locator_changed:
         return
     state[identity] = entry
+    _save_state(path, state)
+
+
+def forget_handled_mail(identity, path=None):
+    """Fully remove an identity from the ledger - used once a requeue's un-marking step
+    succeeds, so the message goes through the normal scan/dedup pipeline on its next
+    appearance rather than a separate parallel path (see docs/investigation-limite1.md - the
+    design explicitly rules out a second extraction path)."""
+    if not identity:
+        return
+    path = Path(path) if path else handled_mail_file()
+    state = _load_state(path)
+    if identity not in state:
+        return
+    del state[identity]
     _save_state(path, state)
 
 
@@ -753,15 +797,65 @@ def _imap_uid_for_sequence(client, sequence):
     return match.group(1) if match else None
 
 
+def _parse_copyuid(response_lines):
+    """{"uidvalidity": ..., "uid": ...} from a `[COPYUID uidvalidity src-uid dest-uid]`
+    response code (RFC 4315), or None if absent (no UIDPLUS, or the server didn't include
+    one)."""
+    for line in response_lines or []:
+        if not isinstance(line, bytes):
+            continue
+        match = _COPYUID_RE.search(line)
+        if match:
+            uidvalidity, _src_uid, dest_uid = (part.decode() for part in match.groups())
+            return {"uidvalidity": uidvalidity, "uid": dest_uid}
+    return None
+
+
+def _imap_move_known_uid_safely(client, capabilities, uid, dest_folder):
+    """Core of the never-bare-EXPUNGE move logic, operating on an already-known UID. Shared by
+    _imap_move_to_folder_safely (moving OUT of the scanned folder on success) and the requeue
+    un-marking step (moving BACK from the dedicated folder) - same safety rule either
+    direction: MOVE when advertised (RFC 6851); otherwise COPY, then delete the original only
+    when UIDPLUS (RFC 4315) scopes it to exactly this UID via `UID EXPUNGE` - NEVER a bare
+    EXPUNGE, which would purge every \\Deleted message already in the folder, including ones a
+    user deleted through their own client and expects to stay merely flagged until that client
+    expunges them. Without UIDPLUS, the original is left flagged \\Deleted instead.
+
+    Returns (success, locator). `locator` ({"folder": dest_folder, "uidvalidity": ...,
+    "uid": ...}) is present only when the server included a COPYUID response code (requires
+    UIDPLUS).
+
+    Does not SELECT anything - the caller is responsible for having the right folder selected
+    before calling, and for re-selecting whatever it needs afterward.
+    """
+    client.create(dest_folder)  # ignore failure if it already exists
+    success = False
+    locator = None
+    if capabilities is not None and capabilities.has_move:
+        typ, data = client.uid("MOVE", uid, dest_folder)
+        success = typ == "OK"
+        if success:
+            locator = _parse_copyuid(data)
+    else:
+        typ, data = client.uid("COPY", uid, dest_folder)
+        if typ == "OK":
+            success = True
+            locator = _parse_copyuid(data)
+            if capabilities is not None and capabilities.has_uidplus:
+                client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+                client.uid("EXPUNGE", uid)
+            else:
+                # No UIDPLUS (or capabilities unknown): never a bare EXPUNGE here - leave the
+                # original flagged \Deleted, excluded from future scans by UNDELETED instead.
+                client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+    if locator:
+        locator = dict(locator, folder=dest_folder)
+    return success, locator
+
+
 def _imap_move_to_folder_safely(api_src, capabilities, source_folder, sequence, dest_folder):
     """Move one message (by sequence number, in the currently-selected source_folder) to
-    dest_folder. MOVE when advertised (RFC 6851); otherwise COPY, then delete the original
-    only when UIDPLUS (RFC 4315) lets it be scoped to exactly this message's UID via
-    `UID EXPUNGE` - NEVER a bare EXPUNGE, which would purge every \\Deleted message already
-    in the folder, including ones a user deleted through their own client and expects to
-    stay merely flagged until that client expunges them. Without UIDPLUS, the original is
-    left flagged \\Deleted and excluded from future scans via the UNDELETED criterion
-    _imap_exclusion_criterion() adds for folder mode.
+    dest_folder - see _imap_move_known_uid_safely for the safety rule this applies.
 
     Re-selects source_folder before returning either way, since the caller's scan loop
     expects to still be working against it, not whatever this move last SELECTed.
@@ -772,34 +866,22 @@ def _imap_move_to_folder_safely(api_src, capabilities, source_folder, sequence, 
     one just removed, never a lower one - so a not-yet-processed message's `sequence` is never
     invalidated by marking an earlier (higher-numbered) one. This function does not itself
     enforce that ordering; it is the caller's responsibility (see process_email_cli).
+
+    Returns (success, locator) - see _imap_move_known_uid_safely. The caller stores `locator`
+    on the ledger entry so a future requeue can relocate the message by UID instead of
+    searching for it.
     """
     client = api_src.getClient()
     if client is None:
-        return False
+        return False, None
     client.select(source_folder)
     uid = _imap_uid_for_sequence(client, sequence)
     if uid is None:
         client.select(source_folder)
-        return False
-    client.create(dest_folder)  # ignore failure if it already exists
-
-    success = False
-    if capabilities is not None and capabilities.has_move:
-        typ, _data = client.uid("MOVE", uid, dest_folder)
-        success = typ == "OK"
-    else:
-        typ, _data = client.uid("COPY", uid, dest_folder)
-        if typ == "OK":
-            success = True
-            if capabilities is not None and capabilities.has_uidplus:
-                client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-                client.uid("EXPUNGE", uid)
-            else:
-                # No UIDPLUS (or capabilities unknown): never a bare EXPUNGE here - leave the
-                # original flagged \Deleted, excluded from future scans by UNDELETED instead.
-                client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        return False, None
+    success, locator = _imap_move_known_uid_safely(client, capabilities, uid, dest_folder)
     client.select(source_folder)
-    return success
+    return success, locator
 
 
 def _imap_store_keyword(api_src, folder, sequence, name, add=True):
@@ -823,6 +905,153 @@ def _mark_imap_seen(api_src, folder, sequence):
     client.select(folder)
     typ, _data = client.store(str(sequence), "+FLAGS", "\\Seen")
     return typ == "OK"
+
+
+def _looks_like_message_id(identity):
+    """Whether `identity` is plausibly a real Message-ID (mail_identity()'s primary form)
+    rather than its sha256-hash fallback (used when no Message-ID header existed on the
+    original message). The hash fallback is 32 lowercase hex characters and essentially never
+    contains "@"; a real Message-ID (RFC 5322 local-part@domain) always does. Used to decide
+    whether a targeted mailbox search by Message-ID is even possible - the hash fallback
+    carries no header value to search for."""
+    return "@" in identity
+
+
+def _imap_since_bound(recorded_at, margin_days=30):
+    """A `SINCE <date>` IMAP search fragment bounding a targeted search to roughly when the
+    message was originally handled (margin_days matches LEDGER_EVENT_END_MARGIN_DAYS, defined
+    later in this module - kept a literal default here to avoid a definition-order
+    dependency), so relocating a message is never an unbounded mailbox scan - see
+    docs/investigation-limite1.md. None if recorded_at is unavailable or unparseable."""
+    from manage_agenda.scheduling import imap_date
+
+    parsed = _parse_iso_datetime(recorded_at)
+    if parsed is None:
+        return None
+    since_date = (parsed - datetime.timedelta(days=margin_days)).date()
+    return f"SINCE {imap_date(since_date)}"
+
+
+def _imap_search_one_uid_by_message_id(client, folder, identity, recorded_at):
+    """UID of the single message in `folder` whose Message-ID header matches `identity`,
+    bounded by a SINCE window derived from `recorded_at` - or None if the search is
+    impossible (identity is a hash fallback, not a real Message-ID), finds nothing, or finds
+    more than one candidate. Multiple matches are logged and treated exactly like zero: never
+    an arbitrary pick among several candidates (see docs/investigation-limite1.md)."""
+    if not _looks_like_message_id(identity):
+        return None
+    typ, _data = client.select(folder)
+    if typ != "OK":
+        return None
+    criterion = f'HEADER Message-ID "{identity}"'
+    since = _imap_since_bound(recorded_at)
+    if since:
+        criterion = f"({criterion} {since})"
+    typ, data = client.uid("SEARCH", None, criterion)
+    if typ != "OK" or not data or not data[0]:
+        return None
+    uids = data[0].split()
+    if len(uids) != 1:
+        logging.warning(
+            f"{identity}: {len(uids)} candidate messages found by Message-ID in {folder!r} "
+            "while requeueing - leaving pending rather than guessing which one to un-mark."
+        )
+        return None
+    return uids[0].decode() if isinstance(uids[0], bytes) else str(uids[0])
+
+
+def _imap_unmark_keyword_by_identity(api_src, folder, identity, name, entry):
+    """Remove the keyword from the message matching `identity` in `folder`. No locator is
+    needed or used - the message never moved, so a bounded Message-ID search finds it exactly
+    where marking left it (see docs/investigation-limite1.md, "no locator needed" for keyword
+    mode)."""
+    client = api_src.getClient()
+    if client is None:
+        return False
+    uid = _imap_search_one_uid_by_message_id(client, folder, identity, entry.get("recorded_at"))
+    if uid is None:
+        return False
+    typ, _data = client.uid("STORE", uid, "-FLAGS", f"({name})")
+    return typ == "OK"
+
+
+def _imap_current_uidvalidity(client):
+    values = client.untagged_responses.get("UIDVALIDITY")
+    if not values:
+        return None
+    value = values[0]
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def _imap_unmark_folder_by_identity(api_src, capabilities, source_folder, dest_folder, identity, entry):
+    """Move the message matching `identity` back from `dest_folder` to `source_folder`. Uses
+    the stored COPYUID locator (see remember_handled_mail) directly when its folder and
+    UIDVALIDITY still match - no search needed; otherwise falls back to a bounded Message-ID
+    search in `dest_folder` (never an unbounded one - see _imap_since_bound), and treats zero
+    or multiple candidates the same way: left pending, never guessed at."""
+    client = api_src.getClient()
+    if client is None:
+        return False
+
+    locator = entry.get("imap_locator")
+    if isinstance(locator, dict) and locator.get("folder") == dest_folder and locator.get("uid"):
+        typ, _data = client.select(dest_folder)
+        if typ == "OK" and _imap_current_uidvalidity(client) == locator.get("uidvalidity"):
+            success, _new_locator = _imap_move_known_uid_safely(
+                client, capabilities, locator["uid"], source_folder
+            )
+            client.select(source_folder)
+            return success
+
+    uid = _imap_search_one_uid_by_message_id(client, dest_folder, identity, entry.get("recorded_at"))
+    if uid is None:
+        return False
+    success, _new_locator = _imap_move_known_uid_safely(client, capabilities, uid, source_folder)
+    client.select(source_folder)
+    return success
+
+
+def _requeue_pending_imap_messages(
+    api_src,
+    source_details,
+    is_imap_source,
+    imap_marker_mode,
+    imap_marker_value,
+    imap_capabilities,
+    handled_state,
+    path=None,
+):
+    """For each pending_requeue identity in the ledger, try to un-mark its source message in
+    THIS account's folder so mail_identity() finds it fresh on the next scan - never a second
+    parallel extraction path, just letting the normal scan pick it up again once un-marked.
+    On success, the entry is removed entirely (forget_handled_mail) rather than left in any
+    intermediate state.
+
+    A miss here (message not found in this account's folder) is expected and harmless when
+    the identity belongs to a different account - it simply stays pending_requeue and is
+    retried on that account's next run (self-correcting, no cross-account tracking needed).
+
+    flag_seen mode needs no action here: reconcile already excludes a pending_requeue
+    identity from `still_handled`, and flag_seen's exclusion is ledger-only (no server-side
+    SEARCH exclusion, see _imap_exclusion_criterion), so the message is already visible again
+    on the very next scan with no physical un-mark required.
+    """
+    if not is_imap_source or imap_marker_mode not in ("keyword", "folder"):
+        return
+    source_folder = source_details.get("folder") or source_details.get("channel") or "INBOX"
+    for identity, entry in handled_state.items():
+        if entry.get("status") != "pending_requeue":
+            continue
+        if imap_marker_mode == "keyword":
+            unmarked = _imap_unmark_keyword_by_identity(
+                api_src, source_folder, identity, imap_marker_value, entry
+            )
+        else:
+            unmarked = _imap_unmark_folder_by_identity(
+                api_src, imap_capabilities, source_folder, imap_marker_value, identity, entry
+            )
+        if unmarked:
+            forget_handled_mail(identity, path=path)
 
 
 def _fetched_message(fetched):
@@ -1257,10 +1486,32 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     handled = reconcile_handled_events(args)
     purge_expired_ledger_entries()
     # Loaded once, after reconcile and purge - metadata_extractor below does one dict lookup
-    # per message instead of re-reading the ledger file each time. Also how a pending_requeue
-    # entry (identity intentionally left out of `handled` above) would be found by a future
-    # un-marking step - not wired yet, this commit only lands the local resolution decision.
+    # per message instead of re-reading the ledger file each time, and is also where a
+    # pending_requeue entry (identity intentionally left out of `handled` above) is found for
+    # the un-marking step below.
     handled_state = load_handled_mail_state()
+
+    # Computed once per connection (never per message - see ImapCapabilities), and
+    # unconditionally (not gated on `posts`): the un-marking step below acts on entries left
+    # over from a *previous* run, regardless of whether this run's scan finds anything new.
+    is_imap_source = "imap" in (getattr(api_src, "service", "") or "").lower()
+    imap_marker_mode, imap_marker_value = (
+        _imap_marker_mode(source_details) if is_imap_source else (None, None)
+    )
+    imap_capabilities = (
+        _imap_capabilities_once(api_src)
+        if is_imap_source and imap_marker_mode == "folder"
+        else None
+    )
+
+    # A pending_requeue identity is only ever un-marked in the account whose folder actually
+    # has it - a miss here is expected and harmless when the identity belongs to a different
+    # account (self-correcting: it stays pending_requeue for that account's next run, no
+    # cross-account tracking needed).
+    _requeue_pending_imap_messages(
+        api_src, source_details, is_imap_source, imap_marker_mode, imap_marker_value,
+        imap_capabilities, handled_state,
+    )
 
     posts = _get_emails_from_folder(args, api_src, source_details=source_details, handled=handled)
     if posts:
@@ -1269,18 +1520,6 @@ def process_email_cli(args, model, selected_source=None, rules=None):
             print(t("sources.skipped_handled_messages", skipped=skipped))
 
     if posts:
-        # Computed once per connection (never per message - see ImapCapabilities), and only
-        # when actually needed: folder mode is the only marker touching CAPABILITY-gated
-        # behavior. Deliberately inside `if posts:` - nothing below is reached otherwise.
-        is_imap_source = "imap" in (getattr(api_src, "service", "") or "").lower()
-        imap_marker_mode, imap_marker_value = (
-            _imap_marker_mode(source_details) if is_imap_source else (None, None)
-        )
-        imap_capabilities = (
-            _imap_capabilities_once(api_src)
-            if is_imap_source and imap_marker_mode == "folder"
-            else None
-        )
 
         def metadata_extractor(post, i):
             # Use getPostIdM if it exists, otherwise use getPostId
@@ -1318,21 +1557,29 @@ def process_email_cli(args, model, selected_source=None, rules=None):
             _delete_email(args, api_src, post_pos, selected_source, rules=rules)
 
         def on_item_done(post, i, calendar_result):
-            remember_handled_mail(mail_identity(post), events=_extract_event_refs(calendar_result))
-            if not is_imap_source or not imap_marker_mode:
-                return
-            sequence = post[0] if isinstance(post, tuple) else None
-            folder = source_details.get("folder") or source_details.get("channel") or "INBOX"
-            if not sequence:
-                return
-            if imap_marker_mode == "keyword":
-                _imap_store_keyword(api_src, folder, sequence, imap_marker_value, add=True)
-            elif imap_marker_mode == "flag_seen":
-                _mark_imap_seen(api_src, folder, sequence)
-            elif imap_marker_mode == "folder":
-                _imap_move_to_folder_safely(
-                    api_src, imap_capabilities, folder, sequence, imap_marker_value
-                )
+            # Marking happens BEFORE remember_handled_mail, not after: a folder-mode move is
+            # the only source of the COPYUID locator, and it needs to reach the ledger in the
+            # SAME write remember_handled_mail makes - a second, later call for the same
+            # identity would hit its "already recorded, nothing changed" early return and
+            # silently drop the locator (see remember_handled_mail's docstring).
+            imap_locator = None
+            if is_imap_source and imap_marker_mode:
+                sequence = post[0] if isinstance(post, tuple) else None
+                folder = source_details.get("folder") or source_details.get("channel") or "INBOX"
+                if sequence:
+                    if imap_marker_mode == "keyword":
+                        _imap_store_keyword(api_src, folder, sequence, imap_marker_value, add=True)
+                    elif imap_marker_mode == "flag_seen":
+                        _mark_imap_seen(api_src, folder, sequence)
+                    elif imap_marker_mode == "folder":
+                        _, imap_locator = _imap_move_to_folder_safely(
+                            api_src, imap_capabilities, folder, sequence, imap_marker_value
+                        )
+            remember_handled_mail(
+                mail_identity(post),
+                events=_extract_event_refs(calendar_result),
+                imap_locator=imap_locator,
+            )
 
         from manage_agenda.scheduling import message_age_limit_days
 

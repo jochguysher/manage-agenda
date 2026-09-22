@@ -183,6 +183,38 @@ class TestProcessEmailCli(unittest.TestCase):
         mock_delete_email.assert_not_called()
         mock_store_keyword.assert_called_once_with(mock_api_src, "INBOX", "5", "$AgendaDone", add=True)
 
+    @patch("manage_agenda.sources._requeue_pending_imap_messages")
+    @patch("manage_agenda.sources.moduleRules")
+    def test_process_email_cli_attempts_requeue_unmarking_even_with_no_new_posts(
+        self, mock_module_rules, mock_requeue
+    ):
+        """The un-marking step must run regardless of whether this run's scan finds anything
+        new - it resolves entries left pending_requeue by a *previous* run."""
+        args = self.Args(
+            interactive=False, delete=None, source="gemini", verbose=False, destination="", text=""
+        )
+        mock_api_src = MagicMock()
+        mock_api_src.service = "imap"
+
+        source_details = {"folder": "INBOX", "processed_marker": "keyword:$AgendaDone"}
+        rules = mock_module_rules.from_config.return_value
+        rules.more = {"mail-account": source_details}
+        rules.readConfigSrc.return_value = mock_api_src
+
+        with (
+            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources._get_emails_from_folder", return_value=None),
+        ):
+            process_email_cli(args, MagicMock(), selected_source="mail-account")
+
+        mock_requeue.assert_called_once()
+        call_args = mock_requeue.call_args.args
+        self.assertEqual(call_args[0], mock_api_src)
+        self.assertEqual(call_args[1], source_details)
+        self.assertEqual(call_args[2], True)  # is_imap_source
+        self.assertEqual(call_args[3], "keyword")  # imap_marker_mode
+        self.assertEqual(call_args[4], "$AgendaDone")  # imap_marker_value
+
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
     @patch("manage_agenda.sources.moduleRules")
