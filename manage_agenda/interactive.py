@@ -14,6 +14,8 @@ import sys
 import click
 from socialModules.configMod import select_from_list
 
+from manage_agenda.i18n import t
+
 try:
     import questionary
 except Exception:
@@ -89,7 +91,7 @@ def _select_many_fallback(options, labels, title):
         click.echo(f"\n{title}")
     for index, label in enumerate(labels):
         click.echo(f"{index}) {label}")
-    raw = click.prompt("Selection (comma-separated numbers)", default="", show_default=False)
+    raw = click.prompt(t("interactive.comma_separated_selection"), default="", show_default=False)
     chosen = []
     for piece in raw.split(","):
         piece = piece.strip()

@@ -8,6 +8,7 @@ from socialModules.configMod import safe_get, select_from_list
 from socialModules.moduleRules import moduleRules
 
 from manage_agenda.exceptions import CalendarError
+from manage_agenda.i18n import t
 from manage_agenda.interactive import select_many, select_one
 
 
@@ -15,15 +16,15 @@ def authorize(args, rules=None):
     """Authorize and return a configured service connection."""
     rules = rules or moduleRules.from_config()
     if args.interactive:
-        print("Choose the Google service to authorize.")
-        print("  gcalendar — write events to Google Calendar (required by add)")
-        print("  gmail     — read a Gmail mailbox")
+        print(t("connections.choose_service_to_authorize"))
+        print(t("connections.gcalendar_service_description"))
+        print(t("connections.gmail_service_description"))
         _choice, service = select_from_list(
             ["gcalendar", "gmail"],
-            title="Google service",
+            title=t("connections.google_service_title"),
             default="gcalendar",
         )
-        return rules.selectRuleInteractive(service, title="Account")
+        return rules.selectRuleInteractive(service, title=t("connections.account_title"))
 
     rules_all = rules.selectRule("", "")
     if not rules_all:
@@ -58,7 +59,7 @@ def prepare_calendar(args, rules=None, config_path=None):
     account_name = saved.get("calendar_account")
 
     if reconfigure or not account_name:
-        api = select_api(args, "gcalendar", rules=rules, title="Select Calendar")
+        api = select_api(args, "gcalendar", rules=rules, title=t("connections.select_calendar_title"))
     else:
         api = rules.readConfigSrc("", account_name, rules.more.get(account_name, {}))
 
@@ -79,7 +80,7 @@ def prepare_calendar(args, rules=None, config_path=None):
     prompted = False
     if not calendar_ids:
         try:
-            calendar_ids = select_calendars(api, title="Select calendar(s)", args=args)
+            calendar_ids = select_calendars(api, title=t("connections.select_calendars_title"), args=args)
         except CalendarError as error:
             print(error)
             return False
@@ -141,33 +142,32 @@ def describe_auth_failure(api_src):
 
     expected = credential_path(api_src)
     if not expected:
-        return "The OAuth client file path could not be determined."
+        return t("connections.oauth_path_undetermined")
 
-    lines = [f"Expected credentials file: {expected}"]
+    lines = [t("connections.expected_credentials_file", expected=expected)]
     if not os.path.exists(expected):
-        lines.append("That file does not exist, so Google was not contacted.")
+        lines.append(t("connections.file_does_not_exist"))
         folder = os.path.dirname(expected)
         name = os.path.basename(expected)
         neighbor = os.path.join(folder, name[1:] if name.startswith(".") else name)
         if name.startswith(".") and os.path.isfile(neighbor):
-            lines.append(f"A file with the same name, without the leading dot, is here: {neighbor}")
-            lines.append("The program only reads the name that starts with a dot.")
+            lines.append(t("connections.same_name_without_dot", neighbor=neighbor))
+            lines.append(t("connections.only_reads_dot_name"))
         else:
-            lines.append("No client JSON was found under that name.")
+            lines.append(t("connections.no_client_json_found"))
         return "\n".join(lines)
 
     try:
         with open(expected, encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception as error:
-        lines.append(f"The file cannot be read: {type(error).__name__}: {error}")
+        lines.append(
+            t("connections.file_cannot_be_read", error_type=type(error).__name__, error=error)
+        )
         return "\n".join(lines)
 
     if isinstance(payload, dict) and "web" in payload and "installed" not in payload:
-        lines.append(
-            "Google client type is 'web'. This program needs a Desktop app client, "
-            "whose JSON starts with \"installed\"."
-        )
+        lines.append(t("connections.wrong_client_type"))
         return "\n".join(lines)
 
     try:
@@ -175,13 +175,12 @@ def describe_auth_failure(api_src):
 
         InstalledAppFlow.from_client_secrets_file(expected, scopes=["openid"])
     except Exception as error:
-        lines.append(f"Google client library rejected the file: {type(error).__name__}: {error}")
+        lines.append(
+            t("connections.client_library_rejected", error_type=type(error).__name__, error=error)
+        )
         return "\n".join(lines)
 
-    lines.append(
-        "The client file is readable, but the browser consent did not finish "
-        "and no token was saved."
-    )
+    lines.append(t("connections.consent_not_finished"))
     return "\n".join(lines)
 
 
@@ -206,7 +205,7 @@ def complete_desktop_oauth(api_src):
     with open(token_path, "wb") as handle:
         pickle.dump(credentials, handle)
     os.chmod(token_path, 0o600)
-    print(f"Google token saved: {token_path}")
+    print(t("connections.google_token_saved", token_path=token_path))
     return True
 
 
@@ -219,13 +218,8 @@ def missing_calendar_message(calendar_api=None):
     if "@" in user:
         nick, _, server = user.rpartition("@")
         credential = f"~/.mySocial/config/.Gcalendar_{server}_{nick}.json"
-    account = f" for {user}" if user else ""
-    return (
-        f"Google Calendar is not authorized{account}.\n"
-        "Create an OAuth desktop client in Google Cloud, with the Calendar API enabled, "
-        f"and save the downloaded JSON as:\n  {credential}\n"
-        "Then run: uv run manage-agenda auth -i"
-    )
+    account = t("connections.for_account", user=user) if user else ""
+    return t("connections.missing_calendar_message", account=account, credential=credential)
 
 
 def _eligible_calendars(calendar_api):
@@ -235,13 +229,13 @@ def _eligible_calendars(calendar_api):
     calendar_api.setCalendarList()
     calendars = calendar_api.getCalendarList()
     if not calendars:
-        raise CalendarError("No calendars found in your Google Calendar account")
+        raise CalendarError(t("connections.no_calendars_found"))
 
     eligible_calendars = [
         calendar for calendar in calendars if "reader" not in calendar.get("accessRole", "")
     ]
     if not eligible_calendars:
-        raise CalendarError("No writable calendars found. Check your calendar permissions.")
+        raise CalendarError(t("connections.no_writable_calendars_found"))
     return eligible_calendars
 
 
@@ -250,12 +244,6 @@ def _should_prompt_for_calendar(args):
     set, or when no `args` is given at all - callers outside the CLI (events.py's
     clean/copy/move flow) have always prompted unconditionally here."""
     return not args or getattr(args, "interactive", False) or getattr(args, "reconfigure", False)
-
-
-_NON_INTERACTIVE_MESSAGE = (
-    "No calendar configured for non-interactive use. Run with -i once (or --reconfigure) to "
-    "choose one, or pass -d/--destination with a calendar id."
-)
 
 
 def select_calendar(calendar_api, title="", args=None):
@@ -268,21 +256,21 @@ def select_calendar(calendar_api, title="", args=None):
     try:
         eligible_calendars = _eligible_calendars(calendar_api)
         if not _should_prompt_for_calendar(args):
-            raise CalendarError(_NON_INTERACTIVE_MESSAGE)
+            raise CalendarError(t("connections.non_interactive_message"))
 
         chosen = select_one(eligible_calendars, title=title, identifier="summary")
         if chosen is None:
-            raise CalendarError("No calendar was selected.")
+            raise CalendarError(t("connections.no_calendar_selected"))
 
         calendar_id = chosen["id"]
         logging.info(f"Selected calendar: {safe_get(chosen, ['summary'])} (ID: {calendar_id})")
         return calendar_id
     except (KeyError, IndexError, TypeError) as error:
-        raise CalendarError(f"Failed to select calendar: {error}") from error
+        raise CalendarError(t("connections.failed_to_select_calendar", error=error)) from error
     except CalendarError:
         raise
     except Exception as error:
-        raise CalendarError(f"Unexpected error selecting calendar: {error}") from error
+        raise CalendarError(t("connections.unexpected_error_selecting_calendar", error=error)) from error
 
 
 def select_calendars(calendar_api, title="", args=None):
@@ -291,18 +279,18 @@ def select_calendars(calendar_api, title="", args=None):
     try:
         eligible_calendars = _eligible_calendars(calendar_api)
         if not _should_prompt_for_calendar(args):
-            raise CalendarError(_NON_INTERACTIVE_MESSAGE)
+            raise CalendarError(t("connections.non_interactive_message"))
 
         chosen = select_many(eligible_calendars, title=title, identifier="summary")
         if not chosen:
-            raise CalendarError("No calendar was selected.")
+            raise CalendarError(t("connections.no_calendar_selected"))
 
         calendar_ids = [item["id"] for item in chosen]
         logging.info(f"Selected calendars: {[safe_get(item, ['summary']) for item in chosen]} (IDs: {calendar_ids})")
         return calendar_ids
     except (KeyError, IndexError, TypeError) as error:
-        raise CalendarError(f"Failed to select calendar: {error}") from error
+        raise CalendarError(t("connections.failed_to_select_calendar", error=error)) from error
     except CalendarError:
         raise
     except Exception as error:
-        raise CalendarError(f"Unexpected error selecting calendar: {error}") from error
+        raise CalendarError(t("connections.unexpected_error_selecting_calendar", error=error)) from error

@@ -15,6 +15,7 @@ from socialModules.configMod import safe_get
 
 from manage_agenda.base import format_time, write_file
 from manage_agenda.connections import select_api, select_calendars
+from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 
 
@@ -38,7 +39,7 @@ def add_message_to_event_description(event, content):
 
 def _get_text_snippet(original_content):
     """Get replacement source text while preserving its message date."""
-    print("Paste the relevant part of the text here (finish with Ctrl-D):")
+    print(t("extraction.paste_text_prompt"))
     lines = []
     while True:
         try:
@@ -65,7 +66,7 @@ def _print_context_and_options(content, options_prompt, verbose=False):
             print(line)
             break
     if verbose:
-        print_first_lines(content, content_type="source text")
+        print_first_lines(content, content_type=t("extraction.source_text_content_type"))
     return input(options_prompt).lower().strip()
 
 
@@ -87,38 +88,41 @@ def get_event_from_llm(model, prompt, post_id, verbose=False):
     from manage_agenda.sources import print_first_lines
     from manage_agenda.exceptions import LLMError
 
-    print(f"Calling LLM {model.model_name}")
+    print(t("extraction.calling_llm", model=model.model_name))
     event, vcal_json = None, None
     start_time = time.time()
     try:
         llm_response = model.generate_text(prompt)
     except LLMError as error:
-        print(f"LLM API error: {error}")
+        print(t("extraction.llm_api_error", error=error))
         return None, "ServiceError", time.time() - start_time
     write_file(f"log/{model.model_name}/{post_id}_llm.txt", llm_response)
     elapsed_time = time.time() - start_time
-    print(f"AI call took {format_time(elapsed_time)} ({elapsed_time:.2f} seconds)")
+    print(
+        t(
+            "extraction.ai_call_took",
+            duration=format_time(elapsed_time),
+            seconds=f"{elapsed_time:.2f}",
+        )
+    )
 
     memory_error_occurred = False
     json_error_occurred = True
     if not llm_response:
-        print("Failed to get response from LLM.")
+        print(t("extraction.failed_to_get_response"))
     elif "model requires more system memory" in llm_response:
-        print(
-            "LLM failed due to insufficient memory. Model requires more "
-            "system memory than available."
-        )
+        print(t("extraction.llm_insufficient_memory"))
         memory_error_occurred = True
     else:
         if verbose:
-            print_first_lines(llm_response, n=None, title="Reply")
+            print_first_lines(llm_response, n=None, title=t("extraction.title_reply"))
         try:
             vcal_json = ast.literal_eval(extract_json(llm_response.replace("\n", " ")))
             write_file(
                 f"log/{model.model_name}/{post_id}_vcal_extracted.txt", json.dumps(vcal_json)
             )
             if verbose:
-                print_first_lines(vcal_json, n=None, title="Json")
+                print_first_lines(vcal_json, n=None, title=t("extraction.title_json"))
             event = vcal_json
             json_error_occurred = False
         except json.JSONDecodeError as error:
@@ -178,35 +182,35 @@ def get_event_from_llm_with_retry(model, prompt, post_id, args):
         retries += 1
 
         if vcal_json == "MemoryError":
-            print("Switching to a different LLM due to memory constraints...")
+            print(t("extraction.switching_llm_memory"))
             source = None if args.interactive else model.model_name
             if not args.interactive:
-                print("Trying to switch to a lighter model automatically...")
-            print(f"Source: {source}")
+                print(t("extraction.trying_lighter_model"))
+            print(t("extraction.source_debug", source=source))
             new_model = select_llm(_with_source(args, source))
             if new_model:
                 model = new_model
                 if args.interactive:
-                    print(f"Selected new AI model: {model.__class__.__name__}")
+                    print(t("extraction.selected_new_ai_model", model=model.__class__.__name__))
                 else:
-                    print(f"Switched to lighter AI model: {model.__class__.__name__}")
+                    print(t("extraction.switched_lighter_ai_model", model=model.__class__.__name__))
                 event = None
                 vcal_json = None
             else:
                 if args.interactive:
-                    print("No alternative model selected. Skipping event processing.")
+                    print(t("extraction.no_alternative_model"))
                 else:
-                    print("Could not switch to a lighter model. Skipping event processing.")
+                    print(t("extraction.could_not_switch_model"))
                 memory_error_occurred = True
         elif vcal_json == "JsonError":
             event = None
             vcal_json = None
             json_error_occurred = False
-            print("Error in generated Json...")
+            print(t("extraction.json_generation_error"))
 
     if not event and retries >= max_retries:
         vcal_json = "RetryError"
-        print("Max retries reached. Skipping event processing.")
+        print(t("extraction.max_retries_reached"))
     return event, vcal_json, elapsed_time
 
 
@@ -271,14 +275,14 @@ def _extract_event_with_llm_retry(
         prompt = _create_llm_prompt(prompt_content, reference_date_time)
         write_file(f"log/{post_identifier}_prompt.txt", prompt)
         if args.verbose:
-            print_first_lines(prompt, n=None, title="Prompt")
+            print_first_lines(prompt, n=None, title=t("extraction.title_prompt"))
 
         event, vcal_json, elapsed_time = get_event_from_llm_with_retry(
             model, prompt, post_identifier, args
         )
         total_elapsed_time += elapsed_time
         if args.verbose:
-            print_first_lines(event, n=None, title="Event")
+            print_first_lines(event, n=None, title=t("extraction.title_event"))
         if event is None and vcal_json in {"MemoryError", "RetryError", "ServiceError"}:
             return event, vcal_json, total_elapsed_time, False, False, False
 
@@ -291,13 +295,13 @@ def _extract_event_with_llm_retry(
             processed_events = []
             for single_event in event:
                 if args.verbose and len(event) > 1:
-                    print_first_lines(single_event, title="Single event")
+                    print_first_lines(single_event, title=t("extraction.title_single_event"))
                 if isinstance(single_event, dict):
                     single_event = add_message_to_event_description(single_event, original_content)
                     processed_events.append(adjust_event_times(single_event))
             event = processed_events or None
             if args.verbose:
-                print_first_lines(processed_events, title="Proc event")
+                print_first_lines(processed_events, title=t("extraction.title_proc_event"))
             break
 
         write_file(
@@ -307,10 +311,10 @@ def _extract_event_with_llm_retry(
         if not args.interactive:
             return None, vcal_json, total_elapsed_time, False, False, False
 
-        print("\nLLM failed to extract event information.")
+        print(t("extraction.llm_failed_extract"))
         choice = _print_context_and_options(
             original_content,
-            "Options: (r)etry, (p)rovide relevant text snippet, (s)kip item: ",
+            t("extraction.retry_options_prompt"),
             args.verbose,
         )
         if choice == "r":
@@ -353,14 +357,20 @@ def _display_event_info(
     end_time_local = _format_datetime_for_display(safe_get(event, ["end", "dateTime"]))
     event_summary = safe_get(event, ["summary"]) or subject_for_print
     print("=====================================")
-    print(f"Summary: {event_summary}")
+    print(t("extraction.display_summary", summary=event_summary))
     if post_identifier:
-        print(f"File: {post_identifier}")
-    print(f"Start: {start_time_local}")
-    print(f"End: {end_time_local}")
-    print(f"Model: {model.model_name}")
+        print(t("extraction.display_file", post_identifier=post_identifier))
+    print(t("extraction.display_start", start=start_time_local))
+    print(t("extraction.display_end", end=end_time_local))
+    print(t("extraction.display_model", model=model.model_name))
     if elapsed_time is not None:
-        print(f"Time: {format_time(elapsed_time)} ({elapsed_time:.2f} seconds)")
+        print(
+            t(
+                "extraction.display_time",
+                duration=format_time(elapsed_time),
+                seconds=f"{elapsed_time:.2f}",
+            )
+        )
     print("=====================================")
     return start_time_local, end_time_local
 
@@ -388,8 +398,11 @@ def _process_event_with_llm_and_calendar(
     while should_process and not success:
         if date_validation_retries >= max_date_validation_retries:
             print(
-                f"Max date validation retries ({max_date_validation_retries}) "
-                f"reached for {post_identifier}. Skipping event processing."
+                t(
+                    "extraction.max_date_validation_retries_reached",
+                    max_retries=max_date_validation_retries,
+                    post_identifier=post_identifier,
+                )
             )
             break
 
@@ -401,7 +414,7 @@ def _process_event_with_llm_and_calendar(
         if vcal_json == "ServiceError":
             from manage_agenda.exceptions import LLMError
 
-            raise LLMError("The model API did not answer. This message stays pending.")
+            raise LLMError(t("extraction.model_api_no_answer"))
         if need_restart or need_another_ai:
             return None, None
         if not extraction_success or event is None:
@@ -416,17 +429,17 @@ def _process_event_with_llm_and_calendar(
                 event, content_text, args, rules
             )
             if not events:
-                print("No visit fits the hours, the weekdays, and the next room occupation.")
+                print(t("extraction.no_visit_fits"))
                 return None, None
         else:
             events = list(event)
             api_dst, selected_calendars = _selected_calendar(
-                args, rules, title=events[0].get("summary", "Event")
+                args, rules, title=events[0].get("summary") or t("extraction.event_fallback_title")
             )
         calendar_results = []
 
         if getattr(args, "output", "calendar") == "calendar" and not selected_calendars:
-            print("No calendar selected, skipping event creation.")
+            print(t("extraction.no_calendar_selected"))
         else:
             for idx, single_event in enumerate(events, start=1):
                 single_event = adjust_event_times(single_event)
@@ -449,7 +462,7 @@ def _process_event_with_llm_and_calendar(
                         single_event, post_identifier
                     )
                     if not is_valid:
-                        print(f"Date validation errors for {post_identifier}:")
+                        print(t("extraction.date_validation_errors_header", post_identifier=post_identifier))
                         for error in validation_errors:
                             print(f"  - {error}")
                         date_validation_retries += 1
@@ -482,9 +495,7 @@ def _process_event_with_llm_and_calendar(
                     if not all_published:
                         from manage_agenda.exceptions import CalendarError
 
-                        raise CalendarError(
-                            "The calendar was not updated. This message stays pending."
-                        )
+                        raise CalendarError(t("extraction.calendar_not_updated"))
                     published = True
                 else:
                     write_file(
@@ -498,20 +509,30 @@ def _process_event_with_llm_and_calendar(
                         calendar_results.extend(calendar_result)
                         for single_result in calendar_result:
                             if isinstance(single_result, dict) and single_result.get("duplicate"):
-                                print(f"Already on the calendar, skipped: {single_event.get('summary')}")
+                                print(
+                                    t(
+                                        "extraction.already_on_calendar",
+                                        summary=single_event.get("summary"),
+                                    )
+                                )
                             else:
-                                print("Calendar event created")
+                                print(t("extraction.calendar_event_created"))
                     else:
                         calendar_results.append(calendar_result)
-                        print(f"File {post_identifier}_{idx}_times.json created")
+                        print(
+                            t(
+                                "extraction.file_created",
+                                filename=f"{post_identifier}_{idx}_times.json",
+                            )
+                        )
                     success = True
                     write_file(file_name, json.dumps(single_event))
 
-        print(f"Success: {success}")
+        print(t("extraction.success_debug", success=success))
         if success:
             if args.verbose:
-                print(f"Events: {events}")
-                print(f"Results: {calendar_results}")
+                print(t("extraction.events_debug", events=events))
+                print(t("extraction.results_debug", results=calendar_results))
             return events, calendar_results
         return None, None
     return None, None
@@ -880,7 +901,7 @@ def _selected_calendar(args, rules, title):
     selected_calendars = getattr(args, "calendar_ids", None)
     if api_dst and selected_calendars:
         return api_dst, selected_calendars
-    api_dst = select_api(args, "gcalendar", rules=rules, title="Select Calendar")
+    api_dst = select_api(args, "gcalendar", rules=rules, title=t("extraction.select_calendar_title"))
     selected_calendars = select_calendars(api_dst, title=title, args=args)
     return api_dst, selected_calendars
 
@@ -899,7 +920,7 @@ def _visits_from_occupancy(event, content_text, args, rules):
     api_dst = None
     selected_calendars = []
     busy = []
-    api_dst, selected_calendars = _selected_calendar(args, rules, title="Visite")
+    api_dst, selected_calendars = _selected_calendar(args, rules, title=t("extraction.visit_title"))
     if api_dst and selected_calendars:
         busy = _calendar_busy(api_dst, selected_calendars, constraints)
     visits = plan_room_visits(payload, constraints, busy=busy, sender=sender)

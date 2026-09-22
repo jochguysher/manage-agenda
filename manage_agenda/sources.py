@@ -18,6 +18,7 @@ from manage_agenda.base import write_file
 from manage_agenda.config import config
 from manage_agenda.connections import prepare_calendar, select_api
 from manage_agenda.extraction import _process_event_with_llm_and_calendar
+from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 from manage_agenda.web import reduce_html
 
@@ -60,8 +61,8 @@ def print_first_lines(content, content_type="content", *, n=10, title=None):
             content = json.dumps(content, indent=2)
         else:
             content = str(content)
-    header = title or f"First {n} lines of {content_type}"
-    print(f"\n--- {header} ---")
+    header = title or t("sources.first_n_lines_header", n=n, content_type=content_type)
+    print(t("sources.section_header", header=header))
     for i, line in enumerate(content.splitlines()):
         if n is not None and i >= n:
             break
@@ -93,9 +94,9 @@ def _get_msgs_from_folder(args, source_name, rules=None):
 
     if not posts:
         if not os.path.exists(target_dir):
-            print(f"There is no {target_dir} directory")
+            print(t("sources.no_such_directory", target_dir=target_dir))
         else:
-            print(f"There are no posts in {target_dir}")
+            print(t("sources.no_posts_in_directory", target_dir=target_dir))
         posts = None
 
     return None, posts
@@ -474,15 +475,15 @@ def _fetch_imap_matches(api_src, folder, criteria, handled=None):
     """
     client = api_src.getClient()
     if client is None:
-        print("IMAP is not connected")
+        print(t("sources.imap_not_connected"))
         return None
     typ, _data = client.select(folder)
     if typ != "OK":
-        print(f"Could not open {folder}")
+        print(t("sources.could_not_open_folder", folder=folder))
         return None
     typ, data = client.search(None, criteria)
     if typ != "OK" or not data or not data[0]:
-        print(f"No messages match {criteria}")
+        print(t("sources.no_messages_match", criteria=criteria))
         return None
     # Highest sequence numbers are the most recently arrived.
     sequences = list(reversed(data[0].split()))[:IMAP_SCAN_WINDOW]
@@ -507,7 +508,7 @@ def _fetch_imap_matches(api_src, folder, criteria, handled=None):
         if len(posts) >= IMAP_MATCH_LIMIT:
             break
     if skipped:
-        print(f"Skipped {skipped} message(s) already handled")
+        print(t("sources.skipped_handled_messages", skipped=skipped))
     return posts or None
 
 
@@ -523,7 +524,7 @@ def _get_emails_from_folder(args, api_src, folder=None, source_details=None, han
         folder = folder or configured_folder or "INBOX"
         criteria = build_imap_from_search(parse_from_list(source_details.get("from", "")))
         if criteria is None:
-            print(f"No sender rules for {folder}. Nothing is read.")
+            print(t("sources.no_sender_rules", folder=folder))
             return None
         from manage_agenda.scheduling import combine_imap_search, imap_age_criteria
 
@@ -547,7 +548,7 @@ def _get_emails_from_folder(args, api_src, folder=None, source_details=None, han
     api_src.setLabels()
     label = api_src.getLabels(folder)
     if not label:
-        print(f"There are no posts tagged with label {folder}")
+        print(t("sources.no_posts_with_label", folder=folder))
     else:
         api_src.setChannel(folder)
         api_src.setPosts()
@@ -560,10 +561,12 @@ def list_folder(args, service):
     """List posts from the selected folder for a supported service."""
     rules = moduleRules.from_config()
     if service in ["email", "imap", "gmail"]:
-        api_src = rules.selectRuleInteractive(service=service, title="Select mail account")
+        api_src = rules.selectRuleInteractive(service=service, title=t("sources.select_mail_account"))
         posts = _get_emails_from_folder(args, api_src)
     elif service == "gcalendar":
-        api_src = rules.selectRuleInteractive(service=service, title="Select calendar account")
+        api_src = rules.selectRuleInteractive(
+            service=service, title=t("sources.select_calendar_account")
+        )
         posts = _get_events_from_calendar(args, api_src)
     else:
         raise ValueError(f"Unsupported folder service: {service}")
@@ -626,7 +629,7 @@ def _delete_email(args, api_src, post_id, source_name, rules=None):
     """Deletes an email, handling interactive confirmation and connection errors."""
     delete_confirmed = False
     if args.interactive:
-        confirmation = input("Do you want to remove the label from the email? (y/n): ")
+        confirmation = input(t("sources.confirm_remove_label"))
         if confirmation.lower() == "y":
             delete_confirmed = True
     else:
@@ -637,10 +640,10 @@ def _delete_email(args, api_src, post_id, source_name, rules=None):
         label = None
         for attempt in range(max_retries + 1):
             try:
-                print(f"Service: {api_src.service.lower()}")
+                print(t("sources.service_debug", service=api_src.service.lower()))
                 res = ""
                 if "imap" not in api_src.service.lower():
-                    print(f"label: {api_src.getChannel()}")
+                    print(t("sources.label_debug", label=api_src.getChannel()))
                     logging.info(f"label: {api_src.getChannel()}")
                     folder = api_src.getChannel()
                     label = api_src.getLabels(folder)
@@ -680,14 +683,12 @@ def _is_post_too_old(args, time_difference, max_days=7):
         return False
     if time_difference.days > max_days:
         if args.interactive:
-            confirmation = input(
-                f"The post has {time_difference.days} days. Do you want to process it? (y/n): "
-            )
+            confirmation = input(t("sources.confirm_process_old_post", days=time_difference.days))
             if confirmation.lower() != "y":
                 return True
         else:
             if args.verbose:
-                print(f"Too old ({time_difference.days} days), skipping.")
+                print(t("sources.too_old_skipping", days=time_difference.days))
             return True
     return False
 
@@ -724,7 +725,7 @@ def _process_common_flow(
             # 1. Metadata
             post_id, post_title, post_date = metadata_extractor(item, i)
 
-            print(f"Processing Title: {post_title}", flush=True)
+            print(t("sources.processing_title", post_title=post_title), flush=True)
 
             # 2. Check Age
             post_date_time, time_difference = _get_post_datetime_and_diff(post_date)
@@ -750,7 +751,7 @@ def _process_common_flow(
                 )
             except (LLMError, CalendarError) as error:
                 print(error)
-                print("Stopping this scan. Unfinished messages will be tried again.")
+                print(t("sources.stopping_scan"))
                 return processed_any_event
             finished = True
 
@@ -771,10 +772,10 @@ def process_txt_cli(args, model, source_name=None, rules=None):
 
     if not source_name:
         source_name = input(
-            f"Enter filenames separated by spaces (leave empty to use {config.MSG_TXT_DIR}): "
+            t("sources.enter_filenames", msg_txt_dir=config.MSG_TXT_DIR)
         ).split()
         if not source_name:
-            print(f"No filenames entered. Extracting texts from {config.MSG_TXT_DIR}...")
+            print(t("sources.no_filenames_entered", msg_txt_dir=config.MSG_TXT_DIR))
 
     api_src, posts = _get_msgs_from_folder(args, source_name, rules=rules)
 
@@ -859,7 +860,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         api_src = select_api(args, "email", rules=rules)
 
     if not prepare_calendar(args, rules):
-        print("No message was read. Fix the calendar connection, then run the scan again.")
+        print(t("sources.no_message_read_fix_calendar"))
         return False
 
     handled = reconcile_handled_events(args)
@@ -868,7 +869,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     if posts:
         posts, skipped = unseen_messages(posts, handled=handled)
         if skipped:
-            print(f"Skipped {skipped} message(s) already handled")
+            print(t("sources.skipped_handled_messages", skipped=skipped))
 
     if posts:
 
@@ -935,13 +936,13 @@ def _get_pages_from_urls(args, urls):
 
     page = moduleHtml.moduleHtml()
     if args.verbose:
-        print(f"Urls: {urls}")
+        print(t("sources.urls_debug", urls=urls))
     page.setUrl(urls)
     page.setApiPosts()
     posts = page.getPosts()
 
     if not posts:
-        print(f"There are no posts with these urls {urls}")
+        print(t("sources.no_posts_with_urls", urls=urls))
         posts = None
 
     return page, posts
@@ -986,19 +987,17 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
     urls_input = None
     if not urls:
         if args.interactive:
-            urls_input = input(
-                "Enter URLs separated by spaces (leave empty to use ~/notes): "
-            ).split()
+            urls_input = input(t("sources.enter_urls")).split()
         if not urls_input or not args.interactive:
-            print("No URLs entered. Extracting links from ~/notes...")
+            print(t("sources.no_urls_entered"))
             url_to_notes = _get_links_from_notes()
             if not url_to_notes:
-                print("No links found in ~/notes.")
+                print(t("sources.no_links_found"))
                 return False
-            print(f"Found notes: {url_to_notes}")
+            print(t("sources.found_notes", url_to_notes=url_to_notes))
             urls = list(url_to_notes.keys())
-            print(f"Found total of links: {len(urls)}")
-            print(f"Found links: {urls}")
+            print(t("sources.found_total_links", count=len(urls)))
+            print(t("sources.found_links", urls=urls))
         else:
             urls = urls_input
 
@@ -1043,7 +1042,7 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
         def content_extractor(post, i, post_date_time, post_title):
             web_content_reduced = reduce_html(urls[i], post, force_refresh=force_refresh)
             if not web_content_reduced:
-                print(f"Could not process {urls[i]}, skipping.")
+                print(t("sources.could_not_process_url", url=urls[i]))
                 return None
 
             date_message = str(post_date_time).split(" ")[0]
@@ -1058,7 +1057,7 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
             url = urls[i]
             if url in url_to_notes and manager:
                 for note_title in url_to_notes[url]:
-                    print(f"Deleting note: {note_title}")
+                    print(t("sources.deleting_note", note_title=note_title))
                     manager.delete_note(note_title)
 
         return _process_common_flow(
@@ -1074,11 +1073,11 @@ def add_events_cli(args, rules=None):
 
     model = select_llm(args)
 
-    print(f"Selected model: {model.model_name}")
+    print(t("sources.selected_model", model_name=model.model_name))
 
     sources, more_options = get_add_sources(rules=rules)
     if args.verbose:
-        print(f"Source: {args.source}")
+        print(t("sources.source_debug", source=args.source))
         logging.debug(f"Sources: {sources}")
         logging.debug(f"More options: {more_options}")
     matches = []
@@ -1093,12 +1092,12 @@ def add_events_cli(args, rules=None):
             matches = tagged
     if args.interactive and not (args.source == "imap" and mode):
         sel, selected = select_from_list(
-            sources, more_options=more_options, title="Sources of information"
+            sources, more_options=more_options, title=t("sources.sources_of_information_title")
         )
     else:
         selected = matches[0] if matches else None
     if selected:
-        print(f"Selected source: {selected}")
+        print(t("sources.selected_source", selected=selected))
         if hasattr(selected, "__iter__") and (
             ("web" in str(selected)) or ("http" in str(selected))
         ):

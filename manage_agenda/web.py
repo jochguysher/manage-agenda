@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
+from manage_agenda.i18n import t
+
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "manage_agenda")
 
 
@@ -255,11 +257,11 @@ def reduce_html(url, post, force_refresh=False):
         elif len(words) == 1 and any(char.isdigit() for char in words[0]):
             newResult = newResult + "\n" + line
 
-    print(f"Orig: {result}")
-    print("End Orig")
+    print(t("web.orig_debug", result=result))
+    print(t("web.end_orig_debug"))
     result = newResult
-    print(f"Res: {result}")
-    print("End Res")
+    print(t("web.res_debug", result=result))
+    print(t("web.end_res_debug"))
 
     # if extra_script_data:
     #     result = f"{result}\n\n--- Extra Data Found in Scripts ---\n{extra_script_data}"

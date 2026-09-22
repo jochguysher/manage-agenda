@@ -10,15 +10,10 @@ from socialModules.moduleContent import display_posts
 from manage_agenda import connections
 from manage_agenda.config import config
 from manage_agenda.connections import select_calendar
+from manage_agenda.i18n import t
 
 # Constants for date confirmation and interactive date/time modification.
-DATE_CONFIRM_PROMPT = (
-    "Are the dates correct? "
-    "Ye(s), (r)etry with LLM, "
-    "(Y)ear, (M)onth, (D)ay, (h)our, m(i)nute, (f)ull date/time: "
-)
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-DATETIME_INPUT_PROMPT = "Enter new {field} time (YYYY-MM-DD HH:MM:SS) or leave empty: "
 
 
 try:
@@ -47,7 +42,7 @@ def filter_events_by_title(api_cal, events, text_filter):
 
 def _get_datetime_input(field_name):
     """Get datetime input from user with a consistent prompt."""
-    return input(DATETIME_INPUT_PROMPT.format(field=field_name))
+    return input(t("events.datetime_input_prompt", field=field_name))
 
 
 def _process_full_datetime_modification(event):
@@ -61,14 +56,14 @@ def _process_full_datetime_modification(event):
             new_end_str_default = end_dt.strftime(DATETIME_FORMAT)
 
             modify_end_time = input(
-                f"Default end time will be {new_end_str_default}. Do you want to modify it? (y/n): "
+                t("events.default_end_time_prompt", new_end_str_default=new_end_str_default)
             ).lower()
             if modify_end_time == "y":
                 new_end_str = _get_datetime_input("end")
             else:
                 new_end_str = new_end_str_default
         except ValueError:
-            print("Invalid start time format. Please use YYYY-MM-DD HH:MM:SS.")
+            print(t("events.invalid_start_time_format"))
             new_end_str = ""
     else:
         new_end_str = _get_datetime_input("end")
@@ -124,11 +119,11 @@ def _parse_event_times(event):
 
     current_start = _parse_datetime_to_utc(start_str, start_tz)
     if start_str and current_start is None:
-        print("Could not parse start time, using empty value")
+        print(t("events.could_not_parse_start_time"))
 
     current_end = _parse_datetime_to_utc(end_str, end_tz)
     if end_str and current_end is None:
-        print("Could not parse end time, using empty value")
+        print(t("events.could_not_parse_end_time"))
 
     return current_start, current_end
 
@@ -163,7 +158,7 @@ def adjust_event_times(event):
         end["timeZone"] = "UTC"
 
     if start_dt and end_dt and end_dt <= start_dt:
-        print("Validation Warning: End time is not after start time. Adjusting end time.")
+        print(t("events.end_not_after_start_warning"))
         end_dt = start_dt + timedelta(minutes=30)
         end["dateTime"] = end_dt.isoformat()
         end["timeZone"] = "UTC"
@@ -223,10 +218,10 @@ def _process_date_modification(event, confirmation, current_start, current_end):
 
     start_time = safe_get(event, ["start", "dateTime"])
     end_time = safe_get(event, ["end", "dateTime"])
-    print("--- Updated Event Times ---")
-    print(f"Start: {_format_datetime_for_display(start_time)}")
-    print(f"End: {_format_datetime_for_display(end_time)}")
-    print("---------------------------")
+    print(t("events.updated_times_header"))
+    print(t("events.start_label", value=_format_datetime_for_display(start_time)))
+    print(t("events.end_label", value=_format_datetime_for_display(end_time)))
+    print(t("events.updated_times_footer"))
 
     return event
 
@@ -240,7 +235,7 @@ def _validate_event_dates_interactive(event, post_identifier=None):
     confirmed = False
     while not confirmed:
         current_start, current_end = _parse_event_times(event)
-        confirmation = input(f"{label}{DATE_CONFIRM_PROMPT}").lower()
+        confirmation = input(f"{label}{t('events.date_confirm_prompt')}").lower()
 
         if confirmation == "r":
             is_valid = False
@@ -261,7 +256,7 @@ def _validate_event_dates_non_interactive(event, post_identifier=None):
 
     current_start, current_end = _parse_event_times(event)
     if current_start is None or current_end is None:
-        errors.append(f"{label}Event is missing valid start or end dateTime")
+        errors.append(t("events.missing_start_or_end_datetime", label=label))
 
     now = datetime.datetime.now(datetime.timezone.utc)
     reasonable_past = now - timedelta(days=730)
@@ -272,27 +267,37 @@ def _validate_event_dates_non_interactive(event, post_identifier=None):
             continue
         if dt < reasonable_past:
             warnings.append(
-                f"{label}Event {field_name} time ({dt.strftime(DATETIME_FORMAT)}) "
-                f"is unreasonably far in the past (> 2 years)"
+                t(
+                    "events.time_far_in_the_past",
+                    label=label,
+                    field_name=field_name,
+                    formatted_time=dt.strftime(DATETIME_FORMAT),
+                )
             )
         if dt > reasonable_future:
             warnings.append(
-                f"{label}Event {field_name} time ({dt.strftime(DATETIME_FORMAT)}) "
-                f"is unreasonably far in the future (> 5 years)"
+                t(
+                    "events.time_far_in_the_future",
+                    label=label,
+                    field_name=field_name,
+                    formatted_time=dt.strftime(DATETIME_FORMAT),
+                )
             )
 
     for warning in warnings:
-        print(f"WARNING: {warning}")
+        print(t("events.warning_prefix", warning=warning))
 
     return event, len(errors) == 0, errors
 
 
 def _modify_single_component(dt, component, time_label):
     """Modify one datetime component based on interactive input."""
-    print(f"\nModifying {component} for {time_label} time:")
-    print(f"Current: {dt}")
+    print(t("events.modifying_component", component=component, time_label=time_label))
+    print(t("events.current_value", value=dt))
 
-    value_str = input(f"New {component} ({getattr(dt, component)}): ").strip()
+    value_str = input(
+        t("events.new_component_prompt", component=component, current=getattr(dt, component))
+    ).strip()
     if value_str:
         try:
             new_value = int(value_str)
@@ -307,13 +312,13 @@ def _modify_single_component(dt, component, time_label):
             elif component == "minute":
                 new_dt = dt.replace(minute=new_value)
             else:
-                print(f"Unknown component: {component}. Keeping original time.")
+                print(t("events.unknown_component", component=component))
                 return dt
 
-            print(f"New {time_label} time: {new_dt}")
+            print(t("events.new_time_label", time_label=time_label, value=new_dt))
             return new_dt
         except ValueError as error:
-            print(f"Invalid value: {error}. Keeping original time.")
+            print(t("events.invalid_value", error=error))
             return dt
 
     return dt
@@ -322,7 +327,7 @@ def _modify_single_component(dt, component, time_label):
 def _format_datetime_for_display(dt_value):
     """Format a datetime value for display in the local timezone."""
     if dt_value is None or dt_value == "":
-        return "N/A"
+        return t("events.not_available")
 
     if isinstance(dt_value, datetime.datetime):
         if dt_value.tzinfo is None:
@@ -357,7 +362,7 @@ def copy_action(api_cal, event, my_calendar, my_calendar_dst):
         my_event["location"] = event["location"]
 
     my_calendar_dst.getClient().events().insert(calendarId=my_calendar, body=my_event).execute()
-    print(f"Copied event: {my_event['summary']}")
+    print(t("events.copied_event", summary=my_event["summary"]))
 
 
 def copy_events_cli(args):
@@ -377,14 +382,12 @@ def select_events_by_user_input(api_cal, events_list, action_verb="copy"):
     Returns:
         List of selected events
     """
-    print(f"Select events to {action_verb}:")
+    print(t("events.select_events_to", action_verb=action_verb))
     display_posts(api_cal, events_list)
 
-    print(f"{len(events_list)}) All")
+    print(t("events.all_option", index=len(events_list)))
 
-    selection = input(
-        f"Which event(s) to {action_verb}? (comma-separated numbers, text to match, or 'all') "
-    )
+    selection = input(t("events.which_events_prompt", action_verb=action_verb))
 
     selected_events = []
     if selection.lower() == "all" or selection == str(len(events_list)):
@@ -440,11 +443,11 @@ def process_calendar_events(
         None
     """
     # Initialize API and calendar
-    api_cal = connections.select_api(args, "gcalendar", rules=None, title="Select Rule")
+    api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
     if getattr(args, "source", None):
         selected_calendar = args.source
     else:
-        selected_calendar = select_calendar(api_cal, title="Select calendar", args=args)
+        selected_calendar = select_calendar(api_cal, title=t("events.select_calendar_title"), args=args)
 
     # Set the active calendar using socialModules method
     api_cal.setActive(selected_calendar)
@@ -472,7 +475,7 @@ def process_calendar_events(
         future_events = []
         for post in all_posts:
             post_date = api_cal.getPostDate(post)
-            print(f"Date: {post_date}")
+            print(t("events.date_label", value=post_date))
 
             if not isinstance(post_date, str):
                 if isinstance(post, dict):
@@ -493,26 +496,26 @@ def process_calendar_events(
             if post_date and post_date >= today:
                 future_events.append(post)
 
-    print("Upcoming events (up to 20):")
+    print(t("events.upcoming_events_title"))
     for event in future_events[:20]:
-        print(f"- {api_cal.getPostTitle(event)} ({api_cal.getPostDate(event)})")
+        print(t("events.event_line", title=api_cal.getPostTitle(event), date=api_cal.getPostDate(event)))
 
     text_filter = args.text
     if args.interactive and not text_filter:
-        text_filter = input("Text to filter by (leave empty for no filter): ")
+        text_filter = input(t("events.text_filter_prompt"))
 
     # Use the helper function to filter events by title
     filtered_events = filter_events_by_title(api_cal, future_events, text_filter)
 
     if not filtered_events:
-        print("No events found matching the criteria.")
+        print(t("events.no_events_found"))
         return
 
     selected_events = select_events_by_user_input(api_cal, filtered_events, action_verb)
 
     if "clean" in action_func.__name__:
-        actions = ["Delete", "Copy", "Move"]
-        msg = "Select operation:"
+        actions = [t("events.action_delete"), t("events.action_copy"), t("events.action_move")]
+        msg = t("events.select_operation_title")
         for i, act in enumerate(actions):
             msg = f"{msg}\n{i}) {act}"
         msg = f"{msg}\n"
@@ -533,13 +536,13 @@ def process_calendar_events(
     # Handle destination calendar if needed
     if destination_needed:
         my_calendar_dst = connections.select_api(
-            args, "gcalendar", rules=None, title="Select rule"
+            args, "gcalendar", rules=None, title=t("events.select_rule_lower_title")
         )
         if getattr(args, "destination", None):
             my_calendar = args.destination
         else:
             my_calendar = select_calendar(
-                my_calendar_dst, title="Select destination calendar", args=args
+                my_calendar_dst, title=t("events.select_destination_calendar"), args=args
             )
     else:
         my_calendar = None
@@ -555,7 +558,7 @@ def delete_action(api_cal, event, my_calendar, my_calendar_dst):
     api_cal.getClient().events().delete(
         calendarId=api_cal.getActive(), eventId=event["id"]
     ).execute()
-    print(f"Deleted event: {event['summary']}")
+    print(t("events.deleted_event", summary=event["summary"]))
 
 
 def delete_events_cli(args):
@@ -575,11 +578,11 @@ def move_action(api_cal, event, my_calendar, my_calendar_dst):
         my_event["location"] = event["location"]
 
     my_calendar_dst.getClient().events().insert(calendarId=my_calendar, body=my_event).execute()
-    print(f"Copied event: {my_event['summary']}")
+    print(t("events.copied_event", summary=my_event["summary"]))
     api_cal.getClient().events().delete(
         calendarId=api_cal.getActive(), eventId=event["id"]
     ).execute()
-    print(f"Deleted event: {event['summary']}")
+    print(t("events.deleted_event", summary=event["summary"]))
 
 
 def move_events_cli(args):
@@ -589,7 +592,7 @@ def move_events_cli(args):
 
 def update_event_status_cli(args):
     """Update event status from busy to available for selected events."""
-    api_cal = connections.select_api(args, "gcalendar", rules=None, title="Select Rule")
+    api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
 
     if args.source:
         my_calendar = args.source
@@ -604,26 +607,26 @@ def update_event_status_cli(args):
         events,
         format_post=lambda event: (
             f"[{event.get('transparency', 'opaque')}] "
-            f"{api_cal.getPostTitle(event) or 'No Title'}"
+            f"{api_cal.getPostTitle(event) or t('events.no_title')}"
         ),
         limit=20,
-        title="Upcoming events (up to 20):",
+        title=t("events.upcoming_events_title"),
     )
 
     text_filter = args.text
     if args.interactive and not text_filter:
-        text_filter = input("Text to filter by (leave empty for no filter): ")
+        text_filter = input(t("events.text_filter_prompt"))
 
     events_to_update = []
     for event in events:
-        title = api_cal.getPostTitle(event) or "No Title"
+        title = api_cal.getPostTitle(event) or t("events.no_title")
         if text_filter in title:
             # Only include events that are currently "busy" (opaque)
             if event.get("transparency", "opaque") == "opaque":
                 events_to_update.append(event)
 
     if not events_to_update:
-        print("No busy events found matching the criteria.")
+        print(t("events.no_busy_events_found"))
         return
 
     selected_events = select_events_by_user_input(api_cal, events_to_update, "update")
@@ -637,8 +640,8 @@ def update_event_status_cli(args):
             calendarId=my_calendar, eventId=event["id"], body=event
         ).execute()
 
-        title = api_cal.getPostTitle(event) or "No Title"
-        print(f"Updated event status to available: {title}")
+        title = api_cal.getPostTitle(event) or t("events.no_title")
+        print(t("events.updated_status_available", title=title))
 
 
 def clean_events_cli(args):
