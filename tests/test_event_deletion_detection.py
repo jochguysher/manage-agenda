@@ -895,6 +895,19 @@ class TestEntryPurgeAfter(unittest.TestCase):
             datetime.datetime(2026, 1, 8, tzinfo=datetime.timezone.utc),
         )
 
+    def test_unknown_event_falls_back_to_recorded_at_like_no_event(self):
+        """A 404/410-on-first-sight ref (see test_first_ever_run_bootstrap_diff_404_is_unknown_not_a_deletion
+        and reconcile_handled_events' unknown_event resolution) never had a confirmed live
+        event either - it must not become a new eternal category exempt from purging, and
+        must not silently earn the longer event_end margin it never had anything to base that
+        on. Same short no_event-style fallback as "no_event"/"source_lost"."""
+        entry = {"events": [], "status": "unknown_event", "recorded_at": "2026-01-01T00:00:00Z"}
+        purge_after = _entry_purge_after(entry, event_margin_days=30, no_event_margin_days=7)
+        self.assertEqual(
+            purge_after,
+            datetime.datetime(2026, 1, 8, tzinfo=datetime.timezone.utc),
+        )
+
     def test_ignored_deletion_earns_the_event_end_margin_not_the_short_fallback(self):
         """An on_user_delete="ignore" resolution moves the deleted ref to cancelled_events
         (see reconcile_handled_events) - it must still purge on the longer event_end margin,
@@ -965,6 +978,26 @@ class TestPurgeExpiredLedgerEntries(unittest.TestCase):
     def test_no_event_entry_expires_on_its_own_short_margin(self):
         self._write_state(
             {"old-no-event": {"events": [], "status": "no_event", "recorded_at": "2020-01-01T00:00:00Z"}}
+        )
+        today = datetime.datetime(2026, 9, 22, tzinfo=datetime.timezone.utc)
+
+        purged = purge_expired_ledger_entries(path=self.path, today=today)
+
+        self.assertEqual(purged, 1)
+        self.assertEqual(load_handled_mail_state(self.path), {})
+
+    def test_unknown_event_entry_expires_on_its_own_short_margin(self):
+        """unknown_event (a 404/410-on-first-sight ref, see reconcile_handled_events) must not
+        become a new eternal category - it purges through the exact same code path and margin
+        as no_event, not a special case that was forgotten when unknown_event was added."""
+        self._write_state(
+            {
+                "old-unknown": {
+                    "events": [],
+                    "status": "unknown_event",
+                    "recorded_at": "2020-01-01T00:00:00Z",
+                }
+            }
         )
         today = datetime.datetime(2026, 9, 22, tzinfo=datetime.timezone.utc)
 

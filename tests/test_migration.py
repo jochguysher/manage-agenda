@@ -269,6 +269,41 @@ class TestMigrateLegacyLedgerEntries(unittest.TestCase):
         ref = load_handled_mail_state(self.path)["msg-1"]["events"][0]
         self.assertNotIn("migrated", ref)
 
+    def test_a_gone_ref_creates_nothing_and_is_never_retried(self):
+        """A 404/410 on migration's own events.get() must never create anything (no patch,
+        certainly no insert - migrate_one_legacy_event never calls events().insert() at all)
+        and must not be retried forever: the ref is marked migrated on this real pass so a
+        future call skips it outright, matching the "confirmed gone" handling used elsewhere
+        in this module (see docs/investigation-limite1.md - a 404 is data, not something to
+        keep re-probing)."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "recorded_at": self._recent_iso()}
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        args = self._args_with_client(http_error(404))
+
+        migrated = migrate_legacy_ledger_entries(args, path=self.path)
+
+        self.assertEqual(migrated, 0)
+        client = args.calendar_api.getClient.return_value
+        client.events.return_value.patch.assert_not_called()
+        client.events.return_value.insert.assert_not_called()
+        ref = load_handled_mail_state(self.path)["msg-1"]["events"][0]
+        self.assertTrue(ref["migrated"])
+        self.assertNotIn("event_end", ref)
+
+        # A second real pass must not call events.get() again for this ref - it is settled.
+        client.events.return_value.get.reset_mock()
+        migrated_again = migrate_legacy_ledger_entries(args, path=self.path)
+        self.assertEqual(migrated_again, 0)
+        client.events.return_value.get.assert_not_called()
+
     def test_non_created_status_entries_are_skipped(self):
         self._write_state({"msg-1": {"events": [], "status": "no_event"}})
         args = self._args_with_client({"id": "e1"})
