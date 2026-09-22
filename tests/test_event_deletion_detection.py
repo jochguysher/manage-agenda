@@ -300,6 +300,20 @@ class TestExtractEventRefs(unittest.TestCase):
         self.assertEqual(refs[0]["calendar_id"], "primary")
         self.assertEqual(refs[0]["event_id"], "xyz")
 
+    def test_one_event_published_to_two_calendars_yields_a_ref_per_calendar(self):
+        """The multi-calendar feature makes calendar_result carry one dict per (event,
+        calendar) pair for a single message - both must reach the deletion-detection ledger,
+        not just the first one."""
+        calendar_result = [
+            {"success": True, "calendar_id": "cal-1", "event_id": "e1"},
+            {"success": True, "calendar_id": "cal-2", "event_id": "e2"},
+        ]
+        refs = _extract_event_refs(calendar_result)
+        self.assertEqual(
+            {(ref["calendar_id"], ref["event_id"]) for ref in refs},
+            {("cal-1", "e1"), ("cal-2", "e2")},
+        )
+
     def test_none_gives_empty_list(self):
         self.assertEqual(_extract_event_refs(None), [])
 

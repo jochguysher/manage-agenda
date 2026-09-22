@@ -147,7 +147,9 @@ When LLM extraction fails, in interactive mode you get options:
 ### `add` - Add Events
 Add entries to your calendar from email, web, or text file sources. In interactive mode, presents a unified source selection menu (email accounts, web, and text files).
 
-**Persistent configuration**: the LLM provider, model, and destination calendar are asked interactively only once. That first interactive choice is saved to `~/.config/manage-agenda/config.yaml` (or `$XDG_CONFIG_HOME/manage-agenda/config.yaml`) and reused automatically on every later run, whether or not `-i` is passed. Use `--reconfigure` to reopen the setup and save a new choice. A `-a`/`-m`/`-d` flag always overrides the saved value for that one run only, without changing what is saved.
+**Persistent configuration**: the LLM provider, model, and destination calendar(s) are asked interactively only once. That first interactive choice is saved to `~/.config/manage-agenda/config.yaml` (or `$XDG_CONFIG_HOME/manage-agenda/config.yaml`) and reused automatically on every later run, whether or not `-i` is passed. Use `--reconfigure` to reopen the setup and save a new choice. A `-a`/`-m`/`-d` flag always overrides the saved value for that one run only, without changing what is saved.
+
+**Multiple calendars**: the calendar step of the interactive setup is a checkbox - pick one, the other, or both. Every event `add` creates is then written to each selected calendar. `config.yaml`'s `calendar` key holds a list accordingly (a config saved by an older version, with a single calendar id as a plain string, still loads correctly and is rewritten as a list the next time the wizard runs). If a calendar fails while the others succeed, the message stays pending and the whole run is retried next time; the calendars that already got the event are recognized as duplicates, so nothing is created twice.
 
 #### Options
 - `-i, --interactive`: Running in interactive mode
@@ -155,9 +157,9 @@ Add entries to your calendar from email, web, or text file sources. In interacti
 - `-m, --model`: Select model for this run only, without changing the saved configuration
 - `-s, --source`: Select data source (default: `gmail`). Options: `gmail`, `imap`, `web`, `text`
 - `-f, --force-refresh`: Force refresh web content to bypass cache
-- `-d, --destination`: Destination calendar id for this run only, without changing the saved configuration
+- `-d, --destination`: A single calendar id to use for this run only, replacing the whole saved list, without changing the saved configuration
 - `-o, --output`: Output destination (default: `calendar`). Options: `calendar`, `file`, `files`
-- `--reconfigure`: Reopen the interactive setup for provider, model, and calendar, and save the result
+- `--reconfigure`: Reopen the interactive setup for provider, model, and calendar(s), and save the result
 
 ### `llm` - LLM Operations
 Group command for LLM-related operations.

@@ -19,14 +19,14 @@ class TestProcessEmailCli(unittest.TestCase):
     @patch("manage_agenda.extraction.select_api")
     @patch("manage_agenda.sources.select_api")
     @patch("manage_agenda.sources._get_emails_from_folder")
-    @patch("manage_agenda.extraction.select_calendar")
+    @patch("manage_agenda.extraction.select_calendars")
     @patch("manage_agenda.extraction.write_file")
     @patch("manage_agenda.sources.write_file")
     def test_process_email_cli_success(
         self,
         mock_source_write_file,
         mock_write_file,
-        mock_select_calendar,
+        mock_select_calendars,
         mock_get_emails_from_folder,
         mock_select_api_source,
         mock_select_api_destination,
@@ -59,7 +59,7 @@ class TestProcessEmailCli(unittest.TestCase):
         mock_api_dst = MagicMock()
         mock_select_api_source.return_value = mock_api_src
         mock_select_api_destination.return_value = mock_api_dst
-        mock_select_calendar.return_value = "primary"
+        mock_select_calendars.return_value = ["primary"]
 
         with patch("manage_agenda.sources.prepare_calendar", return_value=True):
             process_email_cli(args, mock_model)
@@ -70,7 +70,7 @@ class TestProcessEmailCli(unittest.TestCase):
             "A successful extraction must not trigger a redundant confirmation call.",
         )
         mock_source_write_file.assert_called_once()
-        mock_select_calendar.assert_called_once()
+        mock_select_calendars.assert_called_once()
         mock_api_dst.publishPost.assert_called_once()
         mock_api_src.modifyLabels.assert_called_once()
 

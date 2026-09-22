@@ -8,7 +8,7 @@ from socialModules.configMod import safe_get, select_from_list
 from socialModules.moduleRules import moduleRules
 
 from manage_agenda.exceptions import CalendarError
-from manage_agenda.interactive import select_one
+from manage_agenda.interactive import select_many, select_one
 
 
 def authorize(args, rules=None):
@@ -36,16 +36,17 @@ def authorize(args, rules=None):
 
 
 def prepare_calendar(args, rules=None, config_path=None):
-    """Select the destination calendar once, before any model call.
+    """Select the destination calendar(s) once, before any model call.
 
-    Precedence: -d/--destination (a raw calendar id, the same convention copy/move/clean
-    already use for this flag) > saved user config > interactive wizard > a clear error when
-    none of those apply. --reconfigure re-opens the wizard even when a config is already
-    saved; whatever is picked interactively is then saved for next time.
+    Precedence: -d/--destination (a single raw calendar id, a one-off override - the same
+    convention copy/move/clean already use for this flag) > saved user config (a list, "one,
+    the other, or both") > interactive wizard (checkbox) > a clear error when none of those
+    apply. --reconfigure re-opens the wizard even when a config is already saved; whatever is
+    picked interactively is then saved for next time.
     """
     if getattr(args, "output", "calendar") != "calendar":
         return True
-    if getattr(args, "calendar_api", None) and getattr(args, "calendar_id", None):
+    if getattr(args, "calendar_api", None) and getattr(args, "calendar_ids", None):
         return True
 
     from manage_agenda.user_config import load_user_config, saved_calendar_ids, update_user_config
@@ -63,38 +64,38 @@ def prepare_calendar(args, rules=None, config_path=None):
 
     if api is None or api.getClient() is None:
         # A calendar id resolved from a flag or saved config is only usable together with a
-        # working account connection - checked here too, not just inside select_calendar(),
+        # working account connection - checked here too, not just inside select_calendars(),
         # since a resolved calendar id skips that call entirely below.
         print(missing_calendar_message(api))
         return False
 
     if explicit_calendar:
-        calendar_id = explicit_calendar
+        calendar_ids = [explicit_calendar]
     elif not reconfigure:
-        ids = saved_calendar_ids(saved)
-        calendar_id = ids[0] if ids else None
+        calendar_ids = saved_calendar_ids(saved)
     else:
-        calendar_id = None
+        calendar_ids = []
 
     prompted = False
-    if not calendar_id:
+    if not calendar_ids:
         try:
-            calendar_id = select_calendar(api, title="Select Calendar", args=args)
+            calendar_ids = select_calendars(api, title="Select calendar(s)", args=args)
         except CalendarError as error:
             print(error)
             return False
         prompted = True
 
-    if not calendar_id:
+    if not calendar_ids:
         print(missing_calendar_message(api))
         return False
 
     args.calendar_api = api
-    args.calendar_id = calendar_id
+    args.calendar_ids = calendar_ids
+    args.calendar_id = calendar_ids[0]
 
     if prompted and not explicit_calendar:
         update_user_config(
-            {"calendar_account": getattr(api, "src", account_name), "calendar": calendar_id},
+            {"calendar_account": getattr(api, "src", account_name), "calendar": calendar_ids},
             config_path,
         )
     return True
@@ -227,37 +228,47 @@ def missing_calendar_message(calendar_api=None):
     )
 
 
-def select_calendar(calendar_api, title="", args=None):
-    """Select a writable Google Calendar from a configured calendar API.
-
-    Prompts (a bulleted list) when `args.interactive` or `args.reconfigure` is set, or when
-    no `args` is given at all - callers outside the CLI (events.py's clean/copy/move flow)
-    have always prompted unconditionally here. Otherwise there is nothing to silently guess:
-    the caller is expected to have already resolved a calendar id via saved config or an
-    explicit flag before reaching this point, so this raises a clear, actionable error instead.
-    """
+def _eligible_calendars(calendar_api):
+    """Writable calendars on this account, or raise a CalendarError explaining why not."""
     if calendar_api is None or calendar_api.getClient() is None:
         raise CalendarError(missing_calendar_message(calendar_api))
+    calendar_api.setCalendarList()
+    calendars = calendar_api.getCalendarList()
+    if not calendars:
+        raise CalendarError("No calendars found in your Google Calendar account")
+
+    eligible_calendars = [
+        calendar for calendar in calendars if "reader" not in calendar.get("accessRole", "")
+    ]
+    if not eligible_calendars:
+        raise CalendarError("No writable calendars found. Check your calendar permissions.")
+    return eligible_calendars
+
+
+def _should_prompt_for_calendar(args):
+    """Prompt (a bulleted list or checkbox) when `args.interactive` or `args.reconfigure` is
+    set, or when no `args` is given at all - callers outside the CLI (events.py's
+    clean/copy/move flow) have always prompted unconditionally here."""
+    return not args or getattr(args, "interactive", False) or getattr(args, "reconfigure", False)
+
+
+_NON_INTERACTIVE_MESSAGE = (
+    "No calendar configured for non-interactive use. Run with -i once (or --reconfigure) to "
+    "choose one, or pass -d/--destination with a calendar id."
+)
+
+
+def select_calendar(calendar_api, title="", args=None):
+    """Select a single writable Google Calendar from a configured calendar API.
+
+    Otherwise there is nothing to silently guess: the caller is expected to have already
+    resolved a calendar id via saved config or an explicit flag before reaching this point,
+    so this raises a clear, actionable error instead of prompting.
+    """
     try:
-        calendar_api.setCalendarList()
-        calendars = calendar_api.getCalendarList()
-        if not calendars:
-            raise CalendarError("No calendars found in your Google Calendar account")
-
-        eligible_calendars = [
-            calendar for calendar in calendars if "reader" not in calendar.get("accessRole", "")
-        ]
-        if not eligible_calendars:
-            raise CalendarError("No writable calendars found. Check your calendar permissions.")
-
-        should_prompt = (
-            not args or getattr(args, "interactive", False) or getattr(args, "reconfigure", False)
-        )
-        if not should_prompt:
-            raise CalendarError(
-                "No calendar configured for non-interactive use. Run with -i once (or "
-                "--reconfigure) to choose one, or pass -d/--destination with a calendar id."
-            )
+        eligible_calendars = _eligible_calendars(calendar_api)
+        if not _should_prompt_for_calendar(args):
+            raise CalendarError(_NON_INTERACTIVE_MESSAGE)
 
         chosen = select_one(eligible_calendars, title=title, identifier="summary")
         if chosen is None:
@@ -266,6 +277,29 @@ def select_calendar(calendar_api, title="", args=None):
         calendar_id = chosen["id"]
         logging.info(f"Selected calendar: {safe_get(chosen, ['summary'])} (ID: {calendar_id})")
         return calendar_id
+    except (KeyError, IndexError, TypeError) as error:
+        raise CalendarError(f"Failed to select calendar: {error}") from error
+    except CalendarError:
+        raise
+    except Exception as error:
+        raise CalendarError(f"Unexpected error selecting calendar: {error}") from error
+
+
+def select_calendars(calendar_api, title="", args=None):
+    """Select one or more writable Google Calendars - checkbox multi-select ("one, the other,
+    or both"), used where a single run can write its events to more than one calendar."""
+    try:
+        eligible_calendars = _eligible_calendars(calendar_api)
+        if not _should_prompt_for_calendar(args):
+            raise CalendarError(_NON_INTERACTIVE_MESSAGE)
+
+        chosen = select_many(eligible_calendars, title=title, identifier="summary")
+        if not chosen:
+            raise CalendarError("No calendar was selected.")
+
+        calendar_ids = [item["id"] for item in chosen]
+        logging.info(f"Selected calendars: {[safe_get(item, ['summary']) for item in chosen]} (IDs: {calendar_ids})")
+        return calendar_ids
     except (KeyError, IndexError, TypeError) as error:
         raise CalendarError(f"Failed to select calendar: {error}") from error
     except CalendarError:

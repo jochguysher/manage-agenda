@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import time
-from copy import copy
+from copy import copy, deepcopy
 from dataclasses import is_dataclass, replace
 from pathlib import Path
 
@@ -14,7 +14,7 @@ import googleapiclient
 from socialModules.configMod import safe_get
 
 from manage_agenda.base import format_time, write_file
-from manage_agenda.connections import select_api, select_calendar
+from manage_agenda.connections import select_api, select_calendars
 from manage_agenda.llm import select_llm
 
 
@@ -412,7 +412,7 @@ def _process_event_with_llm_and_calendar(
         sender = _from_header(content_text)
         if _is_occupancy_payload(event) or is_occupancy_sender(sender):
             event = as_occupancy(event)
-            events, api_dst, selected_calendar = _visits_from_occupancy(
+            events, api_dst, selected_calendars = _visits_from_occupancy(
                 event, content_text, args, rules
             )
             if not events:
@@ -420,12 +420,12 @@ def _process_event_with_llm_and_calendar(
                 return None, None
         else:
             events = list(event)
-            api_dst, selected_calendar = _selected_calendar(
+            api_dst, selected_calendars = _selected_calendar(
                 args, rules, title=events[0].get("summary", "Event")
             )
         calendar_results = []
 
-        if getattr(args, "output", "calendar") == "calendar" and not selected_calendar:
+        if getattr(args, "output", "calendar") == "calendar" and not selected_calendars:
             print("No calendar selected, skipping event creation.")
         else:
             for idx, single_event in enumerate(events, start=1):
@@ -464,17 +464,28 @@ def _process_event_with_llm_and_calendar(
                 _add_ai_metadata_to_event(single_event, model, elapsed_time)
                 file_name = f"log/{post_identifier}_{idx}_times.json"
                 if getattr(args, "output", "calendar") == "calendar":
-                    published, calendar_result = _publish_event_to_calendar(
-                        api_dst, single_event, selected_calendar, source_id=post_identifier
-                    )
-                    if not published or (
-                        isinstance(calendar_result, dict) and not calendar_result.get("success")
-                    ):
+                    calendar_result = []
+                    all_published = True
+                    for calendar_id in selected_calendars:
+                        # A separate copy per calendar: publishing stamps identity properties
+                        # onto the event dict that are scoped to one calendar, and would
+                        # otherwise be overwritten before the next calendar's insert.
+                        published, single_result = _publish_event_to_calendar(
+                            api_dst, deepcopy(single_event), calendar_id, source_id=post_identifier
+                        )
+                        if not published or (
+                            isinstance(single_result, dict) and not single_result.get("success")
+                        ):
+                            all_published = False
+                            break
+                        calendar_result.append(single_result)
+                    if not all_published:
                         from manage_agenda.exceptions import CalendarError
 
                         raise CalendarError(
                             "The calendar was not updated. This message stays pending."
                         )
+                    published = True
                 else:
                     write_file(
                         f"log/{model.model_name}/{post_identifier}_{idx}_times.json",
@@ -483,13 +494,15 @@ def _process_event_with_llm_and_calendar(
                     calendar_result = f"{post_identifier}_{idx}_times.json"
                     published = True
                 if published:
-                    calendar_results.append(calendar_result)
                     if getattr(args, "output", "calendar") == "calendar":
-                        if isinstance(calendar_result, dict) and calendar_result.get("duplicate"):
-                            print(f"Already on the calendar, skipped: {single_event.get('summary')}")
-                        else:
-                            print("Calendar event created")
+                        calendar_results.extend(calendar_result)
+                        for single_result in calendar_result:
+                            if isinstance(single_result, dict) and single_result.get("duplicate"):
+                                print(f"Already on the calendar, skipped: {single_event.get('summary')}")
+                            else:
+                                print("Calendar event created")
                     else:
+                        calendar_results.append(calendar_result)
                         print(f"File {post_identifier}_{idx}_times.json created")
                     success = True
                     write_file(file_name, json.dumps(single_event))
@@ -856,16 +869,20 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
 
 
 def _selected_calendar(args, rules, title):
-    """Use the calendar chosen before the scan, or ask once if it was not prepared."""
+    """Use the calendar(s) chosen before the scan, or ask once if not prepared.
+
+    Returns (api_dst, [calendar_id, ...]) - an event is published to every calendar in that
+    list.
+    """
     if getattr(args, "output", "calendar") != "calendar":
-        return None, None
+        return None, []
     api_dst = getattr(args, "calendar_api", None)
-    selected_calendar = getattr(args, "calendar_id", None)
-    if api_dst and selected_calendar:
-        return api_dst, selected_calendar
+    selected_calendars = getattr(args, "calendar_ids", None)
+    if api_dst and selected_calendars:
+        return api_dst, selected_calendars
     api_dst = select_api(args, "gcalendar", rules=rules, title="Select Calendar")
-    selected_calendar = select_calendar(api_dst, title=title, args=args)
-    return api_dst, selected_calendar
+    selected_calendars = select_calendars(api_dst, title=title, args=args)
+    return api_dst, selected_calendars
 
 
 def _visits_from_occupancy(event, content_text, args, rules):
@@ -880,37 +897,42 @@ def _visits_from_occupancy(event, content_text, args, rules):
     sender = _from_header(content_text)
     constraints = availability_for(sender)
     api_dst = None
-    selected_calendar = None
+    selected_calendars = []
     busy = []
-    api_dst, selected_calendar = _selected_calendar(args, rules, title="Visite")
-    if api_dst and selected_calendar:
-        busy = _calendar_busy(api_dst, selected_calendar, constraints)
+    api_dst, selected_calendars = _selected_calendar(args, rules, title="Visite")
+    if api_dst and selected_calendars:
+        busy = _calendar_busy(api_dst, selected_calendars, constraints)
     visits = plan_room_visits(payload, constraints, busy=busy, sender=sender)
-    return visits, api_dst, selected_calendar
+    return visits, api_dst, selected_calendars
 
 
-def _calendar_busy(api_dst, calendar_id, constraints):
+def _calendar_busy(api_dst, calendar_ids, constraints):
+    """Busy intervals across every selected calendar - a visit must avoid conflicts on all of
+    them, since the event will be written to each one."""
     from manage_agenda.scheduling import busy_intervals
 
     start = datetime.datetime.now(datetime.timezone.utc)
     end = start + datetime.timedelta(days=constraints.horizon_days)
-    try:
-        response = (
-            api_dst.getClient()
-            .events()
-            .list(
-                calendarId=calendar_id,
-                timeMin=start.isoformat().replace("+00:00", "Z"),
-                timeMax=end.isoformat().replace("+00:00", "Z"),
-                singleEvents=True,
-                maxResults=100,
+    client = api_dst.getClient()
+    busy = []
+    for calendar_id in calendar_ids:
+        try:
+            response = (
+                client.events()
+                .list(
+                    calendarId=calendar_id,
+                    timeMin=start.isoformat().replace("+00:00", "Z"),
+                    timeMax=end.isoformat().replace("+00:00", "Z"),
+                    singleEvents=True,
+                    maxResults=100,
+                )
+                .execute()
             )
-            .execute()
-        )
-    except Exception as error:
-        logging.warning(f"Could not read the calendar while choosing a visit: {error}")
-        return []
-    return busy_intervals(response)
+        except Exception as error:
+            logging.warning(f"Could not read the calendar while choosing a visit: {error}")
+            continue
+        busy.extend(busy_intervals(response))
+    return busy
 
 
 def _publish_event_to_calendar(api_dst, event, selected_calendar, source_id=""):
