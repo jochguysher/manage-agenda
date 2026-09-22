@@ -83,16 +83,16 @@ TRANSLATIONS = {
     "cli.add.dry_run_ledger_help": {
         "en": (
             "Preview deleted-event reconciliation, legacy-event migration, and ledger "
-            "purging without writing anything (scoped to the ledger only - scanning/"
-            "extraction/publishing/mailbox marking still run normally, see the docs before "
-            "assuming this means nothing at all is written)"
+            "purging without writing them (scoped to the ledger only - scanning/"
+            "extraction/publishing/mailbox marking still run normally, so this is NOT a safe "
+            "preview; use 'reconcile --dry-run-ledger' for that)"
         ),
         "fr": (
             "Prévisualise la réconciliation des événements supprimés, la migration des "
-            "événements existants et la purge du registre sans rien écrire (limité au "
+            "événements existants et la purge du registre sans les écrire (limité au "
             "registre - l'analyse, l'extraction, la publication et le marquage des messages "
-            "s'exécutent normalement, voir la documentation avant de supposer que rien du "
-            "tout n'est écrit)"
+            "s'exécutent normalement : ce n'est PAS une prévisualisation sûre, utilisez "
+            "« reconcile --dry-run-ledger » pour cela)"
         ),
     },
     "cli.add.debug_log_extractions_help": {
@@ -209,6 +209,32 @@ TRANSLATIONS = {
             "Prévisualisation uniquement : lit les événements et journalise ce qui serait "
             "migré, sans modifier aucun événement, sans écrire le registre et sans marquer le "
             "compte comme migré"
+        ),
+    },
+    "cli.reconcile.help": {
+        "en": (
+            "Run only the ledger side of 'add' for the configured calendar account: Calendar "
+            "sync, deleted-event reconciliation, migration retries and ledger purge. No mailbox "
+            "is read, nothing is extracted, published or marked. Requires 'migrate-ledger' to "
+            "have run once for the account."
+        ),
+        "fr": (
+            "N'exécute que la partie registre de « add » pour le compte de calendrier "
+            "configuré : synchronisation Calendar, réconciliation des événements supprimés, "
+            "reprise de la migration et purge du registre. Aucune boîte aux lettres n'est lue, "
+            "rien n'est extrait, publié ni marqué. Nécessite que « migrate-ledger » ait été "
+            "exécuté une fois pour ce compte."
+        ),
+    },
+    "cli.reconcile.dry_run_ledger_help": {
+        "en": (
+            "Preview only: make the same read-only Calendar calls and log what would change, "
+            "without writing the ledger, its .bak, or the Calendar sync tokens"
+        ),
+        "fr": (
+            "Prévisualisation uniquement : effectue les mêmes appels Calendar en lecture seule "
+            "et journalise ce qui changerait, sans écrire le registre, sa copie .bak ni les "
+            "jetons de synchronisation Calendar"
         ),
     },
     "cli.install.help": {
@@ -712,6 +738,48 @@ TRANSLATIONS = {
             "invisible depuis ce compte - retentés plus tard) ; {attached} référence(s) "
             "« primary » anciennes rattachées à ce compte. « add » réconcilie et purge "
             "désormais le registre automatiquement pour ce compte. Détails : {log_file}"
+        ),
+    },
+    "sources.reconcile_no_calendar": {
+        "en": "No calendar account available - nothing reconciled.",
+        "fr": "Aucun compte de calendrier disponible - rien n'a été réconcilié.",
+    },
+    "sources.reconcile_migration_required": {
+        "en": (
+            "Nothing reconciled: the ledger has not been migrated yet for calendar account "
+            "{account}. Preview with 'manage-agenda migrate-ledger --dry-run-ledger', then run "
+            "'manage-agenda migrate-ledger'."
+        ),
+        "fr": (
+            "Rien n'a été réconcilié : le registre n'a pas encore été migré pour le compte de "
+            "calendrier {account}. Prévisualisez avec « manage-agenda migrate-ledger "
+            "--dry-run-ledger », puis lancez « manage-agenda migrate-ledger »."
+        ),
+    },
+    "sources.reconcile_dry_run_done": {
+        "en": (
+            "DRY RUN for calendar account {account}: reconcile ran on Calendar's answers; "
+            "{migrated} event(s) would be migrated or are already migrated; {purged} ledger "
+            "entry(ies) would be purged. Nothing was written (ledger, .bak, sync tokens). "
+            "Each would-be change is logged with a 'DRY RUN' prefix in {log_file}"
+        ),
+        "fr": (
+            "SIMULATION pour le compte de calendrier {account} : réconciliation calculée sur "
+            "les réponses de Calendar ; {migrated} événement(s) seraient migrés ou le sont "
+            "déjà ; {purged} entrée(s) du registre seraient purgées. Rien n'a été écrit "
+            "(registre, .bak, jetons de synchronisation). Chaque changement prévu est "
+            "journalisé avec le préfixe « DRY RUN » dans {log_file}"
+        ),
+    },
+    "sources.reconcile_done": {
+        "en": (
+            "Ledger reconciled for calendar account {account}: {migrated} event(s) migrated or "
+            "already migrated; {purged} ledger entry(ies) purged. Details: {log_file}"
+        ),
+        "fr": (
+            "Registre réconcilié pour le compte de calendrier {account} : {migrated} "
+            "événement(s) migrés ou déjà migrés ; {purged} entrée(s) du registre purgées. "
+            "Détails : {log_file}"
         ),
     },
     # --- events.py ---

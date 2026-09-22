@@ -26,6 +26,7 @@ from .sources import (
     list_folder,
     list_restorable_identities_cli,
     migrate_ledger_cli,
+    reconcile_ledger_cli,
     restore_deleted_event_cli,
 )
 
@@ -577,6 +578,40 @@ def migrate_ledger(ctx, interactive, dry_run_ledger):
 
 
 migrate_ledger.help = t("cli.migrate_ledger.help")
+
+
+@cli.command()
+@click.option(
+    "-i",
+    "--interactive",
+    is_flag=True,
+    default=False,
+    help=t("cli.interactive_help"),
+)
+@click.option(
+    "--dry-run-ledger",
+    "dry_run_ledger",
+    is_flag=True,
+    default=False,
+    help=t("cli.reconcile.dry_run_ledger_help"),
+)
+@click.pass_context
+def reconcile(ctx, interactive, dry_run_ledger):
+    verbose = ctx.obj["VERBOSE"]
+    args = Args(
+        interactive=interactive,
+        delete=None,
+        source=None,
+        verbose=verbose,
+        destination=None,
+        text=None,
+        dry_run_ledger=dry_run_ledger,
+    )
+
+    reconcile_ledger_cli(args)
+
+
+reconcile.help = t("cli.reconcile.help")
 
 BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
 

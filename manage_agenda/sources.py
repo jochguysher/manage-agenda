@@ -1174,6 +1174,64 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
     return True
 
 
+def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
+    """The `reconcile` command: the ledger side of `add`, and nothing else - for the calendar
+    account prepare_calendar() selects (the same one `add` would use), behind the same gate
+    (ledger_migrated_for). No mail account is opened: no scan, no extraction, no LLM, no
+    Calendar publish, no mailbox marking, no remember_handled_mail.
+
+    What runs is reconcile_migrate_and_purge(), exactly as in process_email_cli - Calendar
+    sync + reconcile, then migrate, then purge. Migrate is kept on purpose, although it is a
+    no-op on a fully migrated ledger: a ref `migrate-ledger` left for retry (ambiguous API
+    error) has no event_end yet, and purging before migrate retried it would drop the entry on
+    the short recorded_at fallback - this command must be no less careful than `add`.
+
+    Exists because `add --dry-run-ledger` is not a safe preview: it still scans, publishes and
+    marks new messages (see Args.dry_run_ledger). `reconcile --dry-run-ledger` previews the
+    ledger side of the next `add` with the same read-only Calendar calls and writes nothing:
+    no ledger, no .bak, no sync token (see sync_calendar_changes).
+
+    The requeue un-marking (_requeue_pending_imap_messages) is a mailbox action, so it is not
+    run here: an entry this command moves to pending_requeue is un-marked by the next `add`.
+
+    Returns True when the pass ran (dry or real), False when nothing could run - no calendar
+    account, or the gate still closed (no Calendar call at all then)."""
+    rules = rules or moduleRules.from_config()
+    if not prepare_calendar(args, rules):
+        print(t("sources.reconcile_no_calendar"))
+        return False
+    account_key = ledger_migration_account_key(args)
+    if account_key is None:
+        print(t("sources.reconcile_no_calendar"))
+        return False
+    if not ledger_migrated_for(account_key):
+        logging.warning(
+            f"Ledger not migrated yet for calendar account {account_key}: reconcile skipped. Run "
+            "'manage-agenda migrate-ledger --dry-run-ledger', then 'manage-agenda migrate-ledger'."
+        )
+        print(t("sources.reconcile_migration_required", account=account_key))
+        return False
+    # Same as process_email_cli: which refs are this account's. An unreadable calendar list
+    # doesn't abort here (unlike migrate-ledger) - the trio already degrades safely without it.
+    args.calendar_scope = calendar_scope_for(args, rules)
+    dry_run = bool(getattr(args, "dry_run_ledger", False))
+    _handled, migrated_count, purged_count = reconcile_migrate_and_purge(
+        args, path=path, sync_state_path=sync_state_path, dry_run=dry_run
+    )
+    details = {
+        "account": account_key,
+        "migrated": migrated_count,
+        "purged": purged_count,
+        "log_file": log_file_path(),
+    }
+    logging.info(
+        f"{'DRY RUN ' if dry_run else ''}reconcile: {migrated_count} ref(s) migrated, "
+        f"{purged_count} ledger entry(ies) purged for {account_key}."
+    )
+    print(t("sources.reconcile_dry_run_done" if dry_run else "sources.reconcile_done", **details))
+    return True
+
+
 def list_restorable_identities_cli(path=None):
     """Print every ledger identity with at least one cancelled event (from an
     on_user_delete="ignore" resolution) that `restore <identity>` could attempt to restore -
@@ -2233,7 +2291,9 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     # --dry-run-ledger (args.dry_run_ledger) covers reconcile/migrate/purge only - the
     # ledger-writing calls below - never Calendar publish, mailbox marking, or
     # remember_handled_mail; scanning/extraction/publishing still run normally under it. See
-    # the field's own docstring on Args for why it's scoped and named this way.
+    # the field's own docstring on Args for why it's scoped and named this way. The safe
+    # preview is `reconcile --dry-run-ledger` (reconcile_ledger_cli), which runs this ledger
+    # side alone.
     dry_run = bool(getattr(args, "dry_run_ledger", False))
 
     # reconcile_migrate_and_purge() enforces reconcile -> migrate -> purge in that fixed

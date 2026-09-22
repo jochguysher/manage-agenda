@@ -112,6 +112,41 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertIn("timeMin", client.calls[0])
         self.assertTrue(client.calls[0]["timeMin"].endswith("Z"))
 
+    def test_bootstrap_and_delta_listings_both_ask_for_deleted_events(self):
+        """showDeleted=True on every listing: without it a cancelled event is simply absent,
+        never reported with status "cancelled" - the bootstrap would then have to guess from
+        absence, and a delta would never report a deletion at all."""
+        api, client = _api(
+            [
+                {"items": [], "nextSyncToken": "tok-1"},
+                {"items": [], "nextSyncToken": "tok-2"},
+            ]
+        )
+
+        sync_calendar_changes(api, "cal-1", path=self.path)  # bootstrap
+        sync_calendar_changes(api, "cal-1", path=self.path)  # delta from tok-1
+
+        self.assertNotIn("syncToken", client.calls[0])
+        self.assertEqual(client.calls[1].get("syncToken"), "tok-1")
+        self.assertTrue(all(call.get("showDeleted") is True for call in client.calls))
+
+    def test_a_missing_id_whose_lookup_fails_otherwise_is_neither_cancelled_nor_unknown(self):
+        """Absent from the bootstrap listing and the targeted get() fails with anything but
+        404/410 (here a 500): inconclusive, so reported in neither set - absence alone is
+        never a deletion."""
+        api, client = _api(
+            [{"items": [], "nextSyncToken": "tok-1"}],
+            get_responses={("cal-1", "e-missing"): http_error(500)},
+        )
+
+        cancelled, unknown = sync_calendar_changes(
+            api, "cal-1", tracked_events={"e-missing": recent_iso()}, path=self.path
+        )
+
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, set())
+        self.assertEqual(client.get_calls, [("cal-1", "e-missing")])
+
     def test_time_min_is_never_combined_with_sync_token(self):
         self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, client = _api([{"items": [], "nextSyncToken": "tok-new"}])
@@ -963,6 +998,57 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
         self.assertEqual(still_handled, {"msg-1"})
         self.assertEqual(client.get_calls, [])
+
+    def test_absent_from_the_bootstrap_but_still_live_leaves_the_entry_untouched(self):
+        """Absent from the bootstrap listing (e.g. starts beyond its window), recent enough to
+        be looked up, and events.get() finds it live: not a deletion, not unknown - the ledger
+        is not rewritten at all."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [{"calendar_id": "cal-1", "event_id": "ev-far", "recorded_at": recent_iso()}],
+                    "status": "created",
+                }
+            }
+        )
+        before = self.path.read_bytes()
+        api, client = _api(
+            [{"items": [], "nextSyncToken": "tok-first"}],
+            get_responses={("cal-1", "ev-far"): {"id": "ev-far", "status": "confirmed"}},
+        )
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(still_handled, {"msg-1"})
+        self.assertEqual(client.get_calls, [("cal-1", "ev-far")])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_a_calendar_this_account_cannot_see_is_never_looked_up_or_resolved(self):
+        """Calendar answers notFound both for "no such event" and "no such calendar from
+        here". A calendar this account can't see fails at the listing itself, before any
+        events.get(): nothing is reported, so a live event there can never be journaled
+        unknown_event (let alone treated as deleted)."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [{"calendar_id": "cal-hidden", "event_id": "ev-1", "recorded_at": recent_iso()}],
+                    "status": "created",
+                }
+            }
+        )
+        before = self.path.read_bytes()
+        api, client = _api([http_error(404)])
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(still_handled, {"msg-1"})
+        self.assertEqual(client.get_calls, [])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(self.sync_path.exists())
 
 
 class TestEntryPurgeAfter(unittest.TestCase):

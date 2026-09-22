@@ -141,6 +141,24 @@ class TestCliCommands(unittest.TestCase):
         called_args = self.mock_process_email_cli.call_args.args[0]
         self.assertFalse(called_args.dry_run_ledger)
 
+    @patch("manage_agenda.cli.reconcile_ledger_cli")
+    def test_reconcile_passes_dry_run_ledger_and_interactive(self, mock_reconcile):
+        result = self.runner.invoke(self.cli.cli, ["reconcile", "-i", "--dry-run-ledger"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_reconcile.assert_called_once()
+        called_args = mock_reconcile.call_args.args[0]
+        self.assertTrue(called_args.dry_run_ledger)
+        self.assertTrue(called_args.interactive)
+
+    @patch("manage_agenda.cli.reconcile_ledger_cli")
+    def test_reconcile_defaults_to_a_real_non_interactive_pass(self, mock_reconcile):
+        result = self.runner.invoke(self.cli.cli, ["reconcile"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        called_args = mock_reconcile.call_args.args[0]
+        self.assertFalse(called_args.dry_run_ledger)
+        self.assertFalse(called_args.interactive)
+        self.mock_process_email_cli.assert_not_called()
+
     def test_add_no_posts(self):
         result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])
         self.assertEqual(result.exit_code, 0)

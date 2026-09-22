@@ -744,6 +744,29 @@ the owner can attach such a ref by hand, by adding `"calendar_account": "<key>"`
 - Not gated, the same scope boundary as `--dry-run-ledger`: recording newly processed
   messages (`remember_handled_mail`), Calendar publishing, and IMAP marking.
 
+**`manage-agenda reconcile [-i] [--dry-run-ledger]`** (`sources.reconcile_ledger_cli`): the
+ledger side of `add`, and nothing else. `add --dry-run-ledger` is not a safe preview: it keeps
+the ledger untouched, but still scans, extracts, publishes and marks new messages (§9).
+- Same calendar account as `add`, through `prepare_calendar()`: the saved
+  `calendar_account`, otherwise the first configured `gcalendar` account (or a choice, with
+  `-i` - which, as for `add` and `migrate-ledger`, only asks when no account is saved). Same gate:
+  without the account's migration marker it prints the `migrate-ledger` instructions and
+  makes no Calendar call at all. No calendar account → nothing runs.
+- Runs `reconcile_migrate_and_purge()`, exactly as `add` does: Calendar sync + reconcile,
+  migrate, purge, restricted to this account's refs. Migrate is included on purpose, even
+  though it is a no-op on a fully migrated ledger. A ref `migrate-ledger` left for retry has
+  no `event_end` yet; purging it before migrate retries it would drop its entry on the short
+  `recorded_at` fallback. `reconcile` is no less careful than `add`.
+- Never opens a mail account: no scan, no extraction, no LLM, no Calendar publish, no mailbox
+  marking, no `remember_handled_mail`. The requeue un-marking is a mailbox action, so it is
+  not run either: an entry this command moves to `pending_requeue` is un-marked by the next
+  `add`.
+- `--dry-run-ledger`: the same read-only Calendar calls (listing, targeted `events.get()`),
+  every would-be change logged with a `DRY RUN` prefix. Nothing is written: no ledger, no
+  `.bak`, no sync token.
+- A real pass writes what `add` would: the ledger, its `.bak` (migrate), the sync tokens, and
+  the `extendedProperties` patch of any ref migrate retries.
+
 **Cancelled events are never patched.** `migrate-ledger` runs without reconcile first, so a
 ref whose event was deleted on Calendar but is still returned by `events.get()` (status
 `cancelled`) can reach `migrate_one_legacy_event()`. It now returns a new `"cancelled"`
@@ -779,10 +802,23 @@ deleted event, almost at once.
 6. `manage-agenda migrate-ledger`: `.bak` written, events patched, calendar account marked as
    migrated. With several calendar accounts, run it once per account (`-i`), each with its
    own dry run first.
-7. First `add` for that account: reconcile → migrate → purge run automatically.
-   `add --dry-run-ledger` previews the ledger side of that first run, but scanning,
-   extraction, publishing and mailbox marking still run normally under it (§9).
-8. Reactivate the scheduled jobs.
+7. First ledger maintenance for that account, with `reconcile` rather than `add`, so no mail
+   is touched:
+   - `manage-agenda reconcile --dry-run-ledger`, then read `LOG_FILE`. It writes nothing
+     (ledger, `.bak`, sync tokens), so the real run that follows makes the same bootstrap
+     and applies what the preview showed:
+     - `DRY RUN <identity>: event deleted, ignoring per on_user_delete=ignore.` (or
+       `requeueing`) - a confirmed deletion (a `cancelled` tombstone);
+     - `DRY RUN <identity>: ... return 404/410 ... journaling as unknown_event` - no Calendar
+       record of the event at all, never treated as a deletion;
+     - `DRY RUN purge: <identity> would be purged` - past its purge date;
+     - `DRY RUN migrate: ...` - refs `migrate-ledger` left for retry;
+     - `DRY RUN: would abandon ... sync token(s)` - legacy tokens, dropped by the real run.
+   - `manage-agenda reconcile`: the same pass, for real.
+   Don't preview with `add --dry-run-ledger`: it spares the ledger only, and still scans,
+   publishes and marks new messages (§9).
+8. Reactivate the scheduled jobs. The next `add` runs reconcile → migrate → purge
+   automatically, as routine maintenance, then un-marks any `pending_requeue` entry.
 
 **Also fixed along the way.** A socialModules rule key is a tuple, and `config.yaml`
 (`yaml.safe_dump`) stores the saved `calendar_account` as a list. `prepare_calendar()` then
@@ -810,8 +846,25 @@ token, and neither is ever handed the other's.
   once per calendar). Before this, a preview advanced the tokens: the real run that followed
   then asked Calendar only for what changed since the preview, and the deletions the preview
   reported were never applied. That flaw predates the account keying and already hit step 7
-  (preview the first `add`, then run it): the preview moved the legacy token past the
-  backlog it reported. It is fixed on its own merits, with or without the account keying.
+  (preview the first run, then run it): the preview moved the legacy token past the
+  backlog it reported. It is fixed on its own merits, with or without the account keying,
+  and holds for `reconcile --dry-run-ledger` and `add --dry-run-ledger` alike.
+
+**Deletions are read from tombstones, never from absence.** Every listing, bootstrap and
+delta alike, passes `showDeleted=True` (`extraction._list_all_pages`), so a deleted event
+comes back with `status: "cancelled"` instead of just going missing. A tracked ref absent from
+a bootstrap listing is not a deletion by itself:
+- recent enough (`recorded_at` within the 90-day window): one `events.get()`
+  (`_confirm_missing_ids`). `status: "cancelled"` → a confirmed deletion, resolved through
+  `on_user_delete`. 404/410 → `unknown_event`, never a deletion. Still live (e.g. it starts
+  beyond the listing's window), or any other error → nothing reported, the entry is
+  untouched;
+- older, or no `recorded_at`: no lookup, nothing reported, the entry is untouched.
+The 404 is only trusted once the calendar is known to be visible. A calendar this account
+can't see fails at the listing itself, before any `events.get()`: nothing is reported for any
+of its refs. Refs of other accounts, and legacy `primary` refs whose account is unknown, are
+filtered out before that (`CalendarScope.owner_of`). Migrate calls the same 404 `gone`; it
+looks up only calendars on this account's calendar list, for the same reason.
 - **A connection with no usable account key** reads and stores no token. Every sync for it
   bootstraps.
 
@@ -863,3 +916,21 @@ additions only, and existing keys were preserved (§7).
     `add --dry-run-ledger` reports the backlog deletion its bootstrap found, then the real
     `add` performs the same bootstrap and applies it.
 - The first timestamp is kept, and an unreadable marker file means "not migrated".
+- `reconcile` (`TestReconcileCommand`, through the real CLI):
+  - resolves a cancellation into `cancelled_events`, purges an expired entry and stores the
+    new token, while every non-ledger step (`select_api`, `select_llm`, the mailbox scan,
+    `_process_common_flow`, extraction/publishing, requeue un-marking, IMAP marking,
+    `_delete_email`, `remember_handled_mail`) is never called and no mail account is opened;
+  - `--dry-run-ledger`: it did sync and log the would-be resolution and purge, yet the ledger
+    and the token file are byte-identical and there is no `.bak`; on a first bootstrap no
+    token file is created;
+  - gate closed (no marker, or another account's) → no Calendar call, no write; no calendar
+    account → nothing runs;
+  - a ref left for retry is migrated (`event_end` backfilled) before purge, as in `add`;
+  - the new step 7: a `reconcile --dry-run-ledger` reports the backlog deletion found by its
+    bootstrap, then the real `reconcile` makes the same bootstrap and applies it.
+  - `tests/test_cli.py`: `-i` and `--dry-run-ledger` reach `reconcile_ledger_cli`.
+- Tombstones, not absence (`tests/test_event_deletion_detection.py`): bootstrap and delta both
+  send `showDeleted=True`; a ref missing from the bootstrap whose `get()` fails with a 500 is
+  in neither set; at the reconcile level, one found live by `get()` leaves the ledger
+  byte-identical, and one on a calendar whose listing fails is never looked up.

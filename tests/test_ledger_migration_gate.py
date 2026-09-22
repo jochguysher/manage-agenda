@@ -830,3 +830,206 @@ class TestSyncTokensThroughAdd:
         assert entry["status"] == "no_event"
         assert entry["cancelled_events"][0]["event_id"] == "ev-a"
         assert json.loads(tokens.read_text(encoding="utf-8")) == {"accounts": {ACCOUNT_KEY: {"primary": "tok-a1"}}}
+
+
+# Everything `add` does beyond the ledger: opening a mail account, scanning, the LLM,
+# extraction/publishing, marking, recording new messages. `reconcile` must reach none of them.
+_NOT_LEDGER = (
+    "select_api",
+    "select_llm",
+    "_get_emails_from_folder",
+    "_fetch_imap_matches",
+    "_process_common_flow",
+    "_process_event_with_llm_and_calendar",
+    "_requeue_pending_imap_messages",
+    "_imap_store_keyword",
+    "_mark_imap_seen",
+    "_imap_move_to_folder_safely",
+    "_delete_email",
+    "remember_handled_mail",
+)
+
+
+def _reconcile(api, *extra, configured=(ACCOUNT_SRC,)):
+    """`manage-agenda reconcile` through the real CLI, connected to calendar account `api`.
+    Returns (result, {name: mock}) for every non-ledger step in _NOT_LEDGER, and the rules
+    mock."""
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        mock_rules = stack.enter_context(patch("manage_agenda.sources.moduleRules"))
+        stack.enter_context(
+            patch("manage_agenda.sources.prepare_calendar", side_effect=_prepare_calendar_with(api))
+        )
+        spies = {name: stack.enter_context(patch(f"manage_agenda.sources.{name}")) for name in _NOT_LEDGER}
+        rules = mock_rules.from_config.return_value
+        rules.selectRule.return_value = list(configured)
+        result = CliRunner().invoke(cli.cli, ["reconcile", *extra])
+    return result, spies, rules
+
+
+class TestReconcileCommand:
+    """`manage-agenda reconcile [-i] [--dry-run-ledger]`: the ledger side of `add` alone -
+    Calendar sync + reconcile, migrate retry, purge - behind the same gate."""
+
+    def _assert_nothing_but_the_ledger(self, spies, rules):
+        for name, spy in spies.items():
+            assert not spy.called, f"reconcile called {name}"
+        # No mail account is ever opened (process_email_cli opens it through readConfigSrc).
+        rules.readConfigSrc.assert_not_called()
+
+    def test_reconcile_resolves_and_purges_but_never_scans_publishes_or_marks(self):
+        ledger = _write_ledger(_ledger_needing_reconcile_and_purge())
+        record_ledger_migration(ACCOUNT_KEY)
+        _seed_sync_token()
+        client = FakeCalendarClient(list_items=[{"id": "ev-cancelled", "status": "cancelled"}])
+
+        result, spies, rules = _reconcile(_calendar_api(client))
+
+        assert result.exit_code == 0, result.output
+        state = load_handled_mail_state(ledger)
+        assert state["msg-cancelled"]["status"] == "no_event"
+        assert [ref["event_id"] for ref in state["msg-cancelled"]["cancelled_events"]] == ["ev-cancelled"]
+        assert "msg-expired" not in state
+        assert json.loads(calendar_sync_state_file().read_text(encoding="utf-8")) == {
+            "accounts": {ACCOUNT_KEY: {"cal-1": "tok-next"}}
+        }
+        self._assert_nothing_but_the_ledger(spies, rules)
+        assert ACCOUNT_KEY in result.output
+
+    def test_dry_run_writes_neither_the_ledger_nor_the_tokens(self, caplog):
+        ledger = _write_ledger(_ledger_needing_reconcile_and_purge())
+        record_ledger_migration(ACCOUNT_KEY)
+        _seed_sync_token()
+        tokens = calendar_sync_state_file()
+        ledger_before, tokens_before = ledger.read_bytes(), tokens.read_bytes()
+        client = FakeCalendarClient(list_items=[{"id": "ev-cancelled", "status": "cancelled"}])
+
+        with caplog.at_level("INFO"):
+            result, spies, rules = _reconcile(_calendar_api(client), "--dry-run-ledger")
+
+        assert result.exit_code == 0, result.output
+        # It really synced and resolved (non-vacuous)...
+        assert [call.get("syncToken") for call in client.list_calls] == ["tok-old"]
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("DRY RUN msg-cancelled: event deleted" in m for m in messages)
+        assert any("DRY RUN purge: msg-expired would be purged" in m for m in messages)
+        # ...and wrote nothing: no ledger, no .bak, no token.
+        assert ledger.read_bytes() == ledger_before
+        assert not ledger.with_suffix(".json.bak").exists()
+        assert tokens.read_bytes() == tokens_before
+        self._assert_nothing_but_the_ledger(spies, rules)
+
+    def test_dry_run_on_a_first_bootstrap_stores_no_token_file_at_all(self):
+        _write_ledger(_ledger_needing_reconcile_and_purge())
+        record_ledger_migration(ACCOUNT_KEY)
+        client = FakeCalendarClient(list_items=[{"id": "ev-cancelled", "status": "cancelled"}])
+
+        result, _spies, _rules = _reconcile(_calendar_api(client), "--dry-run-ledger")
+
+        assert result.exit_code == 0, result.output
+        assert [call.get("syncToken") for call in client.list_calls] == [None]  # bootstrapped
+        assert not calendar_sync_state_file().exists()
+
+    def test_the_gate_closed_means_no_calendar_call_and_no_write(self):
+        ledger = _write_ledger(_ledger_needing_reconcile_and_purge())
+        before = ledger.read_bytes()
+        _seed_sync_token()
+        client = FakeCalendarClient(list_items=[{"id": "ev-cancelled", "status": "cancelled"}])
+
+        result, spies, rules = _reconcile(_calendar_api(client))
+
+        assert result.exit_code == 0, result.output
+        assert client.list_calls == [] and client.get_calls == []
+        assert ledger.read_bytes() == before
+        assert not ledger.with_suffix(".json.bak").exists()
+        assert "migrate-ledger --dry-run-ledger" in result.output
+        assert ACCOUNT_KEY in result.output
+        self._assert_nothing_but_the_ledger(spies, rules)
+
+    def test_a_marker_for_another_calendar_account_does_not_open_the_gate(self):
+        ledger = _write_ledger(_ledger_needing_reconcile_and_purge())
+        before = ledger.read_bytes()
+        record_ledger_migration(OTHER_KEY)
+        client = FakeCalendarClient()
+
+        _reconcile(_calendar_api(client))
+
+        assert client.list_calls == []
+        assert ledger.read_bytes() == before
+
+    def test_no_calendar_account_runs_nothing(self):
+        ledger = _write_ledger(_ledger_needing_reconcile_and_purge())
+        before = ledger.read_bytes()
+        record_ledger_migration(ACCOUNT_KEY)
+
+        with (
+            patch("manage_agenda.sources.moduleRules"),
+            patch("manage_agenda.sources.prepare_calendar", return_value=False),
+        ):
+            result = CliRunner().invoke(cli.cli, ["reconcile"])
+
+        assert result.exit_code == 0, result.output
+        assert ledger.read_bytes() == before
+
+    def test_migrate_retries_run_before_purge_like_in_add(self):
+        """A ref migrate-ledger left for retry has no event_end yet. Purge alone would drop its
+        entry on the short recorded_at fallback; migrate, run first, backfills event_end and
+        the entry keeps its event_end-based margin - as in `add`."""
+        ledger = _write_ledger(
+            {
+                "msg-retry": {
+                    "events": [_ref("cal-1", "ev-live", calendar_account=ACCOUNT_KEY)],
+                    "status": "created",
+                    "recorded_at": _iso(10),  # past the 7-day no_event fallback
+                }
+            }
+        )
+        record_ledger_migration(ACCOUNT_KEY)
+        client = FakeCalendarClient(
+            list_items=[{"id": "ev-live", "status": "confirmed"}],
+            events_by_id={("cal-1", "ev-live"): _live("ev-live")},
+        )
+
+        result, _spies, _rules = _reconcile(_calendar_api(client))
+
+        assert result.exit_code == 0, result.output
+        ref = load_handled_mail_state(ledger)["msg-retry"]["events"][0]
+        assert ref["migrated"] is True
+        assert ref["event_end"] == "2030-01-15T11:00:00Z"
+
+    def test_the_new_step_7_preview_then_reconcile_applies_the_backlog(self, caplog):
+        """§12 step 7: `reconcile --dry-run-ledger`, then `reconcile`. ev-a was deleted before
+        any token of the new format existed, so only a bootstrap reports it; the preview must
+        leave that bootstrap to the real run."""
+        ledger = _write_ledger(
+            {"msg-a": _entry(_ref("primary", "ev-a", calendar_account=ACCOUNT_KEY, event_end=_iso(-30), migrated=True))}
+        )
+        record_ledger_migration(ACCOUNT_KEY)
+        tokens = calendar_sync_state_file()
+        tokens.parent.mkdir(parents=True, exist_ok=True)
+        tokens.write_text(json.dumps({"tokens": {"primary": "tok-legacy"}}), encoding="utf-8")
+        tokens_before, ledger_before = tokens.read_bytes(), ledger.read_bytes()
+
+        def client():
+            return FakeCalendarClient(
+                list_items=[{"id": "ev-a", "status": "cancelled"}], delta_items=[], next_sync_token="tok-a1"
+            )
+
+        preview = client()
+        with caplog.at_level("INFO"):
+            _reconcile(_calendar_api(preview), "--dry-run-ledger")
+
+        assert [call.get("syncToken") for call in preview.list_calls] == [None]
+        assert any("DRY RUN msg-a: event deleted" in r.getMessage() for r in caplog.records)
+        assert tokens.read_bytes() == tokens_before
+        assert ledger.read_bytes() == ledger_before
+
+        real = client()
+        _reconcile(_calendar_api(real))
+
+        assert [call.get("syncToken") for call in real.list_calls] == [None]  # the same bootstrap
+        entry = load_handled_mail_state(ledger)["msg-a"]
+        assert entry["status"] == "no_event"
+        assert entry["cancelled_events"][0]["event_id"] == "ev-a"
+        assert json.loads(tokens.read_text(encoding="utf-8")) == {"accounts": {ACCOUNT_KEY: {"primary": "tok-a1"}}}
