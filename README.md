@@ -57,6 +57,16 @@ uv run manage-agenda install
 uv run manage-agenda install -b chromium
 ```
 
+### Desktop window (optional)
+The same features are available in a desktop window built with [PySide6](https://doc.qt.io/qtforpython-6/) (LGPL). It is an optional extra, so the command line keeps working without it:
+
+```bash
+uv sync --extra gui        # or: pip install 'manage-agenda[gui]'
+uv run manage-agenda gui   # or the manage-agenda-gui script
+```
+
+See [Desktop window](#desktop-window) below for what it does and how it differs from the terminal.
+
 ### Configuration
 1. Install [socialModules](https://github.com/fernand0/socialModules) for email/calendar integration
 2. Configure your email and calendar accounts using socialModules
@@ -244,6 +254,32 @@ Display emails from your Gmail account.
 #### Options
 - `-i, --interactive`: Running in interactive mode
 
+### `gui` - Desktop Window
+Open the desktop window (needs the `gui` extra, see [Desktop window](#desktop-window)). `-v` before the command shows debug records in the window's log panel.
+
+## Desktop window
+
+`manage-agenda gui` opens a window with one screen per family of commands, a log panel and a status bar. Every screen runs the **same code the corresponding command runs**: the window only replaces the terminal's questions with dialogs. Nothing is duplicated, so the ledger, the mailbox marking and the saved configuration behave exactly as on the command line.
+
+| Command | Screen |
+|---|---|
+| `add` | Add events: source, model, destination calendars, options; the run's questions (an old message, a failed extraction, the event review, the label removal) are dialogs |
+| `copy`, `move`, `delete`, `clean`, `update-status` | Calendar operations: give the calendar ids and the title filter, or answer the dialogs as with `-i` |
+| `reconcile`, `migrate-ledger`, `restore` | Ledger: dry run, account choice, the exit code in the status bar; a table of the restorable identities |
+| `llm evaluate` | Evaluate models |
+| `auth` | Authentication: the check, and the browser consent |
+| `gmail`, `gcalendar` | Lists: the folder or calendar as a table |
+| `install` | Install browser, output streamed to the log |
+| the `config.yaml` wizard | Settings: provider, model, calendar account and calendars, language |
+
+Notes:
+
+- One job runs at a time. **Cancel** stops it at its next question, or right away if it is waiting on one; a call in progress (a model request, a mailbox fetch, the browser consent) finishes on its own. A run cancelled during the event review leaves no ledger entry and marks nothing in the mailbox; one cancelled at the "remove the label?" question still records the event that was already created.
+- The event review dialog shows and edits times in local time and writes them back in UTC, as the terminal's date corrections end up after normalisation.
+- The language follows the same `language` key of `config.yaml` (or the system locale) and applies at the next start.
+- The ledger and `config.yaml` are not locked: do not run the window's `add` and a scheduled (cron) `add` at the same time on the same account.
+- The `gui` extra depends on PySide6, released under the LGPL; the rest of the tool does not import it.
+
 ## Supported LLM Providers
 
 The tool supports multiple LLM providers:
@@ -321,6 +357,12 @@ pip install -e '.[dev]'
 ### Running Tests
 ```bash
 python -m pytest
+```
+
+The desktop window's tests (`tests/gui/`) are skipped when PySide6 is not installed. With the `gui` extra installed, they run against Qt's offscreen platform, no display needed:
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest tests/gui
 ```
 
 Run the LLM response regression fixtures only:

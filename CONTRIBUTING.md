@@ -176,6 +176,14 @@ manage-agenda/
 │   ├── evaluation.py      # LLM evaluation workflows
 │   ├── events.py          # Calendar event operations
 │   ├── extraction.py      # LLM event extraction
+│   ├── gui/               # The desktop window (optional extra "gui", PySide6)
+│   │   ├── app.py         # run()/main(): create the window, attach the log handler
+│   │   ├── bridge.py      # QtUI: the UI port for a flow in a worker thread
+│   │   ├── jobs.py        # JobRunner: one core flow at a time in a QThread
+│   │   ├── dialogs.py     # One dialog per prompt kind
+│   │   ├── main_window.py # Sidebar of screens, log panel, status bar, Cancel
+│   │   ├── widgets.py     # Account and calendar pickers
+│   │   └── screens/       # One screen per family of commands
 │   ├── i18n.py            # t(): interface language resolution
 │   ├── interactive.py     # questionary lists (console only, see "The UI port")
 │   ├── llm.py             # LLM provider clients and selection
@@ -244,6 +252,20 @@ assert [call.kind for call in ui.calls] == ["confirm", "choose_one"]
 pytest-style tests can take the `scripted_ui` fixture instead (it also checks every queued
 answer was consumed). `ScriptedUI(lenient=True)` answers unqueued prompts with a neutral
 default (first option, nothing, no) for tests that do not care about the prompts.
+
+## The desktop window
+
+`manage_agenda/gui/` is only imported by the `gui` command and the `manage-agenda-gui`
+script, so nothing else needs PySide6. Rules for GUI code:
+
+- a screen never calls core code on the GUI thread: it builds an `Args` and submits the
+  same `*_cli` function `cli.py` calls to the job runner (`Screen.submit`); the worker's
+  prompts become dialogs through `QtUI` and `MainWindow._on_ui_request`;
+- every string goes through `t()` with `en` and `fr` entries (keys `gui.*`);
+- no import-time side effects (no `QApplication`, no paths, no handlers);
+- tests live in `tests/gui/`, are skipped without PySide6 and run offscreen:
+  `QT_QPA_PLATFORM=offscreen python -m pytest tests/gui`. Install the toolkit with
+  `uv sync --extra gui --extra dev`.
 
 ## Getting Help
 
