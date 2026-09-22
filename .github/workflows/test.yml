@@ -1,6 +1,9 @@
 name: Test
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:  # lets `gh workflow run test.yml` start lint+test without a push
 
 permissions:
   contents: read
