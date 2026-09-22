@@ -40,6 +40,7 @@ class Args:
     rule: Optional[str] = None
     model: Optional[str] = None
     reconfigure: bool = False
+    dry_run: bool = False
 
 
 def get_add_sources(rules=None):
@@ -125,6 +126,91 @@ def handled_mail_file():
     from manage_agenda.config import DATA_DIR
 
     return Path(DATA_DIR) / "handled_mail_ids.json"
+
+
+def _imap_marker_history_file():
+    """Per-account (not per-message) record of the last IMAP marker mode used - bounded by
+    the number of configured accounts, never by mail volume. See
+    check_marker_mode_transition()."""
+    from manage_agenda.config import DATA_DIR
+
+    return Path(DATA_DIR) / "imap_marker_history.json"
+
+
+def _load_marker_history(path=None):
+    path = Path(path) if path else _imap_marker_history_file()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    return {str(k): str(v) for k, v in accounts.items()} if isinstance(accounts, dict) else {}
+
+
+def _save_marker_history(history, path=None):
+    path = Path(path) if path else _imap_marker_history_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"accounts": history}, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def imap_marker_account_key(selected_source, source_details):
+    """A stable-enough per-account key for check_marker_mode_transition(): the configured
+    rule name when there is one, else folder+channel (accounts without an explicit
+    selected_source - e.g. auto-selected via select_api - are not distinguished from one
+    another beyond that, a documented best-effort limitation, not a hard guarantee)."""
+    if selected_source:
+        return str(selected_source)
+    folder = source_details.get("folder") or source_details.get("channel") or "INBOX"
+    return f"folder:{folder}"
+
+
+def check_marker_mode_transition(account_key, current_mode, path=None):
+    """Refuses (returns False) a switch away from `flag_seen` (today's `mark: seen`,
+    ledger-only exclusion) to `keyword` or `folder` (server-side SEARCH exclusion) for an
+    account with marker history on record, until the §6 mailbox-side migration - retroactively
+    applying the new marker to every message still tracked in the ledger - has been done. That
+    migration is documented but not implemented (see docs/investigation-limite1.md §6), so
+    this is a fail-closed guard, not a fix: without it, a ledger entry that ages past its purge
+    margin (purge_expired_ledger_entries) makes its still-unmoved, flag-only-marked message
+    visible to a fresh scan again, and if the LLM's extraction isn't perfectly deterministic
+    across runs (a different event count/order shifts event_index), the recomputed
+    deterministic id can differ from the one already on Calendar - a genuine duplicate event,
+    not merely a caught collision.
+
+    Any other transition is allowed: an unconfigured account switching to a marker, or a
+    switch between `keyword` and `folder`, don't share flag_seen's "message never physically
+    moves, exclusion is ledger-only" property - a purged-then-resurfaced message under either
+    of those is still excluded by the new mode's own server-side SEARCH criterion regardless
+    of ledger state.
+
+    The first time `account_key` is seen, the current mode is simply recorded and the scan is
+    allowed - there is no history yet to migrate away from. This means the guard is
+    forward-only: it protects a `mark: seen` -> `keyword`/`folder` switch made AFTER this
+    version has run at least once for that account. A switch already made before upgrading is
+    recorded as if `keyword`/`folder` had always been the mode and is never caught - the
+    ledger has no per-entry record of which marker was used, by design, so there is nothing
+    to detect that switch from after the fact.
+
+    Not gated on any caller's dry_run - this only ever records the current marker mode, never
+    the user's mail/calendar data, and it is a small, per-account (not per-message) file.
+    """
+    history = _load_marker_history(path)
+    previous_mode = history.get(account_key)
+    normalized_current = current_mode or "none"
+    if previous_mode is None:
+        history[account_key] = normalized_current
+        _save_marker_history(history, path)
+        return True
+    if previous_mode == "flag_seen" and current_mode in ("keyword", "folder"):
+        return False
+    if previous_mode != normalized_current:
+        history[account_key] = normalized_current
+        _save_marker_history(history, path)
+    return True
 
 
 def _load_state(path):
@@ -378,11 +464,20 @@ def _extract_event_refs(calendar_result):
     return refs
 
 
-def reconcile_handled_events(args, path=None, sync_state_path=None, on_user_delete=None):
+def reconcile_handled_events(
+    args, path=None, sync_state_path=None, on_user_delete=None, dry_run=False
+):
     """Resolve messages whose recorded Calendar events have all been deleted, per
     `on_user_delete` (default from config.Config.ON_USER_DELETE, itself defaulting to
     "ignore" - see docs/investigation-limite1.md, this default was explicitly validated by
     the user, never chosen unilaterally):
+
+    `dry_run=True` still reads from Calendar (sync_calendar_changes - read-only, and its own
+    syncToken bookkeeping is left as-is regardless, since it holds no user-visible data and
+    advancing it doesn't affect the ledger or Calendar) and still computes every resolution
+    exactly as a real call would (`still_handled` is accurate either way), but never calls
+    `_save_state` - the ledger file is not written. Every identity whose resolution would have
+    written something is logged instead.
 
     - "ignore": the message stays marked processed (its identity stays in `still_handled`,
       excluded from future scans exactly like a "no_event" entry) and the deletion stands.
@@ -443,12 +538,19 @@ def reconcile_handled_events(args, path=None, sync_state_path=None, on_user_dele
         if remaining:
             still_handled.add(identity)
             if len(remaining) != len(events):
+                partially_cancelled = len(events) - len(remaining)
+                prefix = "DRY RUN " if dry_run else ""
+                logging.info(
+                    f"{prefix}reconcile: {identity}: {partially_cancelled} of {len(events)} "
+                    "tracked event(s) cancelled, keeping the identity handled for the rest."
+                )
                 entry["events"] = remaining
                 changed = True
             continue
 
         # Every tracked event for this identity was cancelled - a user deletion.
         changed = True
+        prefix = "DRY RUN " if dry_run else ""
         if on_user_delete == "requeue":
             # Deliberately abandons the old ids - a requeue always computes a fresh
             # deterministic id from the bumped generation, so there is nothing to keep them
@@ -456,7 +558,7 @@ def reconcile_handled_events(args, path=None, sync_state_path=None, on_user_dele
             entry["events"] = []
             entry["status"] = "pending_requeue"
             entry["generation"] = int(entry.get("generation") or 0) + 1
-            logging.info(f"{identity}: event deleted, requeueing (generation bumped).")
+            logging.info(f"{prefix}{identity}: event deleted, requeueing (generation bumped).")
             # Deliberately not added to still_handled - the caller is expected to un-mark the
             # source message so the next scan can pick it up again.
         else:
@@ -468,20 +570,29 @@ def reconcile_handled_events(args, path=None, sync_state_path=None, on_user_dele
             entry["events"] = []
             entry["status"] = "no_event"
             still_handled.add(identity)
-            logging.info(f"{identity}: event deleted, ignoring per on_user_delete=ignore.")
+            logging.info(f"{prefix}{identity}: event deleted, ignoring per on_user_delete=ignore.")
 
-    if changed:
+    if changed and not dry_run:
         _save_state(path, state)
 
     return still_handled
 
 
-def migrate_legacy_ledger_entries(args, path=None):
+def migrate_legacy_ledger_entries(args, path=None, dry_run=False):
     """One-time-per-ref migration: patch extendedProperties.private onto Calendar events
     created before deterministic ids/origin stamping existed, and backfill each ref's
     event_end while at it (free - the same events.get() call already fetches it) - see
     docs/investigation-limite1.md migration requirements. Never touches an event's own id -
     see migrate_one_legacy_event().
+
+    `dry_run=True` still reads (events.get(), needed for an accurate preview) but performs no
+    write of any kind: no events.patch() call (see migrate_one_legacy_event), and no ledger
+    save - every per-ref outcome is only logged. Safe to run repeatedly against real data to
+    preview exactly what a real pass would touch before ever authorizing one.
+
+    Before a REAL (non-dry-run) pass - unconditionally, not only when something will actually
+    change - the ledger file is copied to `<path>.bak` (overwritten each real call) if it
+    exists, so there is always a rollback point for the most recent real migration pass.
 
     Idempotent per ref: a successfully-migrated or confirmed-gone ref is marked
     "migrated": true and never touched again on a later call; a ref left un-migrated (an
@@ -504,7 +615,8 @@ def migrate_legacy_ledger_entries(args, path=None):
     event_end via the shorter no_event-style margin from recorded_at - never a crash or wrong
     data, just a possibly-shorter retention than a live event would have earned.
 
-    Returns the number of refs newly migrated or confirmed already-migrated this call.
+    Returns the number of refs migrated, confirmed already-migrated, or (dry_run only)
+    that would be migrated, this call.
     """
     path = Path(path) if path else handled_mail_file()
     state = _load_state(path)
@@ -514,6 +626,11 @@ def migrate_legacy_ledger_entries(args, path=None):
         return 0
 
     from manage_agenda.extraction import _is_within_bootstrap_window, migrate_one_legacy_event
+
+    if not dry_run and path.is_file():
+        backup_path = path.with_suffix(path.suffix + ".bak")
+        backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        logging.info(f"migrate: backed up {path} to {backup_path} before a real pass.")
 
     migrated_count = 0
     changed = False
@@ -536,16 +653,23 @@ def migrate_legacy_ledger_entries(args, path=None):
             if not calendar_id or not event_id:
                 continue
             status, event_end = migrate_one_legacy_event(
-                client, calendar_id, event_id, identity, generation, index
+                client, calendar_id, event_id, identity, generation, index, dry_run=dry_run
             )
             if status == "retry":
+                continue
+            if status in ("migrated", "already_migrated", "would_migrate"):
+                migrated_count += 1
+            if dry_run:
+                # Never mutate the ledger in dry-run - every outcome (would_migrate,
+                # already_migrated, gone) is logged (see migrate_one_legacy_event and this
+                # function's own logging) but not persisted, including the "migrated" flag
+                # itself: a later real run must still process every one of these refs.
+                logging.info(f"DRY RUN migrate: {identity} {calendar_id}/{event_id}: {status}")
                 continue
             ref["migrated"] = True
             if event_end and not ref.get("event_end"):
                 ref["event_end"] = event_end
             changed = True
-            if status in ("migrated", "already_migrated"):
-                migrated_count += 1
 
     if changed:
         _save_state(path, state)
@@ -610,6 +734,7 @@ def purge_expired_ledger_entries(
     today=None,
     event_margin_days=LEDGER_EVENT_END_MARGIN_DAYS,
     no_event_margin_days=LEDGER_NO_EVENT_MARGIN_DAYS,
+    dry_run=False,
 ):
     """Drop ledger entries past their purge date, so local state stays bounded by current/
     future activity instead of growing with the tool's whole history - the hard constraint
@@ -617,24 +742,54 @@ def purge_expired_ledger_entries(
 
     Applies uniformly to every status ("created", "no_event", "source_lost", "legacy"): what
     differs between them is only which age signal `_entry_purge_after` finds available.
-    Returns the number of entries purged.
+
+    An entry with NO age signal at all (no event_end anywhere, and no `recorded_at` - only
+    possible for a pre-migration entry that also predates the `recorded_at` field) is not left
+    to persist forever: `_entry_purge_after` returning None here gets exactly one grace pass,
+    stamping `recorded_at` to "now" (never overwriting an existing one - see
+    _entry_purge_after, this branch is only reached when there truly wasn't one), so it
+    purges via the normal no_event_margin_days on a later run. No entry can be exempt from
+    purging indefinitely just for lacking history it never had.
+
+    `dry_run=True` computes exactly what a real call would (the returned count is accurate
+    either way) but never calls `_save_state` - nothing is dropped and no entry is stamped
+    with a grace-pass `recorded_at`. Purging is the one truly destructive step of the three
+    `process_email_cli` runs in sequence (reconcile, migrate, purge) - a `--dry-run` pass that
+    left this one live would silently delete real ledger entries under a flag whose entire
+    point is "touch nothing".
+
+    Returns the number of entries that were (or, dry_run only, would be) purged.
     """
     path = Path(path) if path else handled_mail_file()
     state = _load_state(path)
     today = today or datetime.datetime.now(datetime.timezone.utc)
     if today.tzinfo is None:
         today = today.replace(tzinfo=datetime.timezone.utc)
+    today_iso = today.isoformat().replace("+00:00", "Z")
 
     remaining = {}
     purged = 0
+    stamped = False
     for identity, entry in state.items():
         purge_after = _entry_purge_after(entry, event_margin_days, no_event_margin_days)
         if purge_after is not None and purge_after <= today:
             purged += 1
+            if dry_run:
+                # `remaining` is never saved under dry_run (see below) - not adding this
+                # identity to it here is just to avoid implying otherwise.
+                logging.info(f"DRY RUN purge: {identity} would be purged (past {purge_after}).")
             continue
+        if purge_after is None:
+            # No event_end and no recorded_at at all - give it exactly one grace pass rather
+            # than leaving it permanently unpurgeable.
+            if dry_run:
+                logging.info(f"DRY RUN purge: {identity} would be stamped with a grace-pass recorded_at.")
+            else:
+                entry["recorded_at"] = today_iso
+                stamped = True
         remaining[identity] = entry
 
-    if purged:
+    if (purged or stamped) and not dry_run:
         _save_state(path, remaining)
     return purged
 
@@ -1695,17 +1850,25 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         print(t("sources.no_message_read_fix_calendar"))
         return False
 
+    # --dry-run (args.dry_run) was requested scoped to reconcile and migrate specifically
+    # (the two decision/mutation points against real Calendar/ledger data), and the rest of
+    # this function (scanning/extraction/publishing) deliberately still runs normally under
+    # it. purge is included too, even though it wasn't named: it writes the exact same ledger
+    # file in the same three-call sequence, and skipping it here would let a "touch nothing"
+    # flag permanently delete real ledger entries.
+    dry_run = bool(getattr(args, "dry_run", False))
+
     # Reconcile BEFORE purge, always: reconcile is what notices a deleted event and applies
     # the on_user_delete resolution (ignore keeps the identity excluded; requeue bumps its
     # generation and marks it pending_requeue) - purging an entry first would drop it before
     # reconcile ever sees it, silently turning "the event was deleted" into "this message was
     # never seen", defeating on_user_delete entirely for anything past its purge margin too.
-    handled = reconcile_handled_events(args)
+    handled = reconcile_handled_events(args, dry_run=dry_run)
     # Migrate BEFORE purge too: it backfills event_end on legacy refs that predate that field,
     # which purge_expired_ledger_entries() needs to give them their full margin instead of the
     # shorter no_event-style fallback it would otherwise fall back to.
-    migrate_legacy_ledger_entries(args)
-    purge_expired_ledger_entries()
+    migrate_legacy_ledger_entries(args, dry_run=dry_run)
+    purge_expired_ledger_entries(dry_run=dry_run)
     # Loaded once, after reconcile/migrate/purge - metadata_extractor below does one dict
     # lookup per message instead of re-reading the ledger file each time, and is also where a
     # pending_requeue entry (identity intentionally left out of `handled` above) is found for
@@ -1725,16 +1888,41 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         else None
     )
 
+    # Checked (and history recorded) for every IMAP account, every mode - not just when
+    # switching to keyword/folder - so a later switch away from flag_seen has something to
+    # compare against. Blocks only the specific flag_seen -> keyword/folder transition; see
+    # check_marker_mode_transition() for why that one risks genuine duplicate events without
+    # the (documented but unimplemented) §6 mailbox-side migration.
+    marker_transition_blocked = False
+    if is_imap_source:
+        account_key = imap_marker_account_key(selected_source, source_details)
+        if not check_marker_mode_transition(account_key, imap_marker_mode):
+            marker_transition_blocked = True
+            print(
+                t(
+                    "sources.marker_migration_required",
+                    account=account_key,
+                    mode=imap_marker_mode or "none",
+                )
+            )
+
     # A pending_requeue identity is only ever un-marked in the account whose folder actually
     # has it - a miss here is expected and harmless when the identity belongs to a different
     # account (self-correcting: it stays pending_requeue for that account's next run, no
-    # cross-account tracking needed).
+    # cross-account tracking needed). Not gated on marker_transition_blocked - unlike a broad
+    # scan, this only ever acts on a specific, already-known identity via a targeted search,
+    # not the "purged-then-resurfaced messages match a wide criterion" risk the guard above
+    # exists for.
     _requeue_pending_imap_messages(
         api_src, source_details, is_imap_source, imap_marker_mode, imap_marker_value,
         imap_capabilities, handled_state,
     )
 
-    posts = _get_emails_from_folder(args, api_src, source_details=source_details, handled=handled)
+    posts = (
+        None
+        if marker_transition_blocked
+        else _get_emails_from_folder(args, api_src, source_details=source_details, handled=handled)
+    )
     if posts:
         posts, skipped = unseen_messages(posts, handled=handled)
         if skipped:

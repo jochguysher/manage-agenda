@@ -112,6 +112,33 @@ class TestMigrateOneLegacyEvent(unittest.TestCase):
         self.assertEqual(status, "migrated")
         self.assertIsNone(event_end)
 
+    def test_dry_run_never_calls_patch(self):
+        existing = {
+            "id": "legacy-1",
+            "end": {"dateTime": "2026-09-22T16:00:00-04:00"},
+            "extendedProperties": {"private": {"ai_model_used": "gemini"}},
+        }
+        client = _client_with_get(existing)
+
+        status, event_end = migrate_one_legacy_event(
+            client, "primary", "legacy-1", "msg-1", 0, 0, dry_run=True
+        )
+
+        self.assertEqual(status, "would_migrate")
+        self.assertEqual(event_end, "2026-09-22T16:00:00-04:00")
+        client.events.return_value.patch.assert_not_called()
+
+    def test_dry_run_still_reports_gone_and_already_migrated(self):
+        client_gone = _client_with_get(http_error(404))
+        status, _ = migrate_one_legacy_event(client_gone, "primary", "e1", "msg-1", 0, 0, dry_run=True)
+        self.assertEqual(status, "gone")
+
+        already = {"id": "e2", "extendedProperties": {"private": {"origin": "manage-agenda"}}}
+        client_already = _client_with_get(already)
+        status, _ = migrate_one_legacy_event(client_already, "primary", "e2", "msg-1", 0, 0, dry_run=True)
+        self.assertEqual(status, "already_migrated")
+        client_already.events.return_value.patch.assert_not_called()
+
 
 class TestMigrateLegacyLedgerEntries(unittest.TestCase):
     def setUp(self):
@@ -274,6 +301,97 @@ class TestMigrateLegacyLedgerEntries(unittest.TestCase):
 
         ref = load_handled_mail_state(self.path)["msg-1"]["events"][0]
         self.assertEqual(ref["event_end"], "2020-01-01T00:00:00Z")
+
+    def test_dry_run_writes_nothing_to_the_ledger(self):
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "recorded_at": self._recent_iso()}
+                    ],
+                    "status": "created",
+                    "generation": 0,
+                }
+            }
+        )
+        before = self.path.read_text(encoding="utf-8")
+        existing = {"id": "e1", "end": {"dateTime": "2026-09-22T16:00:00-04:00"}}
+        args = self._args_with_client(existing)
+
+        migrated = migrate_legacy_ledger_entries(args, path=self.path, dry_run=True)
+
+        self.assertEqual(migrated, 1)  # reports what WOULD happen
+        after = self.path.read_text(encoding="utf-8")
+        self.assertEqual(before, after)  # but writes nothing at all
+        ref = load_handled_mail_state(self.path)["msg-1"]["events"][0]
+        self.assertNotIn("migrated", ref)
+        self.assertNotIn("event_end", ref)
+        args.calendar_api.getClient.return_value.events.return_value.patch.assert_not_called()
+
+    def test_dry_run_does_not_prevent_a_later_real_run_from_migrating_the_same_ref(self):
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "recorded_at": self._recent_iso()}
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        existing = {"id": "e1", "end": {"dateTime": "2026-09-22T16:00:00-04:00"}}
+
+        dry_args = self._args_with_client(existing)
+        migrate_legacy_ledger_entries(dry_args, path=self.path, dry_run=True)
+
+        real_args = self._args_with_client(existing)
+        migrated = migrate_legacy_ledger_entries(real_args, path=self.path, dry_run=False)
+
+        self.assertEqual(migrated, 1)
+        ref = load_handled_mail_state(self.path)["msg-1"]["events"][0]
+        self.assertTrue(ref["migrated"])
+
+    def test_real_pass_backs_up_the_ledger_file_first(self):
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "recorded_at": self._recent_iso()}
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        original_content = self.path.read_text(encoding="utf-8")
+        existing = {"id": "e1", "end": {"dateTime": "2026-09-22T16:00:00-04:00"}}
+        args = self._args_with_client(existing)
+        backup_path = self.path.with_suffix(self.path.suffix + ".bak")
+        self.addCleanup(lambda: backup_path.unlink(missing_ok=True))
+
+        migrate_legacy_ledger_entries(args, path=self.path, dry_run=False)
+
+        self.assertTrue(backup_path.is_file())
+        self.assertEqual(backup_path.read_text(encoding="utf-8"), original_content)
+
+    def test_dry_run_never_creates_a_backup(self):
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "recorded_at": self._recent_iso()}
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        existing = {"id": "e1", "end": {"dateTime": "2026-09-22T16:00:00-04:00"}}
+        args = self._args_with_client(existing)
+        backup_path = self.path.with_suffix(self.path.suffix + ".bak")
+        self.addCleanup(lambda: backup_path.unlink(missing_ok=True))
+
+        migrate_legacy_ledger_entries(args, path=self.path, dry_run=True)
+
+        self.assertFalse(backup_path.is_file())
 
 
 if __name__ == "__main__":

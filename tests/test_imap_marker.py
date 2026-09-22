@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import MagicMock
 
@@ -14,7 +15,9 @@ from manage_agenda.sources import (
     _imap_unmark_keyword_by_identity,
     _looks_like_message_id,
     _requeue_pending_imap_messages,
+    check_marker_mode_transition,
     forget_handled_mail,
+    imap_marker_account_key,
     load_handled_mail_state,
     remember_handled_mail,
 )
@@ -545,6 +548,81 @@ class TestRememberHandledMailImapLocator(unittest.TestCase):
 
         entry = load_handled_mail_state(self.path)["msg-1"]
         self.assertEqual(entry["imap_locator"], {"folder": "Archive", "uidvalidity": "1", "uid": "5"})
+
+
+class TestImapMarkerAccountKey(unittest.TestCase):
+    def test_uses_the_selected_source_name_when_given(self):
+        self.assertEqual(imap_marker_account_key("mail-account", {"folder": "INBOX"}), "mail-account")
+
+    def test_falls_back_to_folder_when_no_selected_source(self):
+        self.assertEqual(imap_marker_account_key(None, {"folder": "INBOX"}), "folder:INBOX")
+
+    def test_falls_back_to_channel_then_inbox(self):
+        self.assertEqual(imap_marker_account_key(None, {"channel": "Archive"}), "folder:Archive")
+        self.assertEqual(imap_marker_account_key(None, {}), "folder:INBOX")
+
+
+class TestCheckMarkerModeTransition(unittest.TestCase):
+    def setUp(self):
+        from pathlib import Path
+
+        self.path = Path("/tmp") / (self.id().replace(".", "_") + ".json")
+        self.path.unlink(missing_ok=True)
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+        self.addCleanup(lambda: Path(str(self.path) + ".tmp").unlink(missing_ok=True))
+
+    def test_first_time_seen_records_and_allows(self):
+        allowed = check_marker_mode_transition("acct-1", "flag_seen", path=self.path)
+
+        self.assertTrue(allowed)
+        self.assertEqual(json.loads(self.path.read_text())["accounts"]["acct-1"], "flag_seen")
+
+    def test_unchanged_mode_is_allowed(self):
+        check_marker_mode_transition("acct-1", "flag_seen", path=self.path)
+
+        allowed = check_marker_mode_transition("acct-1", "flag_seen", path=self.path)
+
+        self.assertTrue(allowed)
+
+    def test_flag_seen_to_keyword_is_refused(self):
+        check_marker_mode_transition("acct-1", "flag_seen", path=self.path)
+
+        allowed = check_marker_mode_transition("acct-1", "keyword", path=self.path)
+
+        self.assertFalse(allowed)
+        # Refusal must not silently record the new mode - a retry after the config is
+        # reverted (or after a real migration) must see the same refusal, not a fait accompli.
+        self.assertEqual(json.loads(self.path.read_text())["accounts"]["acct-1"], "flag_seen")
+
+    def test_flag_seen_to_folder_is_refused(self):
+        check_marker_mode_transition("acct-1", "flag_seen", path=self.path)
+
+        allowed = check_marker_mode_transition("acct-1", "folder", path=self.path)
+
+        self.assertFalse(allowed)
+
+    def test_none_to_keyword_is_allowed(self):
+        """Unconfigured (no marker at all, the _delete_email default) never shares flag_seen's
+        "message never moves" property, so switching away from it is not blocked."""
+        check_marker_mode_transition("acct-1", None, path=self.path)
+
+        allowed = check_marker_mode_transition("acct-1", "keyword", path=self.path)
+
+        self.assertTrue(allowed)
+
+    def test_keyword_to_folder_is_allowed(self):
+        check_marker_mode_transition("acct-1", "keyword", path=self.path)
+
+        allowed = check_marker_mode_transition("acct-1", "folder", path=self.path)
+
+        self.assertTrue(allowed)
+
+    def test_different_accounts_are_tracked_independently(self):
+        check_marker_mode_transition("acct-1", "flag_seen", path=self.path)
+
+        allowed = check_marker_mode_transition("acct-2", "keyword", path=self.path)
+
+        self.assertTrue(allowed)
 
 
 if __name__ == "__main__":

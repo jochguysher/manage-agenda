@@ -80,6 +80,18 @@ TRANSLATIONS = {
         "en": "Reopen the interactive setup for provider, model, and calendar, and save the result",
         "fr": "Rouvre l'assistant interactif pour le fournisseur, le modèle et le calendrier, et sauvegarde le résultat",
     },
+    "cli.add.dry_run_help": {
+        "en": (
+            "Preview deleted-event reconciliation, legacy-event migration, and ledger "
+            "purging without writing anything (scanning/extraction/publishing still run "
+            "normally)"
+        ),
+        "fr": (
+            "Prévisualise la réconciliation des événements supprimés, la migration des "
+            "événements existants et la purge du registre sans rien écrire (l'analyse, "
+            "l'extraction et la publication s'exécutent normalement)"
+        ),
+    },
     "cli.auth.help": {
         "en": "Auth related operations",
         "fr": "Opérations liées à l'authentification",
@@ -574,6 +586,23 @@ TRANSLATIONS = {
             "Calendar n'a pas confirmé la restauration - c'est une inconnue documentée (voir "
             "docs/investigation-limite1.md, sonde b). Utilisez requeue pour recréer "
             "l'événement sous un nouvel identifiant à la place."
+        ),
+    },
+    "sources.marker_migration_required": {
+        "en": (
+            "Refusing to scan {account}: it was previously marked with 'mark: seen' and is "
+            "now configured for {mode} mode. Switching without first migrating already-marked "
+            "messages (see docs/investigation-limite1.md §6, not yet implemented) risks "
+            "recreating events as duplicates. Revert processed_marker, or apply the {mode} "
+            "marker to every message still tracked in the ledger by hand before retrying."
+        ),
+        "fr": (
+            "Analyse de {account} refusée : ce compte était marqué avec « mark: seen » et est "
+            "maintenant configuré en mode {mode}. Changer sans d'abord migrer les messages "
+            "déjà marqués (voir docs/investigation-limite1.md §6, non implémentée) risque de "
+            "recréer des événements en double. Revenez à processed_marker précédent, ou "
+            "appliquez manuellement le marqueur {mode} à chaque message encore suivi dans le "
+            "ledger avant de réessayer."
         ),
     },
     # --- events.py ---

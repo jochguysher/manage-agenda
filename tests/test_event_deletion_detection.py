@@ -13,6 +13,7 @@ from manage_agenda.extraction import (
     sync_calendar_changes,
 )
 from manage_agenda.sources import (
+    LEDGER_NO_EVENT_MARGIN_DAYS,
     Args,
     _entry_purge_after,
     _extract_event_refs,
@@ -439,6 +440,48 @@ class TestReconcileHandledEvents(unittest.TestCase):
             ]
         )
 
+    def test_dry_run_computes_the_same_still_handled_but_writes_nothing(self):
+        api, _client = self._seed_gone_and_present()
+        args = Args(interactive=False)
+        args.calendar_api = api
+        before = self.path.read_text(encoding="utf-8")
+
+        still_handled = reconcile_handled_events(
+            args,
+            path=self.path,
+            sync_state_path=self.sync_path,
+            on_user_delete="ignore",
+            dry_run=True,
+        )
+
+        self.assertEqual(still_handled, {"msg-gone", "msg-present", "msg-legacy"})
+        after = self.path.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+        # The identity that would have been resolved is still exactly as it was.
+        entry = load_handled_mail_state(self.path)["msg-gone"]
+        self.assertEqual(entry["status"], "created")
+        self.assertNotIn("cancelled_events", entry)
+
+    def test_dry_run_requeue_also_writes_nothing(self):
+        api, _client = self._seed_gone_and_present()
+        args = Args(interactive=False)
+        args.calendar_api = api
+        before = self.path.read_text(encoding="utf-8")
+
+        still_handled = reconcile_handled_events(
+            args,
+            path=self.path,
+            sync_state_path=self.sync_path,
+            on_user_delete="requeue",
+            dry_run=True,
+        )
+
+        self.assertEqual(still_handled, {"msg-present", "msg-legacy"})
+        self.assertEqual(self.path.read_text(encoding="utf-8"), before)
+        entry = load_handled_mail_state(self.path)["msg-gone"]
+        self.assertEqual(entry["status"], "created")
+        self.assertEqual(entry["generation"], 0)
+
     def test_ignore_default_keeps_a_deleted_event_s_identity_excluded(self):
         """on_user_delete="ignore" (the validated default): the message stays marked
         processed and the deletion stands - there is no way to tell an accidental deletion
@@ -790,14 +833,45 @@ class TestPurgeExpiredLedgerEntries(unittest.TestCase):
         self.assertEqual(purged, 1)
         self.assertEqual(load_handled_mail_state(self.path), {})
 
-    def test_legacy_entry_with_no_recorded_at_is_never_purged(self):
-        self.path.write_text(json.dumps({"ids": ["old-legacy"]}), encoding="utf-8")
-        today = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
+    def test_created_entry_with_no_event_end_and_no_recorded_at_also_gets_a_grace_pass(self):
+        """Same guarantee as the legacy-format test below, but for a "created" entry whose
+        ref simply predates the event_end field and whose entry predates recorded_at - not
+        just the {"ids": [...]} legacy format."""
+        self._write_state(
+            {"msg-1": {"events": [{"calendar_id": "primary", "event_id": "e1"}], "status": "created"}}
+        )
+        first_pass = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
 
-        purged = purge_expired_ledger_entries(path=self.path, today=today)
+        purged = purge_expired_ledger_entries(path=self.path, today=first_pass)
+        self.assertEqual(purged, 0)
+        self.assertEqual(
+            load_handled_mail_state(self.path)["msg-1"]["recorded_at"], "2099-01-01T00:00:00Z"
+        )
+
+        second_pass = first_pass + datetime.timedelta(days=LEDGER_NO_EVENT_MARGIN_DAYS + 1)
+        purged = purge_expired_ledger_entries(path=self.path, today=second_pass)
+        self.assertEqual(purged, 1)
+
+    def test_legacy_entry_with_no_recorded_at_gets_one_grace_pass_then_purges(self):
+        """No entry may be exempt from purging forever just for lacking history it never
+        had (a pre-migration legacy entry with no event_end and no recorded_at at all):
+        the first call stamps recorded_at (a one-time grace pass, not an immediate purge),
+        and a later call past the short margin from that stamp purges it - it can no longer
+        stay in the ledger indefinitely."""
+        self.path.write_text(json.dumps({"ids": ["old-legacy"]}), encoding="utf-8")
+        first_pass = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
+
+        purged = purge_expired_ledger_entries(path=self.path, today=first_pass)
 
         self.assertEqual(purged, 0)
-        self.assertEqual(set(load_handled_mail_state(self.path).keys()), {"old-legacy"})
+        entry = load_handled_mail_state(self.path)["old-legacy"]
+        self.assertEqual(entry["recorded_at"], "2099-01-01T00:00:00Z")
+
+        second_pass = first_pass + datetime.timedelta(days=LEDGER_NO_EVENT_MARGIN_DAYS + 1)
+        purged = purge_expired_ledger_entries(path=self.path, today=second_pass)
+
+        self.assertEqual(purged, 1)
+        self.assertEqual(load_handled_mail_state(self.path), {})
 
     def test_nothing_to_purge_does_not_rewrite_the_file(self):
         self._write_state(
@@ -818,6 +892,50 @@ class TestPurgeExpiredLedgerEntries(unittest.TestCase):
 
         self.assertEqual(purged, 0)
         self.assertEqual(self.path.stat().st_mtime_ns, before)
+
+    def test_dry_run_reports_what_would_be_purged_but_writes_nothing(self):
+        self._write_state(
+            {
+                "old": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "event_end": "2020-01-01T00:00:00Z"}
+                    ],
+                    "status": "created",
+                },
+                "fresh": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e2", "event_end": "2099-01-01T00:00:00Z"}
+                    ],
+                    "status": "created",
+                },
+            }
+        )
+        before = self.path.read_text(encoding="utf-8")
+
+        purged = purge_expired_ledger_entries(
+            path=self.path,
+            today=datetime.datetime(2026, 9, 22, tzinfo=datetime.timezone.utc),
+            dry_run=True,
+        )
+
+        self.assertEqual(purged, 1)  # reports what WOULD be purged
+        self.assertEqual(self.path.read_text(encoding="utf-8"), before)  # but writes nothing
+        self.assertEqual(set(load_handled_mail_state(self.path).keys()), {"old", "fresh"})
+
+    def test_dry_run_never_stamps_the_grace_pass_recorded_at(self):
+        self._write_state(
+            {"msg-1": {"events": [{"calendar_id": "primary", "event_id": "e1"}], "status": "created"}}
+        )
+        before = self.path.read_text(encoding="utf-8")
+
+        purge_expired_ledger_entries(
+            path=self.path,
+            today=datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc),
+            dry_run=True,
+        )
+
+        self.assertEqual(self.path.read_text(encoding="utf-8"), before)
+        self.assertNotIn("recorded_at", load_handled_mail_state(self.path)["msg-1"])
 
     def test_state_size_stays_bounded_across_years_of_activity(self):
         """The hard constraint behind the whole redesign: local state size must track current

@@ -377,3 +377,71 @@ never a full-ledger sweep every run.
   this migration - it only touches Calendar events and the local ledger, never mailbox state.
   A message already in Trash under the pre-redesign behavior is unaffected either way; nothing
   attempts to recover it, and the ledger continues to correctly treat it as handled.
+
+## 8. Safety hardening after review
+
+Three gaps found in review of §§3-7, closed before any real data is touched:
+
+**No entry may be exempt from purging forever.** `purge_expired_ledger_entries()`'s
+`_entry_purge_after()` returned `None` (never purge) for an entry with no `event_end`
+anywhere *and* no `recorded_at` - only possible for a pre-`recorded_at` legacy entry whose
+events are also gone/inaccessible/outside the migration bootstrap window, so migration never
+backfills `event_end` for it either. Fixed: such an entry now gets exactly one grace pass -
+`recorded_at` is stamped to "now" (never overwriting a real one) on the call that finds no
+signal, so it purges via the normal `no_event_margin_days` on a later call. Tested for both
+the legacy `{"ids": [...]}` format and a "created" entry whose ref simply predates
+`event_end`.
+
+**§6 (mailbox-side marker-switch migration) is documented but not implemented - closed with a
+fail-closed guard, not the migration itself.** Without §6, an account switching from
+`mark: seen` (`flag_seen`, ledger-only exclusion, message never physically moves) to
+`keyword`/`folder` (server-side SEARCH exclusion) risks a genuine duplicate event: a ledger
+entry that ages past its purge margin makes its still-unmoved, flag-only-marked message
+visible to a fresh scan again, and if the LLM's extraction isn't perfectly deterministic
+across runs (a different event count/order shifts `event_index`), the recomputed
+deterministic id can differ from the one already on Calendar - a real duplicate, not a caught
+collision. `check_marker_mode_transition()` (a small per-*account* history file, bounded by
+the number of configured accounts, not mail volume) refuses the scan and prints an explicit
+message on exactly that transition, until §6 is implemented or the config is reverted. Every
+other transition (unconfigured → anything, `keyword` ↔ `folder`) is allowed, since neither
+shares `flag_seen`'s "message never moves" property.
+
+**Important limitation, stated plainly**: the guard is forward-only. It protects a
+`mark: seen` → `keyword`/`folder` switch made *after* this version has run at least once for
+that account (the first run for any account simply records its current mode as the baseline).
+A switch already made *before* upgrading to this version is recorded as if the new mode had
+always been in effect and is never caught - the ledger has no per-entry record of which
+marker was actually used historically, by design, so there is nothing to detect that switch
+from after the fact.
+
+**`--dry-run`**, covering `reconcile_handled_events()`, `migrate_legacy_ledger_entries()`, and
+`purge_expired_ledger_entries()` - all three of `process_email_cli`'s ledger-writing calls, not
+only the two named in the request. Purging was added to the scope during review: it writes the
+same ledger file in the same three-call sequence, and skipping it would let a "touch nothing"
+flag permanently delete real ledger entries. The rest of `process_email_cli` (scanning/
+extraction/publishing) deliberately still runs normally under it, exactly as requested. All
+three still perform their read-only Calendar calls (needed for an accurate preview) but skip
+every write - no `_save_state` anywhere, `migrate_one_legacy_event()` gained a distinct
+`"would_migrate"` status so a previewed ref is never marked `"migrated"` (a later real run
+still processes it), and purge's grace-pass `recorded_at` stamp (see above) is skipped too.
+Wired through `Args.dry_run` and `add --dry-run`. Before a real (non-dry-run) migration pass,
+the ledger file is copied to `<path>.bak` (overwritten each real call) unconditionally, not
+only when something will change - `check_marker_mode_transition()`'s own small history file is
+not part of this backup or dry-run gating (see its docstring: it only ever records which
+marker mode is configured, never mail/calendar data).
+
+**Also confirmed** (already correct, strengthened rather than fixed): `migrate_one_legacy_event`
+reads the event's existing `extendedProperties.private` map into a copy *before* adding the
+new stamped keys, so third-party properties (`ai_model_used`, etc.) are never overwritten -
+whether Calendar's PATCH merges or replaces that map server-side is irrelevant either way,
+since the complete desired end state is always what's sent.
+
+**Separately discovered while adding the per-account marker-history file**: `TestProcessEmailCli`
+and related tests had been writing into the real `~/.local/share/manage-agenda/` directory for
+as long as they exercised `process_email_cli` with no explicit `path=` override - confirmed by
+finding a real Outlook Message-ID in a real `handled_mail_ids.json` after a local test run. Not
+a design gap in this redesign, but real user data with test-injected entries mixed in with no
+way to tell them apart after the fact. Fixed going forward with an autouse `isolated_data_dir`
+fixture in `tests/conftest.py` (redirects `manage_agenda.config.DATA_DIR` to a per-test
+`tmp_path`); the pre-existing pollution in the real file was not touched or "repaired" -
+reconstructing which entries are real would mean guessing at the user's data.

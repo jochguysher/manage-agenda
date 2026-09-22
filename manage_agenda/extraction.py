@@ -613,7 +613,9 @@ def _get_event_if_present(client, calendar_id, event_id):
         raise
 
 
-def migrate_one_legacy_event(client, calendar_id, event_id, identity, generation, event_index):
+def migrate_one_legacy_event(
+    client, calendar_id, event_id, identity, generation, event_index, dry_run=False
+):
     """Patch extendedProperties.private onto one pre-existing Calendar event (created before
     deterministic ids/origin stamping existed - see docs/investigation-limite1.md migration
     requirements), and read back event_end from the same fetch. Never touches the event's own
@@ -625,9 +627,16 @@ def migrate_one_legacy_event(client, calendar_id, event_id, identity, generation
     undocumented and unverified (no probe covers it) - sending the complete desired end state
     is correct either way, so this deliberately does not rely on an assumption about it.
 
+    `dry_run=True` still performs the read-only events.get() (needed to log an accurate
+    preview and to read event_end), but never calls events.patch() - no Calendar mutation at
+    all. See the distinct "would_migrate" status below.
+
     Returns (status, event_end):
     - ("migrated", event_end): patched successfully; event_end from the live event (may be
       None if the event has neither `end.dateTime` nor `end.date` - unusual, not an error).
+    - ("would_migrate", event_end): dry_run only - patch was NOT called; this event would be
+      migrated on a real run. The caller must not mark the ref "migrated" on this status, or a
+      later real run would skip the very ref the preview said it would touch.
     - ("already_migrated", event_end): the event already carries origin=manage-agenda (e.g. a
       previous partial migration run) - no patch call made, event_end still read from the
       get() that was needed anyway to check.
@@ -661,6 +670,12 @@ def migrate_one_legacy_event(client, calendar_id, event_id, identity, generation
 
     body = {"extendedProperties": {"private": private}}
     _stamp_reconstructible_properties(body, identity, generation, event_index)
+    if dry_run:
+        logging.info(
+            f"DRY RUN migrate: would patch {calendar_id}/{event_id} with "
+            f"extendedProperties.private={body['extendedProperties']['private']}"
+        )
+        return "would_migrate", event_end
     try:
         client.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
     except Exception as error:

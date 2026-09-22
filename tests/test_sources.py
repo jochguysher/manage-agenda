@@ -183,6 +183,39 @@ class TestProcessEmailCli(unittest.TestCase):
         mock_delete_email.assert_not_called()
         mock_store_keyword.assert_called_once_with(mock_api_src, "INBOX", "5", "$AgendaDone", add=True)
 
+    @patch("manage_agenda.sources.moduleRules")
+    def test_process_email_cli_refuses_a_flag_seen_to_keyword_switch(self, mock_module_rules):
+        """A live regression test for the duplicate-event risk: an account with 'mark: seen'
+        history that gets reconfigured to a server-side-excluding marker must not scan until
+        the (unimplemented) §6 mailbox-side migration has run - see
+        check_marker_mode_transition()."""
+        args = self.Args(
+            interactive=False, delete=None, source="gemini", verbose=False, destination="", text=""
+        )
+        mock_api_src = MagicMock()
+        mock_api_src.service = "imap"
+
+        seen_details = {"folder": "INBOX", "mark": "seen"}
+        rules = mock_module_rules.from_config.return_value
+        rules.more = {"mail-account": seen_details}
+        rules.readConfigSrc.return_value = mock_api_src
+
+        with (
+            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources._get_emails_from_folder", return_value=None) as mock_fetch,
+        ):
+            process_email_cli(args, MagicMock(), selected_source="mail-account")
+            mock_fetch.assert_called_once()
+
+            keyword_details = {"folder": "INBOX", "processed_marker": "keyword:$AgendaDone"}
+            rules.more = {"mail-account": keyword_details}
+            mock_fetch.reset_mock()
+
+            result = process_email_cli(args, MagicMock(), selected_source="mail-account")
+
+            mock_fetch.assert_not_called()
+        self.assertFalse(result)
+
     @patch("manage_agenda.sources._requeue_pending_imap_messages")
     @patch("manage_agenda.sources.moduleRules")
     def test_process_email_cli_attempts_requeue_unmarking_even_with_no_new_posts(
@@ -247,6 +280,37 @@ class TestProcessEmailCli(unittest.TestCase):
             process_email_cli(args, MagicMock(), selected_source="mail-account")
 
         self.assertEqual(order, ["reconcile", "migrate", "purge"])
+
+    @patch("manage_agenda.sources.purge_expired_ledger_entries")
+    @patch("manage_agenda.sources.migrate_legacy_ledger_entries")
+    @patch("manage_agenda.sources.reconcile_handled_events")
+    @patch("manage_agenda.sources.moduleRules")
+    def test_process_email_cli_dry_run_reaches_all_three_ledger_writing_calls(
+        self, mock_module_rules, mock_reconcile, mock_migrate, mock_purge
+    ):
+        """args.dry_run=True must reach purge too, not just reconcile/migrate - purge writes
+        the same ledger file in the same sequence, so leaving it out would let --dry-run
+        permanently delete real entries."""
+        args = Args(
+            interactive=False, delete=None, source="gemini", verbose=False, destination="",
+            text="", dry_run=True,
+        )
+        mock_api_src = MagicMock()
+        mock_api_src.service = "gmail"
+        rules = mock_module_rules.from_config.return_value
+        rules.more = {"mail-account": {}}
+        rules.readConfigSrc.return_value = mock_api_src
+        mock_reconcile.return_value = set()
+
+        with (
+            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources._get_emails_from_folder", return_value=None),
+        ):
+            process_email_cli(args, MagicMock(), selected_source="mail-account")
+
+        self.assertTrue(mock_reconcile.call_args.kwargs.get("dry_run"))
+        self.assertTrue(mock_migrate.call_args.kwargs.get("dry_run"))
+        self.assertTrue(mock_purge.call_args.kwargs.get("dry_run"))
 
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
