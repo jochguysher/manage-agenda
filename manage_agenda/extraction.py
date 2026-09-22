@@ -15,7 +15,7 @@ import googleapiclient
 from socialModules.configMod import safe_get
 
 from manage_agenda.base import format_time, write_file
-from manage_agenda.connections import select_api, select_calendars
+from manage_agenda.connections import calendar_account_key, select_api, select_calendars
 from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 
@@ -717,30 +717,56 @@ def migrate_one_legacy_event(
     return "migrated", event_end
 
 
+# Token files a dry run has already reported legacy tokens for - see sync_calendar_changes().
+# A real run drops them on its first call, so it warns once; a dry run leaves them on disk,
+# and would otherwise repeat the same warning for every calendar it syncs.
+_dry_run_legacy_warned = set()
+
+
 def calendar_sync_state_file():
-    """Per-calendar Calendar API sync tokens, used to detect deleted events incrementally."""
+    """Calendar API sync tokens, one per (calendar account, calendar id), used to detect
+    deleted events incrementally. Stored as {"accounts": {account_key: {calendar_id: token}}},
+    account_key being connections.calendar_account_key() of the connection that obtained the
+    token - see sync_calendar_changes()."""
     from manage_agenda.config import data_dir
 
     return data_dir() / "calendar_sync_tokens.json"
 
 
-def _load_sync_tokens(path):
+def _read_sync_state(path):
     if not path.is_file():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    tokens = data.get("tokens") if isinstance(data, dict) else None
-    if not isinstance(tokens, dict):
+    return data if isinstance(data, dict) else {}
+
+
+def _load_sync_tokens(path):
+    """{account_key: {calendar_id: token}} - see calendar_sync_state_file()."""
+    accounts = _read_sync_state(path).get("accounts")
+    if not isinstance(accounts, dict):
         return {}
-    return {str(key): str(value) for key, value in tokens.items()}
+    return {
+        str(account): {str(calendar_id): str(token) for calendar_id, token in tokens.items()}
+        for account, tokens in accounts.items()
+        if isinstance(tokens, dict)
+    }
+
+
+def _legacy_sync_tokens(path):
+    """Tokens from the previous format, {"tokens": {calendar_id: token}}, keyed by calendar id
+    alone - see sync_calendar_changes() for why they are abandoned, never reused."""
+    tokens = _read_sync_state(path).get("tokens")
+    return {str(key): str(value) for key, value in tokens.items()} if isinstance(tokens, dict) else {}
 
 
 def _save_sync_tokens(path, tokens):
+    """Writes the {"accounts": ...} format only - any legacy "tokens" key is dropped."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"tokens": tokens}, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.write_text(json.dumps({"accounts": tokens}, indent=2, sort_keys=True), encoding="utf-8")
     temporary.replace(path)
 
 
@@ -850,7 +876,7 @@ def _confirm_missing_ids(client, calendar_id, missing_ids):
     return cancelled, unknown
 
 
-def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
+def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None, dry_run=False):
     """Ids that need to be treated as deleted on one calendar, via Calendar's incremental sync.
 
     This is the mechanism sync clients use: one cheap call returns only what changed since a
@@ -876,12 +902,55 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
     them. A syncToken delta itself only ever reports items Calendar has an explicit status
     for, so `unknown_ids` is only ever non-empty via the bootstrap path's targeted
     confirmation of ids missing from a full listing.
+
+    Tokens are stored per (calendar account, calendar id), the account being read from the
+    connection making the call (`api_dst.src`, see connections.calendar_account_key) - never
+    from the caller. A calendar id alone doesn't identify a calendar: "primary" is every
+    account's own primary calendar, so a token obtained by one account must never be handed to
+    another. Tokens from the previous format, keyed by calendar id alone, can't be attributed
+    to an account after the fact: the first call that finds any abandons them all - logged,
+    and dropped from the file - and each calendar's next sync re-bootstraps from the
+    _SYNC_BOOTSTRAP_WINDOW_DAYS listing like a first run. When the connection has no usable
+    account key, no token is read or stored: every call bootstraps.
+
+    `dry_run=True` (reconcile under --dry-run-ledger) makes every Calendar call a real call
+    would - the listing and the targeted lookups are read-only - but writes nothing to the
+    token file: no new token, and legacy tokens are ignored exactly as a real call would ignore
+    them, but not dropped from the file. Advancing a token during a preview would make the real
+    run that follows ask Calendar only for what changed since the preview, so the deletions the
+    preview reported - notably the first bootstrap's whole backlog - would never be applied.
     """
     path = Path(path) if path else calendar_sync_state_file()
     tokens = _load_sync_tokens(path)
-    token = tokens.get(calendar_id)
+    legacy_tokens = _legacy_sync_tokens(path)
+    if legacy_tokens and not (dry_run and str(path) in _dry_run_legacy_warned):
+        prefix = "DRY RUN: would abandon" if dry_run else "Abandoning"
+        logging.warning(
+            f"{prefix} {len(legacy_tokens)} Calendar sync token(s) keyed by calendar id alone "
+            f"({', '.join(sorted(legacy_tokens))}) in {path}: a token can't be attributed to a "
+            "calendar account after the fact, so none is reused. The next sync of each calendar "
+            f"re-bootstraps from a {_SYNC_BOOTSTRAP_WINDOW_DAYS}-day listing."
+        )
+        if dry_run:
+            _dry_run_legacy_warned.add(str(path))
+        else:
+            _save_sync_tokens(path, tokens)
+    account_key = calendar_account_key(getattr(api_dst, "src", None))
+    if account_key is None:
+        logging.info(
+            f"No calendar account key for this connection: no sync token read or stored for "
+            f"{calendar_id}, bootstrapping."
+        )
+    account_tokens = tokens.setdefault(account_key, {}) if account_key is not None else {}
+    token = account_tokens.get(calendar_id)
     client = api_dst.getClient()
     tracked_events = dict(tracked_events or {})
+
+    def _store(fresh_token):
+        if account_key is None or dry_run:
+            return
+        account_tokens[calendar_id] = fresh_token
+        _save_sync_tokens(path, tokens)
 
     def _bootstrap():
         try:
@@ -892,8 +961,7 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
             logging.warning(f"Could not seed a Calendar sync token for {calendar_id}: {error}")
             return set(), set()
         if fresh_token:
-            tokens[calendar_id] = fresh_token
-            _save_sync_tokens(path, tokens)
+            _store(fresh_token)
         else:
             logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
         listed_ids = {item.get("id") for item in items if item.get("id")}
@@ -922,7 +990,7 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
     except googleapiclient.errors.HttpError as error:
         if getattr(getattr(error, "resp", None), "status", None) == 410:
             logging.info(f"Calendar sync token expired for {calendar_id}, reseeding.")
-            tokens.pop(calendar_id, None)
+            account_tokens.pop(calendar_id, None)
             return _bootstrap()
         logging.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
         return set(), set()
@@ -931,8 +999,7 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
         return set(), set()
 
     if fresh_token:
-        tokens[calendar_id] = fresh_token
-        _save_sync_tokens(path, tokens)
+        _store(fresh_token)
     else:
         logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
 

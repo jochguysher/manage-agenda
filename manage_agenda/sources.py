@@ -16,7 +16,7 @@ from socialModules.moduleRules import moduleRules
 
 from manage_agenda.base import write_file
 from manage_agenda.config import config, data_dir, log_file_path, msg_txt_dir
-from manage_agenda.connections import prepare_calendar, select_api
+from manage_agenda.connections import calendar_account_key, prepare_calendar, select_api
 from manage_agenda.extraction import _process_event_with_llm_and_calendar
 from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
@@ -490,12 +490,13 @@ def reconcile_handled_events(
     "ignore" - see docs/investigation-limite1.md, this default was explicitly validated by
     the user, never chosen unilaterally):
 
-    `dry_run=True` still reads from Calendar (sync_calendar_changes - read-only, and its own
-    syncToken bookkeeping is left as-is regardless, since it holds no user-visible data and
-    advancing it doesn't affect the ledger or Calendar) and still computes every resolution
-    exactly as a real call would (`still_handled` is accurate either way), but never calls
-    `_save_state` - the ledger file is not written. Every identity whose resolution would have
-    written something is logged instead.
+    `dry_run=True` still reads from Calendar (sync_calendar_changes) and still computes every
+    resolution exactly as a real call would (`still_handled` is accurate either way), but never
+    calls `_save_state` - the ledger file is not written. Every identity whose resolution would
+    have written something is logged instead. The sync tokens are not advanced either
+    (dry_run is forwarded to sync_calendar_changes): a token moved by the preview would make
+    the real run that follows ask Calendar only for what changed *since the preview*, so the
+    deletions the preview reported would never be applied.
 
     - "ignore": the message stays marked processed (its identity stays in `still_handled`,
       excluded from future scans exactly like a "no_event" entry) and the deletion stands.
@@ -554,7 +555,7 @@ def reconcile_handled_events(
     unknown_by_calendar = {}
     for calendar_id, tracked_events in tracked_by_calendar.items():
         cancelled_ids, unknown_ids = sync_calendar_changes(
-            api_dst, calendar_id, tracked_events=tracked_events, path=sync_state_path
+            api_dst, calendar_id, tracked_events=tracked_events, path=sync_state_path, dry_run=dry_run
         )
         cancelled_by_calendar[calendar_id] = cancelled_ids
         unknown_by_calendar[calendar_id] = unknown_ids
@@ -968,17 +969,6 @@ def ledger_migration_account_key(args):
     - is scoped to the calendar account, not to whichever mailbox a run happens to scan."""
     api = getattr(args, "calendar_api", None)
     return calendar_account_key(getattr(api, "src", None) if api is not None else None)
-
-
-def calendar_account_key(src):
-    """A socialModules rule key (tuple, list, or plain string) as the stable string stored in
-    ledger_migration.json and on each ledger ref's `calendar_account` - None if `src` isn't a
-    usable rule key."""
-    if isinstance(src, (list, tuple)) and src:
-        return "|".join(str(part) for part in src)
-    if isinstance(src, str) and src:
-        return src
-    return None
 
 
 def owned_calendar_ids(client):

@@ -78,9 +78,11 @@ class ScriptedCalendarClient:
         return request
 
 
-def _api(responses, get_responses=None):
+def _api(responses, get_responses=None, account="acct"):
+    """A calendar connection for account `account` (api.src, the socialModules rule key -
+    what sync tokens are stored under, see sync_calendar_changes)."""
     client = ScriptedCalendarClient(responses, get_responses=get_responses)
-    api = MagicMock()
+    api = MagicMock(src=account)
     api.getClient.return_value = client
     return api, client
 
@@ -99,7 +101,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
 
         self.assertEqual(cancelled, set())
         self.assertEqual(unknown, set())
-        self.assertEqual(_load_sync_tokens(self.path), {"cal-1": "tok-1"})
+        self.assertEqual(_load_sync_tokens(self.path), {"acct": {"cal-1": "tok-1"}})
         self.assertNotIn("syncToken", client.calls[0])
 
     def test_bootstrap_listing_is_bounded_by_a_time_window(self):
@@ -111,7 +113,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertTrue(client.calls[0]["timeMin"].endswith("Z"))
 
     def test_time_min_is_never_combined_with_sync_token(self):
-        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, client = _api([{"items": [], "nextSyncToken": "tok-new"}])
 
         sync_calendar_changes(api, "cal-1", path=self.path)
@@ -188,7 +190,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertEqual(client.get_calls, [])
 
     def test_reseed_after_expiry_also_confirms_missing_tracked_ids_as_unknown(self):
-        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, _client = _api(
             [http_error(410), {"items": [{"id": "e-still-there", "status": "confirmed"}]}],
             get_responses={("cal-1", "e-gone"): http_error(410)},
@@ -231,7 +233,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertEqual(client.get_calls, [])
 
     def test_pagination_is_followed_until_the_last_page(self):
-        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, client = _api(
             [
                 {"items": [{"id": "e1", "status": "confirmed"}], "nextPageToken": "page-2"},
@@ -245,10 +247,10 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertEqual(client.calls[1]["pageToken"], "page-2")
         self.assertEqual(cancelled, {"e2"})
         self.assertEqual(unknown, set())
-        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-2")
+        self.assertEqual(_load_sync_tokens(self.path)["acct"]["cal-1"], "tok-2")
 
     def test_existing_token_is_sent_and_cancelled_ids_are_reported(self):
-        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, client = _api(
             [
                 {
@@ -266,13 +268,13 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertEqual(client.calls[0]["syncToken"], "tok-old")
         self.assertEqual(cancelled, {"e2"})
         self.assertEqual(unknown, set())
-        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-new")
+        self.assertEqual(_load_sync_tokens(self.path)["acct"]["cal-1"], "tok-new")
 
     def test_a_syncToken_delta_never_reports_unknown_ids(self):
         """A delta only ever reports items Calendar has an explicit status for - the unknown
         (404/never-confirmed) case is only ever produced via the bootstrap path's targeted
         confirmation of ids missing from a full listing, never from a plain delta."""
-        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, _client = _api(
             [{"items": [{"id": "e2", "status": "cancelled"}], "nextSyncToken": "tok-new"}]
         )
@@ -282,7 +284,7 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertEqual(unknown, set())
 
     def test_expired_token_is_reseeded_without_reporting_deletions(self):
-        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, client = _api(
             [
                 http_error(410),
@@ -294,18 +296,142 @@ class TestSyncCalendarChanges(unittest.TestCase):
 
         self.assertEqual(cancelled, set())
         self.assertEqual(unknown, set())
-        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-fresh")
+        self.assertEqual(_load_sync_tokens(self.path)["acct"]["cal-1"], "tok-fresh")
         self.assertNotIn("syncToken", client.calls[1])
 
     def test_other_api_error_is_conservative_and_keeps_the_old_token(self):
-        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        self.path.write_text(json.dumps({"accounts": {"acct": {"cal-1": "tok-old"}}}), encoding="utf-8")
         api, _client = _api([http_error(500)])
 
         cancelled, unknown = sync_calendar_changes(api, "cal-1", path=self.path)
 
         self.assertEqual(cancelled, set())
         self.assertEqual(unknown, set())
-        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-old")
+        self.assertEqual(_load_sync_tokens(self.path)["acct"]["cal-1"], "tok-old")
+
+
+class TestSyncTokensPerCalendarAccount(unittest.TestCase):
+    """Sync tokens are stored per (calendar account, calendar id): "primary" is each account's
+    own primary calendar, so one account's token must never be handed to another."""
+
+    def setUp(self):
+        self.path = Path("/tmp") / (self.id().replace(".", "_") + ".json")
+        self.path.unlink(missing_ok=True)
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+        self.addCleanup(lambda: Path(str(self.path) + ".tmp").unlink(missing_ok=True))
+
+    def _sync(self, account, next_token):
+        api, client = _api([{"items": [], "nextSyncToken": next_token}], account=account)
+        sync_calendar_changes(api, "primary", path=self.path)
+        return client.calls[0]
+
+    def test_two_accounts_alternating_on_primary_each_use_their_own_token(self):
+        first_a = self._sync("acct-a", "tok-a1")
+        first_b = self._sync("acct-b", "tok-b1")
+        second_a = self._sync("acct-a", "tok-a2")
+        second_b = self._sync("acct-b", "tok-b2")
+
+        # Each account's first sync is its own bootstrap - never the other account's token.
+        self.assertNotIn("syncToken", first_a)
+        self.assertNotIn("syncToken", first_b)
+        self.assertIn("timeMin", first_b)
+        self.assertEqual(second_a["syncToken"], "tok-a1")
+        self.assertEqual(second_b["syncToken"], "tok-b1")
+        self.assertEqual(
+            _load_sync_tokens(self.path), {"acct-a": {"primary": "tok-a2"}, "acct-b": {"primary": "tok-b2"}}
+        )
+
+    def test_a_legacy_token_keyed_by_calendar_id_alone_is_abandoned_not_reused(self):
+        self.path.write_text(json.dumps({"tokens": {"primary": "tok-legacy"}}), encoding="utf-8")
+
+        with self.assertLogs(level="WARNING") as logs:
+            first = self._sync("acct-a", "tok-a1")
+
+        self.assertNotIn("syncToken", first)  # bootstrap from the 90-day listing
+        self.assertIn("timeMin", first)
+        self.assertTrue(any("Abandoning 1 Calendar sync token" in line for line in logs.output))
+        stored = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertNotIn("tokens", stored)
+        self.assertEqual(stored["accounts"], {"acct-a": {"primary": "tok-a1"}})
+
+        # Normal incremental sync resumes on the account's own token, with no second abandonment.
+        second = self._sync("acct-a", "tok-a2")
+        self.assertEqual(second["syncToken"], "tok-a1")
+
+    def test_every_legacy_token_is_listed_and_dropped_not_just_the_synced_calendars(self):
+        self.path.write_text(json.dumps({"tokens": {"primary": "tok-p", "cal-2": "tok-2"}}), encoding="utf-8")
+
+        with self.assertLogs(level="WARNING") as logs:
+            self._sync("acct-a", "tok-a1")  # syncs "primary" only
+
+        warning = next(line for line in logs.output if "Abandoning" in line)
+        self.assertIn("Abandoning 2 Calendar sync token", warning)
+        self.assertIn("cal-2", warning)
+        self.assertIn("primary", warning)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"accounts": {"acct-a": {"primary": "tok-a1"}}})
+        # cal-2's own next sync bootstraps: its legacy token is gone, not reused.
+        api, client = _api([{"items": [], "nextSyncToken": "tok-a-cal2"}], account="acct-a")
+        sync_calendar_changes(api, "cal-2", path=self.path)
+        self.assertNotIn("syncToken", client.calls[0])
+
+    def test_a_dry_run_warns_about_legacy_tokens_once_not_once_per_calendar(self):
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "t1", "cal-2": "t2"}}), encoding="utf-8")
+
+        with self.assertLogs(level="WARNING") as logs:
+            for calendar_id in ("cal-1", "cal-2"):
+                api, _client = _api([{"items": [], "nextSyncToken": "tok"}], account="acct-a")
+                sync_calendar_changes(api, calendar_id, path=self.path, dry_run=True)
+
+        self.assertEqual(sum("would abandon" in line for line in logs.output), 1)
+
+    def test_legacy_tokens_are_abandoned_even_if_the_bootstrap_then_fails(self):
+        self.path.write_text(json.dumps({"tokens": {"primary": "tok-legacy"}}), encoding="utf-8")
+        api, client = _api([http_error(500)], account="acct-a")
+
+        with self.assertLogs(level="WARNING"):
+            sync_calendar_changes(api, "primary", path=self.path)
+
+        self.assertNotIn("syncToken", client.calls[0])
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"accounts": {}})
+
+    def test_no_account_key_means_no_token_is_read_or_stored(self):
+        # Another account's token is on file: a keyless connection must not pick it up.
+        self.path.write_text(json.dumps({"accounts": {"acct-a": {"primary": "tok-a1"}}}), encoding="utf-8")
+        before = self.path.read_bytes()
+        api, client = _api([{"items": [], "nextSyncToken": "tok-1"}], account=None)
+
+        sync_calendar_changes(api, "primary", path=self.path)
+
+        self.assertNotIn("syncToken", client.calls[0])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_dry_run_neither_abandons_legacy_tokens_on_disk_nor_stores_a_new_one(self):
+        """A preview must leave the token file as it found it: a token advanced by the preview
+        would make the real run ask only for what changed since, so the deletions the preview
+        reported would never be applied."""
+        self.path.write_text(json.dumps({"tokens": {"primary": "tok-legacy"}}), encoding="utf-8")
+        before = self.path.read_bytes()
+        api, client = _api([{"items": [], "nextSyncToken": "tok-a1"}], account="acct-a")
+
+        with self.assertLogs(level="WARNING") as logs:
+            sync_calendar_changes(api, "primary", path=self.path, dry_run=True)
+
+        self.assertNotIn("syncToken", client.calls[0])  # the legacy token is still never used
+        self.assertTrue(any("DRY RUN: would abandon 1 Calendar sync token" in line for line in logs.output))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_dry_run_reads_with_the_stored_token_but_does_not_advance_it(self):
+        self.path.write_text(json.dumps({"accounts": {"acct-a": {"primary": "tok-a1"}}}), encoding="utf-8")
+        before = self.path.read_bytes()
+        api, client = _api(
+            [{"items": [{"id": "e1", "status": "cancelled"}], "nextSyncToken": "tok-a2"}], account="acct-a"
+        )
+
+        cancelled, _unknown = sync_calendar_changes(api, "primary", path=self.path, dry_run=True)
+
+        self.assertEqual(client.calls[0]["syncToken"], "tok-a1")
+        self.assertEqual(cancelled, {"e1"})  # the preview is accurate
+        self.assertEqual(self.path.read_bytes(), before)
 
 
 class TestExtractEventRefs(unittest.TestCase):
@@ -454,7 +580,7 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
     def _seed_sync_token(self, calendar_id, token):
         self.sync_path.parent.mkdir(parents=True, exist_ok=True)
-        self.sync_path.write_text(json.dumps({"tokens": {calendar_id: token}}), encoding="utf-8")
+        self.sync_path.write_text(json.dumps({"accounts": {"acct": {calendar_id: token}}}), encoding="utf-8")
 
     def _seed_gone_and_present(self):
         self._write_state(
@@ -756,7 +882,7 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
         self.assertEqual(still_handled, {"msg-1"})
         self.assertNotIn("syncToken", client.calls[0])
-        self.assertEqual(_load_sync_tokens(self.sync_path)["cal-1"], "tok-first")
+        self.assertEqual(_load_sync_tokens(self.sync_path)["acct"]["cal-1"], "tok-first")
 
     def test_first_ever_run_also_detects_a_genuine_deletion_via_the_bootstrap_diff(self):
         """No prior sync token yet still catches a genuine deletion: a tracked id absent from

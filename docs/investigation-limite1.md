@@ -790,10 +790,30 @@ looked that list up in `rules.more`, which fails on an unhashable key, so every 
 first saved choice crashed. The saved value is now turned back into a tuple. Both
 `migrate-ledger` and the diagnostic resolve the account through this saved value.
 
-**Known limitation, not addressed here.** Calendar sync tokens (`calendar_sync_tokens.json`)
-are keyed by calendar id alone, so `primary`'s token is shared between calendar accounts.
-Alternating accounts hands one account's token to the other, and how Calendar answers that
-(410, which reseeds, or another error, which reconcile only logs) has not been checked.
+**Sync tokens are per (calendar account, calendar id).** `calendar_sync_tokens.json` is now
+`{"accounts": {account_key: {calendar_id: token}}}`. The account is read from the connection
+that makes the call (`api_dst.src`, through `connections.calendar_account_key()`, the same
+key as the migration marker and the refs' `calendar_account`), never from the caller.
+A calendar id alone doesn't identify a calendar: `primary` is each account's own primary
+calendar. Two accounts alternating `add` runs on `primary` therefore each keep their own
+token, and neither is ever handed the other's.
+- **Tokens from the old format** (`{"tokens": {calendar_id: token}}`) can't be attributed to
+  an account after the fact, so they are abandoned, never reused. The first real sync that
+  finds any logs a warning listing their calendar ids and rewrites the file without them,
+  even if its listing then fails. Each calendar's next sync re-bootstraps from the 90-day
+  listing, exactly like a first run. That first bootstrap is the only sweep that reports
+  deletions made before the upgrade: a delta from a token issued afterwards never will.
+- **`--dry-run-ledger` writes nothing to the token file.** Reconcile forwards its `dry_run` to
+  `sync_calendar_changes()`. The preview makes the same read-only Calendar calls a real run
+  would, and ignores legacy tokens the same way, logging "DRY RUN: would abandon". But it
+  stores no new token and leaves legacy ones on disk (its warning is logged once per run, not
+  once per calendar). Before this, a preview advanced the tokens: the real run that followed
+  then asked Calendar only for what changed since the preview, and the deletions the preview
+  reported were never applied. That flaw predates the account keying and already hit step 7
+  (preview the first `add`, then run it): the preview moved the legacy token past the
+  backlog it reported. It is fixed on its own merits, with or without the account keying.
+- **A connection with no usable account key** reads and stores no token. Every sync for it
+  bootstraps.
 
 **Rollback.** Restore `handled_mail_ids.json.bak` over the ledger, and remove the account's
 entry from `ledger_migration.json` (or the file) to close the gate again. The
@@ -829,4 +849,17 @@ additions only, and existing keys were preserved (§7).
   never queried; `not_found` only on this account's own calendar; the saved account is read
   back from its list form; no saved account and no `-i` → exit, not a guess.
 - `tests/test_connections.py`: the saved rule key read back as a list still resolves.
+- Sync tokens (`tests/test_event_deletion_detection.py`, and end to end through `add` in
+  `tests/test_ledger_migration_gate.py`):
+  - two accounts alternating on `primary` each bootstrap once and then use their own token,
+    never the other's;
+  - a legacy token is abandoned (logged, dropped from the file, the next sync bootstraps)
+    and never reused, even when that bootstrap fails;
+  - with no account key, no token is read or stored, even with another account's token on
+    file;
+  - every legacy token is listed in the warning and dropped, not just the synced calendar's;
+  - under dry run the token file stays byte-identical: legacy tokens are ignored but kept, and
+    their warning logged once; a stored token is used but not advanced. End to end: an
+    `add --dry-run-ledger` reports the backlog deletion its bootstrap found, then the real
+    `add` performs the same bootstrap and applies it.
 - The first timestamp is kept, and an unreadable marker file means "not migrated".

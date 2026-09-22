@@ -56,8 +56,14 @@ class FakeCalendarClient:
     events up by (calendarId, eventId), 404 when absent; events().patch() is recorded.
     calendarList().list() returns `calendar_ids` (None: the call fails)."""
 
-    def __init__(self, list_items=(), events_by_id=None, calendar_ids=("cal-1",)):
+    def __init__(
+        self, list_items=(), events_by_id=None, calendar_ids=("cal-1",), next_sync_token="tok-next", delta_items=None
+    ):
         self.list_items = list(list_items)
+        # What a call WITH a syncToken returns - like real Calendar, only what changed since that
+        # token. None: same as the full listing (enough for tests that don't care).
+        self.delta_items = None if delta_items is None else list(delta_items)
+        self.next_sync_token = next_sync_token
         self.events_by_id = dict(events_by_id or {})
         self.calendar_ids = calendar_ids
         self.list_calls, self.get_calls, self.patch_calls = [], [], []
@@ -78,7 +84,10 @@ class FakeCalendarClient:
 
     def list(self, **kwargs):
         self.list_calls.append(kwargs)
-        return _request({"items": self.list_items, "nextSyncToken": "tok-next"})
+        items = self.list_items
+        if kwargs.get("syncToken") and self.delta_items is not None:
+            items = self.delta_items
+        return _request({"items": items, "nextSyncToken": self.next_sync_token})
 
     def get(self, calendarId, eventId):
         self.get_calls.append((calendarId, eventId))
@@ -127,10 +136,10 @@ def _write_ledger(messages):
     return path
 
 
-def _seed_sync_token(calendar_id="cal-1", token="tok-old"):
+def _seed_sync_token(calendar_id="cal-1", token="tok-old", account=ACCOUNT_KEY):
     path = calendar_sync_state_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"tokens": {calendar_id: token}}), encoding="utf-8")
+    path.write_text(json.dumps({"accounts": {account: {calendar_id: token}}}), encoding="utf-8")
 
 
 def _handled_message(message_id):
@@ -725,3 +734,99 @@ class TestAccountKeyThroughTheRealSelectionPaths:
 
         assert scope.account_key == ACCOUNT_KEY
         assert scope.sole_account is True
+
+
+class TestSyncTokensThroughAdd:
+    """End to end through `add`: each calendar account keeps its own sync token for "primary",
+    and a token from the old format (keyed by calendar id alone) is never reused."""
+
+    def _ledger_with_one_primary_ref_per_account(self):
+        return _write_ledger(
+            {
+                # Already migrated, so only reconcile (and the sync tokens) are exercised.
+                "msg-a": _entry(
+                    _ref("primary", "ev-a", calendar_account=ACCOUNT_KEY, event_end=_iso(-30), migrated=True)
+                ),
+                "msg-b": _entry(
+                    _ref("primary", "ev-b", calendar_account=OTHER_KEY, event_end=_iso(-30), migrated=True)
+                ),
+            }
+        )
+
+    def _add_as(self, src, event_id, next_token):
+        # The account's own event is listed as confirmed, so its bootstrap confirms nothing.
+        client = FakeCalendarClient(
+            list_items=[{"id": event_id, "status": "confirmed"}], next_sync_token=next_token
+        )
+        _run_add(_calendar_api(client, src=src), None, configured=(ACCOUNT_SRC, OTHER_SRC))
+        return [call.get("syncToken") for call in client.list_calls]
+
+    def test_two_accounts_alternating_adds_on_primary_each_use_their_own_token(self):
+        ledger = self._ledger_with_one_primary_ref_per_account()
+        before = load_handled_mail_state(ledger)
+        record_ledger_migration(ACCOUNT_KEY)
+        record_ledger_migration(OTHER_KEY)
+
+        assert self._add_as(ACCOUNT_SRC, "ev-a", "tok-a1") == [None]  # bootstrap
+        assert self._add_as(OTHER_SRC, "ev-b", "tok-b1") == [None]  # own bootstrap, not tok-a1
+        assert self._add_as(ACCOUNT_SRC, "ev-a", "tok-a2") == ["tok-a1"]
+        assert self._add_as(OTHER_SRC, "ev-b", "tok-b2") == ["tok-b1"]
+
+        stored = json.loads(calendar_sync_state_file().read_text(encoding="utf-8"))
+        assert stored == {"accounts": {ACCOUNT_KEY: {"primary": "tok-a2"}, OTHER_KEY: {"primary": "tok-b2"}}}
+        # Neither account resolved the other's entry.
+        assert load_handled_mail_state(ledger) == before
+
+    def test_a_legacy_token_is_abandoned_logged_and_never_reused(self, caplog):
+        self._ledger_with_one_primary_ref_per_account()
+        record_ledger_migration(ACCOUNT_KEY)
+        path = calendar_sync_state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"tokens": {"primary": "tok-legacy"}}), encoding="utf-8")
+
+        with caplog.at_level("WARNING"):
+            assert self._add_as(ACCOUNT_SRC, "ev-a", "tok-a1") == [None]
+
+        assert any("Abandoning 1 Calendar sync token" in r.getMessage() for r in caplog.records)
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        assert stored == {"accounts": {ACCOUNT_KEY: {"primary": "tok-a1"}}}
+        assert self._add_as(ACCOUNT_SRC, "ev-a", "tok-a2") == ["tok-a1"]
+
+    def test_a_dry_run_add_does_not_use_up_the_bootstrap_the_real_add_needs(self, caplog):
+        """The upgrade path §12 recommends: preview the first run with --dry-run-ledger, then
+        run it for real. ev-a was deleted before any token of the new format existed, so only a
+        bootstrap listing reports it - a delta from a token issued after the deletion never
+        will. If the preview stored its token, the real run would get that empty delta and
+        never apply the deletion the preview showed."""
+        ledger = _write_ledger(
+            {"msg-a": _entry(_ref("primary", "ev-a", calendar_account=ACCOUNT_KEY, event_end=_iso(-30), migrated=True))}
+        )
+        record_ledger_migration(ACCOUNT_KEY)
+        tokens = calendar_sync_state_file()
+        tokens.parent.mkdir(parents=True, exist_ok=True)
+        tokens.write_text(json.dumps({"tokens": {"primary": "tok-legacy"}}), encoding="utf-8")
+        tokens_before, ledger_before = tokens.read_bytes(), ledger.read_bytes()
+
+        def client():
+            return FakeCalendarClient(
+                list_items=[{"id": "ev-a", "status": "cancelled"}], delta_items=[], next_sync_token="tok-a1"
+            )
+
+        preview = client()
+        with caplog.at_level("INFO"):
+            _run_add(_calendar_api(preview), None, dry_run_ledger=True)
+
+        assert [call.get("syncToken") for call in preview.list_calls] == [None]
+        # The preview did report the backlog deletion its bootstrap found...
+        assert any("DRY RUN msg-a: event deleted" in r.getMessage() for r in caplog.records)
+        assert tokens.read_bytes() == tokens_before
+        assert ledger.read_bytes() == ledger_before
+
+        real = client()
+        _run_add(_calendar_api(real), None)
+
+        assert [call.get("syncToken") for call in real.list_calls] == [None]  # the same bootstrap
+        entry = load_handled_mail_state(ledger)["msg-a"]
+        assert entry["status"] == "no_event"
+        assert entry["cancelled_events"][0]["event_id"] == "ev-a"
+        assert json.loads(tokens.read_text(encoding="utf-8")) == {"accounts": {ACCOUNT_KEY: {"primary": "tok-a1"}}}

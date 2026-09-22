@@ -36,6 +36,18 @@ def authorize(args, rules=None):
     return rules.readConfigSrc("", source_name, source_details)
 
 
+def calendar_account_key(src):
+    """A socialModules rule key (tuple, list, or plain string) as the stable string that
+    identifies a calendar account everywhere manage-agenda records one: ledger_migration.json,
+    each ledger ref's `calendar_account`, and calendar_sync_tokens.json - None if `src` isn't a
+    usable rule key."""
+    if isinstance(src, (list, tuple)) and src:
+        return "|".join(str(part) for part in src)
+    if isinstance(src, str) and src:
+        return src
+    return None
+
+
 def prepare_calendar(args, rules=None, config_path=None):
     """Select the destination calendar(s) once, before any model call.
 
