@@ -66,6 +66,50 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertEqual(_load_sync_tokens(self.path), {"cal-1": "tok-1"})
         self.assertNotIn("syncToken", client.calls[0])
 
+    def test_bootstrap_listing_is_bounded_by_a_time_window(self):
+        api, client = _api([{"items": [], "nextSyncToken": "tok-1"}])
+
+        sync_calendar_changes(api, "cal-1", path=self.path)
+
+        self.assertIn("timeMin", client.calls[0])
+        self.assertTrue(client.calls[0]["timeMin"].endswith("Z"))
+
+    def test_time_min_is_never_combined_with_sync_token(self):
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        api, client = _api([{"items": [], "nextSyncToken": "tok-new"}])
+
+        sync_calendar_changes(api, "cal-1", path=self.path)
+
+        self.assertNotIn("timeMin", client.calls[0])
+
+    def test_page_token_is_omitted_rather_than_sent_as_none(self):
+        api, client = _api([{"items": [], "nextSyncToken": "tok-1"}])
+
+        sync_calendar_changes(api, "cal-1", path=self.path)
+
+        self.assertNotIn("pageToken", client.calls[0])
+
+    def test_bootstrap_reports_tracked_ids_missing_from_the_listing_as_deleted(self):
+        api, _client = _api([{"items": [{"id": "e-still-there", "status": "confirmed"}]}])
+
+        result = sync_calendar_changes(
+            api, "cal-1", tracked_event_ids={"e-still-there", "e-gone"}, path=self.path
+        )
+
+        self.assertEqual(result, {"e-gone"})
+
+    def test_reseed_after_expiry_also_diffs_tracked_ids(self):
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        api, _client = _api(
+            [http_error(410), {"items": [{"id": "e-still-there", "status": "confirmed"}]}]
+        )
+
+        result = sync_calendar_changes(
+            api, "cal-1", tracked_event_ids={"e-still-there", "e-gone"}, path=self.path
+        )
+
+        self.assertEqual(result, {"e-gone"})
+
     def test_pagination_is_followed_until_the_last_page(self):
         self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
         api, client = _api(
@@ -317,11 +361,13 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertEqual(skipped, 0)
         self.assertEqual([item[0] for item in fresh], [1])
 
-    def test_first_ever_run_bootstraps_and_releases_nothing(self):
+    def test_first_ever_run_keeps_a_still_present_event_and_seeds_a_token(self):
         self._write_state(
             {"msg-1": {"events": [{"calendar_id": "cal-1", "event_id": "ev-1"}], "status": "created"}}
         )
-        api, client = _api([{"items": [], "nextSyncToken": "tok-first"}])
+        api, client = _api(
+            [{"items": [{"id": "ev-1", "status": "confirmed"}], "nextSyncToken": "tok-first"}]
+        )
         args = Args(interactive=False)
         args.calendar_api = api
 
@@ -330,6 +376,21 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertEqual(still_handled, {"msg-1"})
         self.assertNotIn("syncToken", client.calls[0])
         self.assertEqual(_load_sync_tokens(self.sync_path)["cal-1"], "tok-first")
+
+    def test_first_ever_run_also_detects_a_deletion_via_the_bootstrap_diff(self):
+        """No prior sync token yet still catches a deletion, by diffing tracked ids against
+        the bootstrap listing - not just "no baseline, so report nothing"."""
+        self._write_state(
+            {"msg-1": {"events": [{"calendar_id": "cal-1", "event_id": "ev-gone"}], "status": "created"}}
+        )
+        api, _client = _api([{"items": [], "nextSyncToken": "tok-first"}])
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(still_handled, set())
+        self.assertNotIn("msg-1", load_handled_mail_state(self.path))
 
 
 if __name__ == "__main__":

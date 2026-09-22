@@ -248,15 +248,18 @@ def reconcile_handled_events(args, path=None, sync_state_path=None):
 
     from manage_agenda.extraction import sync_calendar_changes
 
-    calendar_ids = {
-        ev.get("calendar_id")
-        for entry in state.values()
-        for ev in entry.get("events") or []
-        if ev.get("calendar_id")
-    }
+    tracked_by_calendar = {}
+    for entry in state.values():
+        for ev in entry.get("events") or []:
+            calendar_id, event_id = ev.get("calendar_id"), ev.get("event_id")
+            if calendar_id and event_id:
+                tracked_by_calendar.setdefault(calendar_id, set()).add(event_id)
+
     cancelled_by_calendar = {
-        calendar_id: sync_calendar_changes(api_dst, calendar_id, path=sync_state_path)
-        for calendar_id in calendar_ids
+        calendar_id: sync_calendar_changes(
+            api_dst, calendar_id, tracked_event_ids=tracked_ids, path=sync_state_path
+        )
+        for calendar_id, tracked_ids in tracked_by_calendar.items()
     }
 
     still_handled = set()

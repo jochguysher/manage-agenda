@@ -679,26 +679,42 @@ def _save_sync_tokens(path, tokens):
     temporary.replace(path)
 
 
-def _list_all_pages(client, calendar_id, sync_token=None):
-    """Every event on one calendar since `sync_token` (or a full listing without one).
+# How far back a bootstrap (or post-410 reseed) full listing reaches. Calendar's API forbids
+# combining timeMin/timeMax with syncToken at all, so this bound only ever applies to the
+# unavoidable full listing - every later incremental call is a cheap, unbounded-by-us delta.
+# Events this tool creates are appointments extracted from recent messages, so their start time
+# is virtually always within this window; an event scheduled further out than this and deleted
+# before its first incremental check would not be caught by the bootstrap diff below.
+_SYNC_BOOTSTRAP_WINDOW_DAYS = 90
 
-    Follows nextPageToken across pages; the last page carries nextSyncToken, which the caller
-    stores and passes back next time to get only what changed since this call. Raises
-    googleapiclient.errors.HttpError on failure - in particular 410 Gone when sync_token has
-    expired and a fresh one must be seeded instead.
+
+def _bootstrap_time_min():
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        days=_SYNC_BOOTSTRAP_WINDOW_DAYS
+    )
+    return cutoff.isoformat().replace("+00:00", "Z")
+
+
+def _list_all_pages(client, calendar_id, sync_token=None, time_min=None):
+    """Every event on one calendar since `sync_token`, or a full listing without one.
+
+    `time_min` only makes sense for the full-listing case: Calendar's API rejects timeMin
+    combined with syncToken. Follows nextPageToken across pages; the last page carries
+    nextSyncToken, which the caller stores and passes back next time to get only what changed
+    since this call. Raises googleapiclient.errors.HttpError on failure - in particular 410 Gone
+    when sync_token has expired and a fresh one must be seeded instead.
     """
     items = []
     next_sync_token = None
     page_token = None
     while True:
-        kwargs = {
-            "calendarId": calendar_id,
-            "showDeleted": True,
-            "singleEvents": True,
-            "pageToken": page_token,
-        }
+        kwargs = {"calendarId": calendar_id, "showDeleted": True, "singleEvents": True}
+        if page_token:
+            kwargs["pageToken"] = page_token
         if sync_token:
             kwargs["syncToken"] = sync_token
+        elif time_min:
+            kwargs["timeMin"] = time_min
         response = client.events().list(**kwargs).execute()
         items.extend(_calendar_items(response))
         next_sync_token = response.get("nextSyncToken", next_sync_token)
@@ -708,33 +724,50 @@ def _list_all_pages(client, calendar_id, sync_token=None):
     return items, next_sync_token
 
 
-def sync_calendar_changes(api_dst, calendar_id, path=None):
-    """Ids cancelled on one calendar since the last call, via Calendar's incremental sync.
+def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=None):
+    """Ids that need to be treated as deleted on one calendar, via Calendar's incremental sync.
 
     This is the mechanism sync clients use: one cheap call returns only what changed since a
     stored syncToken, regardless of how many events are being tracked - not one check per known
-    event. The first call for a calendar (no token yet), or one made after a stored token has
-    expired (Calendar answers 410 Gone), only seeds/reseeds the token and reports no deletions:
-    without a prior valid token there is no "since when" to compare against, so nothing can be
-    said about what changed. Any other API error is treated the same way, conservatively.
+    event. Once a valid token exists, deletions are exactly the ids that come back with
+    status "cancelled" in that delta.
 
-    Returns the set of event ids reported as cancelled.
+    The first call for a calendar (no token yet), or one made after a stored token has expired
+    (Calendar answers 410 Gone), has no "since when" to diff against, so instead it does one
+    bounded full listing (see _SYNC_BOOTSTRAP_WINDOW_DAYS) to seed a fresh token, and reports
+    as deleted any id in `tracked_event_ids` that is absent from that listing - covering
+    deletions that happened before this tool ever ran, or during the gap before a reseed, at
+    the cost of the same bootstrap window limitation. Any other API error is conservative:
+    nothing is reported and the stored token, if any, is left untouched.
+
+    Returns the set of event ids to treat as deleted.
     """
     path = Path(path) if path else calendar_sync_state_file()
     tokens = _load_sync_tokens(path)
     token = tokens.get(calendar_id)
     client = api_dst.getClient()
+    tracked_event_ids = set(tracked_event_ids or ())
 
     def _bootstrap():
         try:
-            _items, fresh_token = _list_all_pages(client, calendar_id)
+            items, fresh_token = _list_all_pages(
+                client, calendar_id, time_min=_bootstrap_time_min()
+            )
         except Exception as error:
             logging.warning(f"Could not seed a Calendar sync token for {calendar_id}: {error}")
             return set()
         if fresh_token:
             tokens[calendar_id] = fresh_token
             _save_sync_tokens(path, tokens)
-        return set()
+        else:
+            logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
+        present_ids = {
+            item.get("id") for item in items if item.get("status") != "cancelled" and item.get("id")
+        }
+        cancelled_ids = {
+            item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")
+        }
+        return cancelled_ids | (tracked_event_ids - present_ids)
 
     if not token:
         return _bootstrap()
@@ -755,6 +788,8 @@ def sync_calendar_changes(api_dst, calendar_id, path=None):
     if fresh_token:
         tokens[calendar_id] = fresh_token
         _save_sync_tokens(path, tokens)
+    else:
+        logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
 
     return {item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")}
 
