@@ -147,13 +147,17 @@ When LLM extraction fails, in interactive mode you get options:
 ### `add` - Add Events
 Add entries to your calendar from email, web, or text file sources. In interactive mode, presents a unified source selection menu (email accounts, web, and text files).
 
+**Persistent configuration**: the LLM provider, model, and destination calendar are asked interactively only once. That first interactive choice is saved to `~/.config/manage-agenda/config.yaml` (or `$XDG_CONFIG_HOME/manage-agenda/config.yaml`) and reused automatically on every later run, whether or not `-i` is passed. Use `--reconfigure` to reopen the setup and save a new choice. A `-a`/`-m`/`-d` flag always overrides the saved value for that one run only, without changing what is saved.
+
 #### Options
 - `-i, --interactive`: Running in interactive mode
-- `-a, --ai`: Select LLM provider (default: `ollama`). Options: `ollama`, `gemini`, `mistral`
+- `-a, --ai`: Select LLM provider for this run only, without changing the saved configuration. Options: `ollama`, `gemini`, `mistral`
+- `-m, --model`: Select model for this run only, without changing the saved configuration
 - `-s, --source`: Select data source (default: `gmail`). Options: `gmail`, `imap`, `web`, `text`
 - `-f, --force-refresh`: Force refresh web content to bypass cache
-- `-d, --destination`: Select destination calendar by name
+- `-d, --destination`: Destination calendar id for this run only, without changing the saved configuration
 - `-o, --output`: Output destination (default: `calendar`). Options: `calendar`, `file`, `files`
+- `--reconfigure`: Reopen the interactive setup for provider, model, and calendar, and save the result
 
 ### `llm` - LLM Operations
 Group command for LLM-related operations.
@@ -283,6 +287,8 @@ For a detailed history of changes, see the [Changelog](https://github.com/fernan
 - [Google Generative AI SDK](https://ai.google.dev/gemini-api/docs/quickstart?lang=python): Gemini integration
 - [Mistral Python Client](https://github.com/mistralai/client-python): Mistral integration
 - [Ollama Python Client](https://github.com/ollama/ollama): Local model integration
+- [PyYAML](https://pyyaml.org/): Reading and writing the saved user configuration
+- [questionary](https://github.com/tmbo/questionary): Bulleted interactive prompts (provider and calendar selection)
 
 ## Development
 

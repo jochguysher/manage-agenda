@@ -35,6 +35,7 @@ except Exception:
 from socialModules.configMod import CONFIGDIR, select_from_list
 
 from manage_agenda.exceptions import LLMError
+from manage_agenda.interactive import select_one
 
 
 # This shouln't go here?
@@ -190,6 +191,8 @@ class MistralClient(LLMClient):
         super().__init__(name_class)
 
         self.client = Mistral(api_key=self.api_key)
+        if model_name:
+            self.model_name = model_name
         if not self.model_name:
             # names = [el.id for el in self.list_models(self).data]
             models = self.list_models(self).data
@@ -212,32 +215,73 @@ class MistralClient(LLMClient):
         return self.client.models.list()
 
 
-def select_llm(args):
-    """Selects and initializes the appropriate LLM client."""
-    if args.interactive:
-        llm_options = ["ollama", "gemini", "mistral"]
-        sel, ai = select_from_list(llm_options, title="Select model provider", default="ollama")
+DEFAULT_MODEL_BY_PROVIDER = {
+    "ollama": "granite4:latest",
+    "gemini": "gemini-3.8-flash",
+    "mistral": "mistral-small-latest",
+}
+
+
+def select_llm(args, config_path=None):
+    """Selects and initializes the appropriate LLM client.
+
+    Precedence: -a/--ai and -m/--model flags (one-off, never saved) > saved user config >
+    interactive wizard > a hardcoded default provider/model, same as before this feature
+    existed. --reconfigure re-opens the wizard even when a config is already saved; whatever
+    it picks is saved for next time, exactly like the very first interactive selection is.
+    """
+    from manage_agenda.user_config import load_user_config, update_user_config
+
+    saved = load_user_config(config_path)
+    reconfigure = getattr(args, "reconfigure", False)
+    explicit_provider = getattr(args, "ai", None)
+    explicit_model = getattr(args, "model", None)
+    prompted = False
+
+    if explicit_provider:
+        ai = explicit_provider
+    elif not reconfigure and saved.get("provider"):
+        ai = saved["provider"]
+    elif args.interactive or reconfigure:
+        ai = select_one(["ollama", "gemini", "mistral"], title="Select model provider", default="ollama")
+        prompted = True
     else:
-        ai = getattr(args, "ai", None) or "gemini"
+        ai = "ollama"
     print(f"Selected AI: {ai}")
 
+    if explicit_model:
+        model_name = explicit_model
+    elif not reconfigure and not explicit_provider and saved.get("provider") == ai:
+        model_name = saved.get("model")
+    else:
+        model_name = None
+
+    ask_for_model = not model_name and (args.interactive or reconfigure)
+    if ask_for_model:
+        prompted = True
+
     if ai == "ollama":
-        if args.interactive:
+        if ask_for_model:
             model = None
             while not model:
                 model = OllamaClient()
         else:
-            model = OllamaClient("granite4:latest")
-        return model
+            model = OllamaClient(model_name or DEFAULT_MODEL_BY_PROVIDER["ollama"])
     elif ai == "gemini":
-        if args.interactive:
+        if ask_for_model:
             model = GeminiClient()
         else:
-            model = GeminiClient("gemini-3.8-flash")
-        return model
+            model = GeminiClient(model_name or DEFAULT_MODEL_BY_PROVIDER["gemini"])
     elif ai == "mistral":
-        model = MistralClient()
-        return model
+        if ask_for_model:
+            model = MistralClient()
+        else:
+            model = MistralClient(model_name or DEFAULT_MODEL_BY_PROVIDER["mistral"])
     else:
         logging.error(f"Invalid LLM source: {ai}")
         return None
+
+    if prompted and not explicit_provider and not explicit_model:
+        update_user_config({"provider": ai, "model": model.model_name}, config_path)
+
+    return model

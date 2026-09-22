@@ -36,6 +36,8 @@ class Args:
     output: str = "calendar"
     force_refresh: bool = False
     rule: Optional[str] = None
+    model: Optional[str] = None
+    reconfigure: bool = False
 
 
 def get_add_sources(rules=None):

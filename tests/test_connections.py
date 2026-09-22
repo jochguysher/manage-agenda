@@ -8,11 +8,13 @@ from socialModules.configMod import safe_get, select_from_list
 from manage_agenda.connections import (
     authorize,
     describe_auth_failure,
+    prepare_calendar,
     select_api,
     select_calendar,
 )
 from manage_agenda.exceptions import CalendarError
 from manage_agenda.sources import Args
+from manage_agenda.user_config import load_user_config, save_user_config
 
 
 class TestConnections(unittest.TestCase):
@@ -22,18 +24,39 @@ class TestConnections(unittest.TestCase):
             ["interactive", "delete", "source", "verbose", "destination", "text"],
         )
 
-    @patch("manage_agenda.connections.select_from_list")
-    def test_select_calendar(self, mock_select_from_list):
+    @patch("manage_agenda.connections.select_one")
+    def test_select_calendar(self, mock_select_one):
         mock_calendar_api = MagicMock()
         calendars = [{"summary": "Calendar1", "id": "id1", "accessRole": "owner"}]
         mock_calendar_api.getCalendarList.return_value = calendars
-        mock_select_from_list.return_value = (0, "Calendar1")
+        mock_select_one.return_value = calendars[0]
 
         result = select_calendar(mock_calendar_api)
 
         mock_calendar_api.setCalendarList.assert_called_once()
-        mock_select_from_list.assert_called_once()
+        mock_select_one.assert_called_once()
         self.assertEqual(result, "id1")
+
+    def test_select_calendar_prompts_with_no_args_at_all(self):
+        """events.py's clean/copy/move flow calls select_calendar(api, title=...) with no
+        `args` - it has always prompted unconditionally in that case."""
+        mock_calendar_api = MagicMock()
+        calendars = [{"summary": "Calendar1", "id": "id1", "accessRole": "owner"}]
+        mock_calendar_api.getCalendarList.return_value = calendars
+        with patch("manage_agenda.connections.select_one", return_value=calendars[0]) as mock_select_one:
+            result = select_calendar(mock_calendar_api)
+        mock_select_one.assert_called_once()
+        self.assertEqual(result, "id1")
+
+    def test_select_calendar_non_interactive_without_a_resolved_id_raises_clear_error(self):
+        mock_calendar_api = MagicMock()
+        calendars = [{"summary": "Calendar1", "id": "id1", "accessRole": "owner"}]
+        mock_calendar_api.getCalendarList.return_value = calendars
+        args = Args(interactive=False)
+
+        with self.assertRaises(CalendarError) as raised:
+            select_calendar(mock_calendar_api, args=args)
+        self.assertIn("non-interactive", str(raised.exception))
 
     def test_select_calendar_without_a_client(self):
         calendar_api = MagicMock()
@@ -235,3 +258,118 @@ class TestConnections(unittest.TestCase):
         result = authorize(args, rules=mock_rules)
 
         self.assertIsNone(result)
+
+
+class TestPrepareCalendar(unittest.TestCase):
+    """prepare_calendar's precedence: -d/--destination > saved config > interactive wizard >
+    a clear error. config_path is always overridden so these tests never touch the real
+    ~/.config/manage-agenda/config.yaml."""
+
+    def setUp(self):
+        self.config_path = Path("/tmp") / (self.id().replace(".", "_") + "_config.yaml")
+        self.config_path.unlink(missing_ok=True)
+        self.addCleanup(lambda: self.config_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: Path(str(self.config_path) + ".tmp").unlink(missing_ok=True))
+        self.rules = MagicMock()
+
+    @patch("manage_agenda.connections.select_calendar")
+    @patch("manage_agenda.connections.select_api")
+    def test_explicit_destination_skips_prompting_and_is_not_saved(
+        self, mock_select_api, mock_select_calendar
+    ):
+        fake_api = MagicMock(src="acct1")
+        mock_select_api.return_value = fake_api
+        args = Args(interactive=False, destination="cal-explicit")
+
+        result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
+
+        self.assertTrue(result)
+        self.assertEqual(args.calendar_id, "cal-explicit")
+        mock_select_calendar.assert_not_called()
+        self.assertEqual(load_user_config(self.config_path), {})
+
+    @patch("manage_agenda.connections.select_calendar")
+    @patch("manage_agenda.connections.select_api")
+    def test_explicit_destination_with_no_account_connection_fails_instead_of_proceeding(
+        self, mock_select_api, mock_select_calendar
+    ):
+        """A resolved calendar id (from a flag or saved config) skips select_calendar()
+        entirely, so its own api-is-None guard never runs - prepare_calendar must check
+        this itself instead of setting args.calendar_api to a broken connection."""
+        mock_select_api.return_value = None
+        args = Args(interactive=False, destination="cal-explicit")
+
+        result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
+
+        self.assertFalse(result)
+        mock_select_calendar.assert_not_called()
+        self.assertIsNone(getattr(args, "calendar_api", None))
+
+    @patch("manage_agenda.connections.select_calendar")
+    @patch("manage_agenda.connections.select_api")
+    def test_saved_config_is_reused_without_any_prompting(self, mock_select_api, mock_select_calendar):
+        save_user_config(
+            {"calendar_account": "acct1", "calendar": "cal-saved"}, self.config_path
+        )
+        fake_api = MagicMock(src="acct1")
+        self.rules.readConfigSrc.return_value = fake_api
+        self.rules.more.get.return_value = {}
+        args = Args(interactive=True)
+
+        result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
+
+        self.assertTrue(result)
+        self.assertEqual(args.calendar_id, "cal-saved")
+        mock_select_api.assert_not_called()
+        mock_select_calendar.assert_not_called()
+        self.rules.readConfigSrc.assert_called_once_with("", "acct1", {})
+
+    @patch("manage_agenda.connections.select_calendar")
+    @patch("manage_agenda.connections.select_api")
+    def test_interactive_selection_is_saved(self, mock_select_api, mock_select_calendar):
+        fake_api = MagicMock(src="acct1")
+        mock_select_api.return_value = fake_api
+        mock_select_calendar.return_value = "cal-chosen"
+        args = Args(interactive=True)
+
+        result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
+
+        self.assertTrue(result)
+        self.assertEqual(args.calendar_id, "cal-chosen")
+        self.assertEqual(
+            load_user_config(self.config_path),
+            {"calendar_account": "acct1", "calendar": "cal-chosen"},
+        )
+
+    @patch("manage_agenda.connections.select_calendar")
+    @patch("manage_agenda.connections.select_api")
+    def test_reconfigure_prompts_again_and_overwrites_the_saved_choice(
+        self, mock_select_api, mock_select_calendar
+    ):
+        save_user_config(
+            {"calendar_account": "acct1", "calendar": "cal-old"}, self.config_path
+        )
+        fake_api = MagicMock(src="acct2")
+        mock_select_api.return_value = fake_api
+        mock_select_calendar.return_value = "cal-new"
+        args = Args(interactive=False, reconfigure=True)
+
+        result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
+
+        self.assertTrue(result)
+        mock_select_api.assert_called_once()
+        mock_select_calendar.assert_called_once()
+        self.assertEqual(
+            load_user_config(self.config_path),
+            {"calendar_account": "acct2", "calendar": "cal-new"},
+        )
+
+    @patch("manage_agenda.connections.select_api")
+    def test_non_interactive_with_nothing_configured_fails_clearly(self, mock_select_api):
+        fake_api = MagicMock(src="acct1")
+        mock_select_api.return_value = fake_api
+        args = Args(interactive=False)
+
+        result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
+
+        self.assertFalse(result)

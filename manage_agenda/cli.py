@@ -96,8 +96,14 @@ def evaluate(ctx, type_, output, prompt):
 @click.option(
     "-a",
     "--ai",
-    default="ollama",
-    help="Select LLM",
+    default=None,
+    help="Select LLM for this run only, without changing the saved configuration",
+)
+@click.option(
+    "-m",
+    "--model",
+    default=None,
+    help="Select model for this run only, without changing the saved configuration",
 )
 @click.option(
     "-f",
@@ -117,7 +123,7 @@ def evaluate(ctx, type_, output, prompt):
     "-d",
     "--destination",
     default=None,
-    help="Select destination calendar",
+    help="Destination calendar id for this run only, without changing the saved configuration",
 )
 @click.option(
     "-o",
@@ -132,8 +138,14 @@ def evaluate(ctx, type_, output, prompt):
     default=None,
     help="IMAP sender rule. Default is auto, or review when -s imap -i",
 )
+@click.option(
+    "--reconfigure",
+    is_flag=True,
+    default=False,
+    help="Reopen the interactive setup for provider, model, and calendar, and save the result",
+)
 @click.pass_context
-def add(ctx, interactive, source, ai, force_refresh, destination, output, rule):
+def add(ctx, interactive, source, ai, model, force_refresh, destination, output, rule, reconfigure):
     """Add entries to the calendar."""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
@@ -141,12 +153,14 @@ def add(ctx, interactive, source, ai, force_refresh, destination, output, rule):
         delete=None,
         source=source,
         ai=ai,
+        model=model,
         verbose=verbose,
         destination=destination,
         text=None,
         output=output,
         force_refresh=force_refresh,
         rule=rule,
+        reconfigure=reconfigure,
     )
 
     add_events_cli(args)

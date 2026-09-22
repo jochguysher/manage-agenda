@@ -10,7 +10,7 @@ from typing import Optional
 
 # Base directories
 BASE_DIR = Path(__file__).parent.parent
-CONFIG_DIR = Path.home() / ".config" / "manage-agenda"
+CONFIG_DIR = Path(os.getenv("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "manage-agenda"
 DATA_DIR = Path.home() / ".local" / "share" / "manage-agenda"
 RUN_START_TIME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
