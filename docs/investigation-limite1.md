@@ -339,7 +339,8 @@ on a marker-mode switch yet.
 ## 7. Migration — extendedProperties and event_end on pre-existing Calendar events, shipped
 
 `migrate_legacy_ledger_entries()` (called from `process_email_cli`, between reconcile and
-purge) patches `extendedProperties.private` onto Calendar events created before deterministic
+purge - since §12, only once `migrate-ledger` has been run for the calendar account, which
+also calls it directly) patches `extendedProperties.private` onto Calendar events created before deterministic
 ids/origin stamping existed, and backfills each ledger ref's `event_end` from the same fetch.
 Per the original migration requirements: idempotent, never changes an event's own id, and
 never a full-ledger sweep every run.
@@ -544,3 +545,288 @@ text search) from the test suite, reporting a `high`/`medium`/`low` confidence p
 `INBOX`), so a match there is never read as a reliable pollution signal on its own. Makes only
 `events.get()` calls (no insert/patch/delete) and writes nothing but its own optional report
 file. Not run by the assistant.
+
+## 10. Baked-at-import constants: the root cause of the real-data pollution
+
+Shipped in `e55e683`. Several code comments point here: `config.py`, `user_config.py`,
+`events.py`, `tests/conftest.py` and `tests/test_conftest_isolation.py`.
+
+**The bug class.** `DATA_DIR`, `CONFIG_DIR`, `Config.MSG_TXT_DIR` and `Config.LOG_FILE` were
+module-level values computed once, when their module was first imported. Other modules then
+copied them into their own module-level names too: `base.DEFAULT_DATA_DIR =
+config.MSG_TXT_DIR`, and `user_config` imported the `CONFIG_DIR` value. A later change to
+`HOME`/`XDG_DATA_HOME` had no effect on code already holding the baked value. That change
+could be a test's `monkeypatch.setenv()` (always "later": pytest collection imports every
+module before any test body runs), or a real environment change. This is how real user data
+ended up mixed with test-injected entries - the Outlook Message-ID in the real
+`handled_mail_ids.json` (§8), and the `log/<MagicMock ...>/` directories under
+`~/Documents/txt/log/` (§9).
+
+**Why §8/§9 didn't close it.** Each round added an attribute-patching fixture for one more
+baked name (`isolated_data_dir`, `isolated_msg_txt_dir`, `isolated_config_dir`, ...). Each
+fix was correct for its own name, but the pattern producing new ones stayed. The next baked
+constant, or the next module importing the value instead of the module, would leak again,
+silently. §9's descriptions of those fixtures are superseded by what follows.
+
+**The fix: resolve at call time.** The constants are replaced by `data_dir()`,
+`config_dir()`, `msg_txt_dir()` and `log_file_path()` (`config.py`). Each reads its
+environment variable on every call, and every caller calls the function instead of
+importing a value. `data_dir()` and `config_dir()` are pure path resolvers, with no
+`mkdir()` side effect: every writer already creates its own parent directory, and a
+read-only caller (`scripts/diagnose_ledger.py`, whose contract is zero writes) must not
+create anything just by resolving a path. `output_dir()` (§11) follows the same rule.
+
+**Test isolation, rebuilt on that.** `tests/conftest.py`'s attribute-patching fixtures are
+collapsed into one autouse `isolated_paths` fixture. It redirects `HOME`, `XDG_DATA_HOME`,
+`XDG_CONFIG_HOME`, `MSG_TXT_DIR` and `LOG_FILE` through environment variables, which is now
+sufficient because nothing is baked any more. `MSG_TXT_DIR` and `LOG_FILE` are listed
+explicitly: the repo's own `.env` pins both at import time via `os.environ.setdefault()`, so
+they don't follow `HOME`. `OUTPUT_DIR` was added later, for the same reason (§11). The
+real-directory guard now also watches `~/.config/manage-agenda` and `~/.mySocial`
+(socialModules' own configuration). It also fails if a test creates or removes a watched
+directory outright, not only if it writes a file inside one: a `mkdir()` on path resolution
+would otherwise have gone unnoticed. `tests/test_conftest_isolation.py` is the direct
+regression test: it proves a redirect set *after* `manage_agenda.config` was imported still
+takes effect, which is exactly the scenario the old constants broke.
+
+**The same pattern, for a timezone.** `events.py`'s default-timezone constant was a sixth
+instance of it. Fixed separately; see §11.
+
+## 11. Read-side isolation: `Config` values and the default timezone; `log/` and `-o file`
+
+Shipped in `470869a` and `d9544dc`. The `log/` part was refined afterwards in `e99a4b0`,
+`841663c`, `db7c13c` and `0cbf636`; this section describes the current state.
+
+**The default timezone.** `events.py` localized naive event datetimes with a module-level
+`DEFAULT_NAIVE_TIMEZONE`, computed once from `Config.DEFAULT_TIMEZONE` at import time - the
+§10 pattern, for a timezone instead of a path. Throughout the test session it silently read
+the real `.env`'s `DEFAULT_TIMEZONE=America/Toronto` (UTC-5 in January) instead of the
+Europe/Berlin (UTC+1) the tests assumed. Three `test_events.py` failures
+(`test_adjust_event_times_*`) came from that 6-hour gap. They were reported as "pre-existing
+and unrelated" across several review rounds before the cause was found. They were never
+unrelated: an event created from a naive datetime goes through this same localization
+before being sent to Calendar, and migration's `event_end`, which drives ledger purge timing
+(§7), is read back from that live event. A wrong default timezone eventually skews purge
+timing by the same offset. Fixed in `470869a`: `_default_naive_timezone()` is resolved on
+every call.
+
+**`Config`'s read-only values.** §10's isolation covered *writes* to real paths, not *reads*
+of real configuration. `Config.DEFAULT_TIMEZONE`, `LOG_LEVEL`, `DEFAULT_EMAIL_TAG`,
+`ON_USER_DELETE`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `OLLAMA_HOST` and
+`OLLAMA_DEFAULT_MODEL` are plain class attributes, read via `os.getenv()` once, when the
+class body executes. They were deliberately not converted to call-time functions, since
+nothing needs them to change mid-process. So they are baked before any per-test fixture
+runs, at the first import of `manage_agenda.config`: a per-test `monkeypatch.setenv()` is
+always too late for them. `tests/conftest.py` now sets known values for all of them directly
+in `os.environ`, at module level, before any test module (or `manage_agenda.config`) is
+imported. It sets them unconditionally, not with `setdefault`, so a real exported shell value
+is overridden too, not just `.env`'s. The two API keys are removed rather than set to `""`.
+The three per-test timezone patches from `470869a` became redundant and were removed.
+`test_config_does_not_leak_the_real_env_files_values` fails if `Config.DEFAULT_TIMEZONE`
+ever reflects the real `.env` again.
+
+**Debug artifacts under `MSG_TXT_DIR/log/` are opt-in** (`e99a4b0`). `write_file()` writes
+raw LLM prompts and responses and the extracted event JSON: plaintext message content, one
+write per processed message, growing without bound. It now writes nothing, and creates no
+directory, unless the caller passes `enabled=True`. Every call site passes
+`args.debug_log_extractions` (`add --debug-log-extractions`, off by default), so a caller
+that forgets fails closed. When enabled, files are 0600 and the `log/` tree 0700, never
+`MSG_TXT_DIR` itself, which also holds the user's `.txt` sources.
+`purge_expired_log_files()` runs once per `add` while the flag is on, and deletes files older
+than `--debug-log-retention-days` (default 7).
+
+**`-o file` output moved out of `log/`** (`d9544dc`). `-o file` mode's actual result used to
+be written as `log/{model}/{post}_{idx}_times.json`. That is the directory the purge sweeps,
+under a name a debug artifact also used, so the purge needed a per-filename exception. It now
+goes to `config.output_dir()`: `$OUTPUT_DIR`, defaulting to `MSG_TXT_DIR/output`, resolved at
+call time like §10's functions. `tests/conftest.py` pins `OUTPUT_DIR` per test, like
+`MSG_TXT_DIR` (`0cbf636`). `output_dir()` is never purged automatically, and grows by one
+file per extracted event on every `-o file` run, which is the default for `llm evaluate`.
+Files there are written 0600. Directories `write_file()` creates there are 0700. An existing
+directory's permissions are never changed, since `OUTPUT_DIR` may point at a directory the
+user already uses. A looser one only gets a warning in the log (`db7c13c`).
+
+**Files that predate the purge are protected permanently** (`841663c`). Output written under
+`log/` before the move may still be there. `d9544dc` first gave such files a one-time grace
+pass: the first purge only stamped a marker. That was replaced by a permanent boundary. The
+marker (`log/.purge_enabled_since`) records the moment of the first activation and is never
+rewritten, and a file is purged only if its mtime is strictly after that moment *and* past
+retention. The marker is excluded by name, whatever its mtime. An unreadable marker purges
+nothing, and the warning says how to fix it: deleting the marker re-arms the protection, and
+every file present at that moment becomes protected. An end-to-end test runs `llm evaluate
+-o file` and checks that nothing is created under `log/`.
+
+## 12. Explicit ledger migration: `migrate-ledger`, and the operational sequence
+
+**Why.** `reconcile_migrate_and_purge()` used to run on every email `add`. The local install is
+editable (`pip install -e .`), so a scheduled job calling `.venv/bin/manage-agenda` runs the
+working tree as soon as it changes: the first real migration pass, and the first
+reconcile/purge of the real ledger, could happen from a cron run, before any backup,
+diagnostic or `--dry-run-ledger` preview. Migration is now an explicit operator step, and `add`
+refuses to do any ledger maintenance until it has been done.
+
+**`manage-agenda migrate-ledger [-i] [--dry-run-ledger]`** (`sources.migrate_ledger_cli`):
+- Connects to the calendar account through `prepare_calendar()`, the same selection `add`
+  uses: the saved `calendar_account`, otherwise the first configured `gcalendar` account
+  (or a choice, with `-i`).
+- Runs `migrate_legacy_ledger_entries()` only: no reconcile, no purge. Only this calendar
+  account's refs are touched (see "Only this calendar account's refs" below). Everything
+  else is counted as "left alone", never marked migrated, and migrated later by running the
+  command for its own account (`-i` to pick it).
+- Reads the account's calendar list first. If that fails, nothing runs and nothing is
+  stamped. Without it no ref can be told apart as this account's, and stamping a pass that
+  migrated nothing would open the gate with no migration ever done.
+- `--dry-run-ledger`: `events.get()` only. No `events.patch()`, no ledger write, no `.bak`,
+  and the account is **not** marked as migrated. Every outcome is logged to `LOG_FILE`.
+- Real pass: copies the ledger to `handled_mail_ids.json.bak`, patches, then stamps the
+  account's marker, even when nothing needed migrating (an empty ledger must be able to
+  unblock `add`). Refs left for retry after an ambiguous API error don't block the stamp:
+  migrate still runs inside every automatic `add` afterwards, always before purge, and
+  retries them there.
+- No calendar account available → nothing runs, nothing is stamped.
+
+**The marker is per calendar account**, in `data_dir()/ledger_migration.json`
+(`{"accounts": {key: first-run timestamp}}`, the same shape as `imap_marker_history.json`).
+The key is the calendar account's socialModules rule key (`api.src`, joined with `|` so the
+tuple from the wizard and the list read back from `config.yaml` give the same key). It is not
+keyed per *mail* account: the ledger is one file shared by every mail source, and what
+migration actually does - patching events through one account's Calendar client - is scoped
+to the calendar account. A marker for one calendar account never opens the gate for
+another. An unreadable marker file counts as "not migrated" (fail closed).
+
+**Only this calendar account's refs.** `CalendarScope.owner_of()` decides, without any API
+call, before anything is looked up. The same rule applies to migrate, reconcile and
+`scripts/diagnose_ledger.py`:
+1. A ref recorded with `calendar_account` belongs to that account only. Every new ref records
+   it (`_extract_event_refs`, from `add`'s calendar connection).
+2. `primary` is relative to the account. A legacy `primary` ref, with no `calendar_account`,
+   belongs to the current account only when it is the **only** configured gcalendar account.
+   In that case migrate also *attaches* it: it writes `calendar_account` on the ref (real
+   pass only, in `events` and `cancelled_events`), so it stays attributed if a second account
+   is configured later. With several accounts configured, nothing is guessed: the ref is left
+   alone and logged.
+3. Any other calendar id must be on this account's calendar list (all access roles, hidden
+   calendars included). Migrate checks this. Reconcile doesn't need to: listing a calendar
+   this account can't see fails, and `sync_calendar_changes()` already treats that as
+   "nothing to report".
+
+Skipping a non-owned ref *before* `events.get()` is what makes a 404 mean "this event is not
+found" rather than "this calendar is not visible from here". Calendar answers `notFound` for
+both. So `gone` (and its `"migrated": true`) only ever applies to an event of this account.
+An inaccessible calendar is logged, left un-migrated, and retried.
+
+Reconcile needed the filter as much as migrate does, and there the failure is destructive.
+Another account's `primary` ref would be looked up in this account's primary calendar, come
+back 404, and be journaled `unknown_event` - wiping a live event from the ledger. An entry
+whose refs all belong to other accounts now stays handled and untouched. Purge is not
+filtered: it is age-only by design (§8 forbids permanent exemptions).
+
+**The price of not guessing.** While several calendar accounts are configured, a legacy
+`primary` ref is never migrated and never reconciled: a deletion on Calendar is never
+noticed for it, and `on_user_delete` never applies. The entry stays handled, so its message
+is not reprocessed, and it ages out through purge like any other entry. An operator who knows
+the owner can attach such a ref by hand, by adding `"calendar_account": "<key>"` to it.
+
+**`add` (`process_email_cli`)**:
+- Marker present for the current calendar account → `reconcile → migrate → purge`, exactly as
+  in §9, restricted to this account's refs as above, then the requeue un-marking.
+- Otherwise → the whole trio is skipped (none of the three writes the ledger, and reconcile
+  doesn't even make its read-only Calendar sync call). `handled` falls back to every identity
+  on record (`load_handled_mail_ids()`, read-only), so already-handled messages are still
+  skipped - an empty `handled` would rescan the whole mailbox and recreate events as
+  duplicates. A warning naming the account and both commands is printed and logged.
+- No calendar connection at all (`-o file`, and `llm evaluate --type email`, whose default
+  output is `file`) → the trio is skipped too, logged at info level. This also stops those
+  runs from purging the ledger, which they previously did with no Calendar connection.
+- The requeue un-marking of `pending_requeue` entries is gated too. A successful un-mark
+  removes the entry from the ledger (`forget_handled_mail`), so it is ledger maintenance like
+  reconcile and purge.
+- Not gated, the same scope boundary as `--dry-run-ledger`: recording newly processed
+  messages (`remember_handled_mail`), Calendar publishing, and IMAP marking.
+
+**Cancelled events are never patched.** `migrate-ledger` runs without reconcile first, so a
+ref whose event was deleted on Calendar but is still returned by `events.get()` (status
+`cancelled`) can reach `migrate_one_legacy_event()`. It now returns a new `"cancelled"`
+status without calling `patch()` - whether a PATCH on a cancelled event can bring it back is
+unverified (probe (b) territory), and stamping one buys nothing. The ref is left un-migrated,
+and the first automatic `add` afterwards resolves it through reconcile and `on_user_delete`.
+Its `event_end` is still backfilled from the same `get()` (outside dry run): once reconcile
+moves the ref to `cancelled_events`, that end date is what earns the entry the
+event_end-based purge margin. Without it, the entry would fall back to `recorded_at` + 7 days
+- already past for a legacy ref - and be purged, along with `restore`'s record of the
+deleted event, almost at once.
+
+**Operational sequence** (nothing here is run by the assistant):
+1. Suspend every scheduled job that runs manage-agenda (`crontab -l`,
+   `systemctl --user list-timers --all`, `which -a manage-agenda`). With the editable install,
+   they run the working tree, not a frozen release.
+2. Back up `~/.local/share/manage-agenda`, `~/.config/manage-agenda` and `MSG_TXT_DIR/log`.
+3. `scripts/diagnose_ledger.py` (the saved calendar account by default; `-i` to choose), then
+   clean up the ledger by hand. It reports `calendar_inaccessible` for refs that aren't this
+   account's, without querying them. Those are **not** `not_found` and not a cleanup signal:
+   rerun with `-i` for the other account. A real entry of another account never shows up as
+   `not_found`.
+4. Probes on a test calendar and test folders.
+5. `manage-agenda migrate-ledger --dry-run-ledger`, then read `LOG_FILE`:
+   - `DRY RUN migrate: would patch ...` - will be patched;
+   - `... is cancelled - not patched` - left for reconcile;
+   - `... is gone` - 404/410, nothing to patch, marked as done;
+   - `could not fetch` / `could not patch` - left for a retry;
+   - `... skipped - <reason>. Not marked migrated` - another account's ref, a calendar this
+     account can't see, or a legacy `primary` ref whose owner is unknown;
+   - `legacy ref attached to <account>` - a `primary` ref attributed to the only configured
+     account.
+6. `manage-agenda migrate-ledger`: `.bak` written, events patched, calendar account marked as
+   migrated. With several calendar accounts, run it once per account (`-i`), each with its
+   own dry run first.
+7. First `add` for that account: reconcile → migrate → purge run automatically.
+   `add --dry-run-ledger` previews the ledger side of that first run, but scanning,
+   extraction, publishing and mailbox marking still run normally under it (§9).
+8. Reactivate the scheduled jobs.
+
+**Also fixed along the way.** A socialModules rule key is a tuple, and `config.yaml`
+(`yaml.safe_dump`) stores the saved `calendar_account` as a list. `prepare_calendar()` then
+looked that list up in `rules.more`, which fails on an unhashable key, so every run after the
+first saved choice crashed. The saved value is now turned back into a tuple. Both
+`migrate-ledger` and the diagnostic resolve the account through this saved value.
+
+**Known limitation, not addressed here.** Calendar sync tokens (`calendar_sync_tokens.json`)
+are keyed by calendar id alone, so `primary`'s token is shared between calendar accounts.
+Alternating accounts hands one account's token to the other, and how Calendar answers that
+(410, which reseeds, or another error, which reconcile only logs) has not been checked.
+
+**Rollback.** Restore `handled_mail_ids.json.bak` over the ledger, and remove the account's
+entry from `ledger_migration.json` (or the file) to close the gate again. The
+`extendedProperties.private` keys already added to Calendar events are not removed. They are
+additions only, and existing keys were preserved (§7).
+
+**Tests** (`tests/test_ledger_migration_gate.py`), each mutation-checked:
+- `add` before migration: ledger byte-identical, no `.bak`, no Calendar sync call, the
+  already-handled message still skipped, warning naming the command.
+- A marker for another calendar account does not open the gate; nor does no calendar
+  connection.
+- `migrate-ledger --dry-run-ledger`: the event was read, but nothing was patched, the ledger
+  is unchanged, and there is no `.bak` and no marker.
+- `migrate-ledger` (real): patched, `.bak` written, marker stamped, even on an empty ledger.
+- After migration, `add` reconciles a cancellation into `cancelled_events` and purges an
+  expired entry.
+- A cancelled event is never patched and stays un-migrated, but gets its `event_end`
+  backfilled (not under dry run).
+- The tuple and list forms of the rule key give the same account key.
+- Another account's calendar: skipped, never queried, not marked, then migrated by its own
+  account's `migrate-ledger`. On this account's calendar, a missing event is `gone`; a
+  calendar missing from the list is skipped and retried. A ref recorded for another account
+  is skipped even on a calendar both can see. An unreadable calendar list migrates nothing,
+  writes nothing and stamps nothing.
+- New refs record `calendar_account`, including those recorded through `add`. Legacy
+  `primary` refs are attached with one configured account (only previewed under dry run),
+  and left alone, unqueried and logged with several.
+- Reconcile never resolves another account's `primary` ref, even when a 404 would come back,
+  and still resolves this account's legacy one.
+- Requeue un-marking: skipped before migration, with the ledger byte-identical and no IMAP
+  call; after migration it runs and forgets the entry.
+- `tests/test_diagnose_ledger.py`: `calendar_inaccessible` for each of the three reasons,
+  never queried; `not_found` only on this account's own calendar; the saved account is read
+  back from its list form; no saved account and no `-i` → exit, not a guess.
+- `tests/test_connections.py`: the saved rule key read back as a list still resolves.
+- The first timestamp is kept, and an unreadable marker file means "not migrated".
