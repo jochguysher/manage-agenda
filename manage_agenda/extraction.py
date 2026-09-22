@@ -527,13 +527,19 @@ def _process_event_with_llm_and_calendar(
                         raise CalendarError(t("extraction.calendar_not_updated"))
                     published = True
                 else:
-                    # Not a debug artifact despite the log/ path: this is the actual "-o file"
-                    # output mode, the user's requested result, not an optional trail - it
-                    # always writes regardless of --debug-log-extractions.
+                    # Not a debug artifact: this is the actual "-o file" output mode, the
+                    # user's requested result, not an optional trail - it always writes
+                    # regardless of --debug-log-extractions, and lives under its own
+                    # config.output_dir(), not msg_txt_dir()/log/, so
+                    # purge_expired_log_files() can never delete it (see base.write_file's
+                    # docstring and docs/investigation-limite1.md).
+                    from manage_agenda.config import output_dir
+
                     write_file(
-                        f"log/{model.model_name}/{post_identifier}_{idx}_times.json",
+                        f"{model.model_name}/{post_identifier}_{idx}_times.json",
                         json.dumps(single_event),
                         enabled=True,
+                        base_dir=output_dir(),
                     )
                     calendar_result = f"{post_identifier}_{idx}_times.json"
                     published = True

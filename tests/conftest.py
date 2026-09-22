@@ -4,6 +4,46 @@ from pathlib import Path
 
 import pytest
 
+# Set BEFORE manage_agenda.config is ever imported (this module is - pytest imports every
+# conftest.py in a directory before collecting any test file inside it, and nothing above
+# this point imports manage_agenda). manage_agenda.config.Config's DEFAULT_TIMEZONE/LOG_LEVEL/
+# DEFAULT_EMAIL_TAG/ON_USER_DELETE/GEMINI_API_KEY/MISTRAL_API_KEY/OLLAMA_HOST/
+# OLLAMA_DEFAULT_MODEL are all `os.getenv(...)` calls evaluated ONCE, at Config's class-body
+# execution time - unlike data_dir()/config_dir()/msg_txt_dir()/log_file_path() (see
+# config.py), these were deliberately left as plain class attributes (not converted to
+# functions) since nothing needs them to change mid-process. That means isolated_paths'
+# per-test monkeypatch.setenv() below, and any config.py `.env` file, are BOTH too late to
+# affect them for a test that doesn't override them itself - as happened in practice:
+# events.py's default-timezone localization read the real .env's DEFAULT_TIMEZONE=
+# America/Toronto (UTC-5 in January) for the whole session, three test_events.py failures
+# were wrongly reported as "pre-existing and unrelated" across several rounds before this was
+# found (see docs/investigation-limite1.md §10/§11), and only the affected tests were patched
+# individually rather than the root cause (isolation covered writes, not this class of read).
+#
+# Setting these here, unconditionally (not os.environ.setdefault - a real exported shell env
+# var must not leak into tests either), before Config's class body ever executes, makes every
+# test's baseline deterministic regardless of what .env or the host shell sets. A test that
+# needs a specific value (e.g. test_config.py's validate() tests) still overrides it locally
+# with unittest.mock.patch.object(Config, ...), which takes precedence within its own scope
+# and does not need to change.
+_KNOWN_TEST_CONFIG_ENV = {
+    "DEFAULT_TIMEZONE": "Europe/Berlin",  # matches Config's own built-in fallback
+    "LOG_LEVEL": "INFO",
+    "DEFAULT_EMAIL_TAG": "zAgenda",
+    "ON_USER_DELETE": "ignore",  # the user-validated default (see config.py) - not overridden
+    "OLLAMA_HOST": "http://localhost:11434",
+    "OLLAMA_DEFAULT_MODEL": "llama3.1",
+}
+for _key, _value in _KNOWN_TEST_CONFIG_ENV.items():
+    os.environ[_key] = _value
+
+# GEMINI_API_KEY/MISTRAL_API_KEY are `str | None` (os.getenv() with no default) - removed
+# rather than set to "", so the known value is really None, not an empty string with
+# different truthiness/type semantics from what the type hint promises. A real key exported
+# in the host shell (not just .env, which doesn't set these) must not leak into tests either.
+os.environ.pop("GEMINI_API_KEY", None)
+os.environ.pop("MISTRAL_API_KEY", None)
+
 # Computed once, at collection time, independent of any per-test monkeypatching below - the
 # real, unredirected locations the test suite must never write to. See
 # docs/investigation-limite1.md §9/§10: real user data was found polluted by this suite (a

@@ -15,9 +15,13 @@ LOGDIR = ""
 
 
 # --- File I/O ---
-def write_file(filename, content, enabled=False):
-    """Writes content to a file under msg_txt_dir() - in practice, always a `log/...` debug
-    artifact (every current caller passes one; see docs/investigation-limite1.md).
+def write_file(filename, content, enabled=False, base_dir=None):
+    """Writes content to a file under `base_dir` (msg_txt_dir() if not given) - in practice,
+    almost always a `log/...` debug artifact (every caller but one passes one; see
+    docs/investigation-limite1.md). The exception is `-o file` mode's actual output
+    (extraction.py), which passes base_dir=config.output_dir() - its own dedicated directory,
+    not msg_txt_dir()/log/, so purge_expired_log_files() can sweep log/ with no per-filename
+    exception without risking a user's requested output.
 
     `enabled` defaults to False, meaning: no directory created, no file written, no I/O
     attempted at all. Callers pass `enabled=args.debug_log_extractions` (see sources.Args) -
@@ -26,23 +30,27 @@ def write_file(filename, content, enabled=False):
     docs/investigation-limite1.md - a debug flag threaded through every call site, not a
     single "dry_run"-shaped toggle, because unlike the ledger's dry-run this one is meant to
     stay on for a whole debugging session, and because a caller that forgets to pass
-    enabled=True fails safe - closed, not open).
+    enabled=True fails safe - closed, not open). `-o file` mode's own write always passes
+    enabled=True unconditionally - it is the user's requested result, not an optional trail.
 
-    When enabled, the created directory is chmod'd 0700 and the file 0600 - this holds real
-    email/event content, so it must never be left group/world-readable regardless of the
-    process umask.
+    When enabled and writing under msg_txt_dir()/log/ specifically, the created directory is
+    chmod'd 0700 and the file 0600 - this holds real email/event content, so it must never be
+    left group/world-readable regardless of the process umask. A different base_dir (e.g.
+    output_dir()) is not chmod'd by this function - out of scope for the debug-log permission
+    tightening this was written for (see docs/investigation-limite1.md).
 
     Args:
-        filename (str): The name of the file.
+        filename (str): The name of the file, relative to base_dir.
         content (str): The content to write.
         enabled (bool): Must be explicitly True for anything to be written.
+        base_dir (str | None): Defaults to msg_txt_dir() when not given.
     """
     if not enabled:
         return False
     try:
         # Resolved fresh on every call, not a module-level constant - see
         # manage_agenda.config.data_dir()'s docstring for why.
-        default_data_dir = msg_txt_dir()
+        default_data_dir = base_dir if base_dir is not None else msg_txt_dir()
 
         # Sanitize the filename to prevent path traversal attacks
         # Normalize the path to resolve any '..' or '.' components
@@ -137,33 +145,51 @@ def _chmod_debug_log_tree(default_data_dir, dir_path):
         logging.warning(f"Could not chmod debug log directory under {log_root}: {chmod_error}")
 
 
-def purge_expired_log_files(retention_days, today=None):
-    """Delete every file under msg_txt_dir()/log/ older than `retention_days`, except a
-    `*_times.json` file, then remove any subdirectory left empty by that. Only meaningful
-    while --debug-log-extractions is on (write_file() writes nothing there otherwise, so
-    there is nothing to purge) - the caller decides when to run this (see add_events_cli's
-    debug_log_extractions branch), not this function, which is a plain, unconditional sweep.
+_PURGE_MARKER_NAME = ".purge_enabled_since"
 
-    The `*_times.json` exclusion exists because that exact filename shape is not always a
-    debug artifact: _process_event_with_llm_and_calendar (extraction.py) writes
-    log/{model}/{post}_{idx}_times.json unconditionally (enabled=True, not gated by
-    --debug-log-extractions) as the actual result of `-o file` mode - the user's requested
-    output, not an optional trail. A second, gated `_times.json` write (a plain debug
-    duplicate, no model subdirectory) shares the same suffix and cannot be told apart from
-    the first by name alone; excluding the whole suffix is the conservative choice - it
-    never deletes real output, at the cost of leaving that one debug duplicate unpurged too.
+
+def purge_expired_log_files(retention_days, today=None):
+    """Delete every file under msg_txt_dir()/log/ older than `retention_days`, then remove
+    any subdirectory left empty by that. Only meaningful while --debug-log-extractions is on
+    (write_file() writes nothing there otherwise, so there is nothing to purge) - the caller
+    decides when to run this (see add_events_cli's debug_log_extractions branch), not this
+    function, which is a plain sweep once past its first call (see below).
+
+    Applies to log/ uniformly, with no per-filename exception - safe because `-o file` mode's
+    actual output no longer lives under log/ at all (it moved to config.output_dir(), see
+    write_file()'s docstring), so nothing purgeable here can be a user's requested result.
+
+    First call ever for a given log/ (no marker file yet): stamps a marker and purges
+    NOTHING, regardless of how old anything already there is. This matters because `-o file`
+    mode used to write log/{model}/{post}_{idx}_times.json (before it moved to
+    output_dir()) - a real user, prior to this change, may already have such output sitting
+    under log/. The very first time --debug-log-extractions is ever turned on must not sweep
+    those away as a side effect of enabling an unrelated debug flag; every call after that
+    one purges normally, same as the ledger's own one-time grace pass for an entry with no
+    age signal (see purge_expired_ledger_entries) - a file's age only starts counting against
+    it from the marker's timestamp onward, never retroactively for what predates it. If you
+    have `-o file` output already under MSG_TXT_DIR/log/ that you want to keep indefinitely,
+    move it out before enabling --debug-log-extractions a second time.
 
     Returns the number of files deleted.
     """
     log_root = Path(msg_txt_dir()) / "log"
+    today = today or datetime.datetime.now(datetime.timezone.utc)
+    marker = log_root / _PURGE_MARKER_NAME
+    if not marker.is_file():
+        try:
+            log_root.mkdir(parents=True, exist_ok=True)
+            marker.write_text(today.isoformat(), encoding="utf-8")
+        except OSError as error:
+            logging.warning(f"Could not stamp debug log purge marker under {log_root}: {error}")
+        return 0
     if not log_root.is_dir():
         return 0
-    today = today or datetime.datetime.now(datetime.timezone.utc)
     cutoff = today - datetime.timedelta(days=retention_days)
     deleted = 0
     for root, _dirs, files in os.walk(log_root, topdown=False):
         for name in files:
-            if name.endswith("_times.json"):
+            if name == _PURGE_MARKER_NAME:
                 continue
             file_path = Path(root) / name
             try:

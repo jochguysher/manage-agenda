@@ -11,6 +11,7 @@ started. data_dir()/config_dir()/msg_txt_dir()/log_file_path() are functions pre
 this scenario - the only one that actually matters for test isolation - works.
 """
 
+import os
 from pathlib import Path
 
 import manage_agenda.config as config_module
@@ -63,3 +64,68 @@ def test_log_file_path_without_log_file_env_falls_back_under_data_dir(monkeypatc
     assert config_module.log_file_path() == str(
         Path(fake_home / ".local" / "share" / "manage-agenda" / "manage_agenda.log")
     )
+
+
+def test_output_dir_defaults_under_msg_txt_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("MSG_TXT_DIR", str(tmp_path) + "/")
+    monkeypatch.delenv("OUTPUT_DIR", raising=False)
+
+    assert config_module.output_dir() == os.path.join(str(tmp_path) + "/", "output")
+
+
+def test_output_dir_is_configurable_via_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "custom-output"))
+
+    assert config_module.output_dir() == str(tmp_path / "custom-output")
+
+
+def _read_env_file_raw(path):
+    """A minimal, read-only re-parse of a .env file's KEY=VALUE lines - deliberately not
+    reusing config._load_dotenv, which mutates os.environ via setdefault() as a side effect.
+    Mirrors that function's own parsing rules (quote stripping, `export ` prefix, comments)
+    closely enough to read back what it would have seen."""
+    values = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def test_config_does_not_leak_the_real_env_files_values():
+    """Regression test for docs/investigation-limite1.md §10/§11: manage_agenda.config.Config's
+    DEFAULT_TIMEZONE/LOG_LEVEL/DEFAULT_EMAIL_TAG/ON_USER_DELETE/OLLAMA_HOST/
+    OLLAMA_DEFAULT_MODEL are plain class attributes read via os.getenv(...) once, at class-body
+    execution time - see conftest.py's _KNOWN_TEST_CONFIG_ENV, which seeds known values into
+    the environment before manage_agenda.config is ever imported, specifically so the repo's
+    real .env (which sets DEFAULT_TIMEZONE=America/Toronto, not the Europe/Berlin every test
+    assumes) can never reach a test's Config attributes.
+
+    This asserts the seeding actually worked, using the real .env file itself as the source
+    of "what would have leaked" - not a value hardcoded here that could quietly drift from
+    both .env and conftest.py without either failing.
+    """
+    from manage_agenda.config import BASE_DIR, Config
+
+    real_env_values = _read_env_file_raw(BASE_DIR / ".env")
+    assert "DEFAULT_TIMEZONE" in real_env_values, (
+        "expected the repo's real .env to set DEFAULT_TIMEZONE for this to be a meaningful "
+        "check - if it no longer does, this test should be re-pointed at whatever key still "
+        "differs between .env and conftest.py's _KNOWN_TEST_CONFIG_ENV"
+    )
+    assert real_env_values["DEFAULT_TIMEZONE"] != Config.DEFAULT_TIMEZONE, (
+        "the real .env's DEFAULT_TIMEZONE now matches the pinned test value by coincidence - "
+        "this check can no longer detect a leak for this key; pick a different mismatched key"
+    )
+    assert Config.DEFAULT_TIMEZONE == "Europe/Berlin"

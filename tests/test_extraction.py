@@ -357,6 +357,20 @@ more text"""
         mock_select_calendars.assert_not_called()
         mock_write_file.assert_called()
 
+        # The actual `-o file` result: written unconditionally (enabled=True) under
+        # config.output_dir(), never under msg_txt_dir()/log/ - see base.write_file's and
+        # purge_expired_log_files's docstrings (docs/investigation-limite1.md).
+        from manage_agenda.config import output_dir
+
+        output_calls = [
+            call for call in mock_write_file.call_args_list if call.kwargs.get("base_dir")
+        ]
+        self.assertEqual(len(output_calls), 1)
+        self.assertEqual(output_calls[0].kwargs["base_dir"], output_dir())
+        self.assertTrue(output_calls[0].kwargs.get("enabled"))
+        self.assertTrue(output_calls[0].args[0].endswith("_1_times.json"))
+        self.assertNotIn("log/", output_calls[0].args[0])
+
 
 class TestCalendarBusyAcrossMultipleCalendars(unittest.TestCase):
     """A room-visit slot must avoid conflicts on every calendar the event will be written to,

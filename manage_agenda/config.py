@@ -56,6 +56,16 @@ def log_file_path() -> str:
     return os.getenv("LOG_FILE", str(data_dir() / "manage_agenda.log"))
 
 
+def output_dir() -> str:
+    """Where `-o file` mode writes its actual result (extraction.py's
+    _process_event_with_llm_and_calendar) - resolved fresh on every call, its own dedicated
+    directory, deliberately separate from msg_txt_dir()/log/ (which purge_expired_log_files()
+    sweeps by age - see base.py). That file used to live under msg_txt_dir()/log/ itself,
+    indistinguishable by path from a debug artifact of the same name shape; moving it here
+    is what makes that sweep safe to apply uniformly, with no per-filename exception."""
+    return os.getenv("OUTPUT_DIR", os.path.join(msg_txt_dir(), "output"))
+
+
 def _load_dotenv(path: Path) -> None:
     """Load KEY=VALUE lines from a .env file without overriding the environment."""
     if not path.is_file():
