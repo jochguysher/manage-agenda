@@ -1,0 +1,224 @@
+"""Read-only diagnostic for the handled-mail ledger (handled_mail_ids.json).
+
+For every tracked event ref, calls events.get(calendar_id, event_id) and classifies it:
+  - active:     the event exists and is not cancelled.
+  - cancelled:  the event exists with status="cancelled" (a genuine Calendar tombstone).
+  - not_found:  404/410 - Calendar has no record of it at all (see
+                docs/investigation-limite1.md §8/§9 - this is NOT proof of a user deletion,
+                it is equally consistent with the event never having existed).
+  - error:      an ambiguous API error - inconclusive, not a hard failure.
+  - skipped:    the ref itself is malformed (missing calendar_id/event_id).
+
+Also cross-references every ledger identity/calendar_id/event_id against string literals
+collected (via ast, not a naive text search) from every *.py file under tests/, and reports
+a confidence level for any match - real test-injected entries were found in the real ledger
+before tests/conftest.py's isolation fixtures existed (see docs/investigation-limite1.md §9),
+so this is a starting point for finding more, NOT a verdict on its own:
+  - high:   the value looks like a real Message-ID (contains "@") and appears verbatim in the
+            test suite - a strong pollution signal.
+  - medium: a short, test-fixture-looking token (e.g. "e1", "cal-1") that also appears in the
+            test suite - plausible pollution, but generic enough to double-check by hand.
+  - low:    the value also happens to be a common real-world identifier (e.g. "primary", the
+            actual default Google Calendar ID for every account, or "INBOX") - a match here
+            is NOT a reliable pollution signal on its own; never delete on this alone.
+
+Read-only with respect to application state: makes only events.get() calls to Calendar (never
+insert/patch/delete), and never writes to the ledger file or any other manage-agenda state.
+The only file this script itself writes is its own report, and only if --output is given.
+Not run by the assistant - the user runs and reviews this themselves, and decides what (if
+anything) to clean up.
+
+Usage:
+    python scripts/diagnose_ledger.py [--ledger PATH] [--tests-dir PATH]
+                                       [--format csv|json] [--output PATH]
+"""
+
+import argparse
+import ast
+import csv
+import io
+import json
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from manage_agenda.sources import Args, handled_mail_file, load_handled_mail_state  # noqa: E402
+
+_COMMON_REAL_IDENTIFIERS = {"primary", "INBOX", "Sent", "Trash", "Drafts", "Archive", "", "0", "1"}
+
+
+def connect_calendar():
+    """Interactively pick a Google Calendar account and return its authenticated client -
+    read-only from here on; this script never calls insert/patch/delete."""
+    from socialModules.moduleRules import moduleRules
+
+    from manage_agenda.connections import select_api
+
+    args = Args(interactive=True)
+    rules = moduleRules.from_config()
+    api_dst = select_api(args, "gcalendar", rules=rules, title="Select the calendar account to diagnose")
+    if api_dst is None or api_dst.getClient() is None:
+        print("Could not authenticate a Google Calendar account. Run `manage-agenda auth -i` first.")
+        sys.exit(1)
+    return api_dst.getClient()
+
+
+def collect_test_literals(tests_dir):
+    """Every string literal in tests/**/*.py, via ast (not a naive text search, so
+    concatenation/f-string edge cases don't silently produce false negatives)."""
+    literals = set()
+    for path in sorted(Path(tests_dir).rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError) as error:
+            print(f"Could not parse {path}, skipping: {error}", file=sys.stderr)
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value:
+                literals.add(node.value)
+    return literals
+
+
+def confidence(value, test_literals):
+    """"high" | "medium" | "low" | "" (no match) - see module docstring for what each means."""
+    if not value or value not in test_literals:
+        return ""
+    if value in _COMMON_REAL_IDENTIFIERS:
+        return "low"
+    if "@" in value:
+        return "high"
+    return "medium"
+
+
+def classify_event(client, calendar_id, event_id):
+    """(classification, detail) - never raises; an ambiguous error is reported, not thrown."""
+    import googleapiclient.errors
+
+    try:
+        response = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+    except googleapiclient.errors.HttpError as error:
+        status = getattr(getattr(error, "resp", None), "status", None)
+        if status in (404, 410):
+            return "not_found", ""
+        return "error", str(error)
+    except Exception as error:
+        return "error", str(error)
+    status = (response or {}).get("status")
+    return ("cancelled" if status == "cancelled" else "active"), (status or "")
+
+
+def build_rows(state, client, test_literals):
+    rows = []
+    for identity, entry in state.items():
+        identity_match = confidence(identity, test_literals)
+        refs = [dict(ref, ref_source="events") for ref in (entry.get("events") or [])]
+        refs += [dict(ref, ref_source="cancelled_events") for ref in (entry.get("cancelled_events") or [])]
+
+        if not refs:
+            rows.append(
+                {
+                    "identity": identity,
+                    "status": entry.get("status", ""),
+                    "ref_source": "-",
+                    "calendar_id": "",
+                    "event_id": "",
+                    "calendar_classification": "-",
+                    "calendar_detail": "",
+                    "identity_test_match": identity_match,
+                    "calendar_id_test_match": "",
+                    "event_id_test_match": "",
+                }
+            )
+            continue
+
+        for ref in refs:
+            calendar_id = str(ref.get("calendar_id") or "")
+            event_id = str(ref.get("event_id") or "")
+            if calendar_id and event_id:
+                classification, detail = classify_event(client, calendar_id, event_id)
+            else:
+                classification, detail = "skipped", "ref missing calendar_id/event_id"
+            rows.append(
+                {
+                    "identity": identity,
+                    "status": entry.get("status", ""),
+                    "ref_source": ref.get("ref_source", "events"),
+                    "calendar_id": calendar_id,
+                    "event_id": event_id,
+                    "calendar_classification": classification,
+                    "calendar_detail": detail,
+                    "identity_test_match": identity_match,
+                    "calendar_id_test_match": confidence(calendar_id, test_literals),
+                    "event_id_test_match": confidence(event_id, test_literals),
+                }
+            )
+    return rows
+
+
+_FIELDS = [
+    "identity",
+    "status",
+    "ref_source",
+    "calendar_id",
+    "event_id",
+    "calendar_classification",
+    "calendar_detail",
+    "identity_test_match",
+    "calendar_id_test_match",
+    "event_id_test_match",
+]
+
+
+def render(rows, fmt):
+    if fmt == "json":
+        return json.dumps(rows, indent=2, ensure_ascii=False)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=_FIELDS)
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--ledger", default=None, help="Ledger file path. Default: the real handled_mail_ids.json."
+    )
+    parser.add_argument(
+        "--tests-dir", default=None, help="Directory to scan for test literals. Default: <repo>/tests."
+    )
+    parser.add_argument("--format", choices=["csv", "json"], default="csv")
+    parser.add_argument("--output", default=None, help="Output file path. Default: stdout.")
+    args = parser.parse_args()
+
+    ledger_path = Path(args.ledger) if args.ledger else handled_mail_file()
+    tests_dir = Path(args.tests_dir) if args.tests_dir else REPO_ROOT / "tests"
+
+    print(f"Ledger: {ledger_path}", file=sys.stderr)
+    if not ledger_path.is_file():
+        print("No ledger file found there - nothing to diagnose.", file=sys.stderr)
+        sys.exit(0)
+
+    print(f"Scanning test literals under: {tests_dir}", file=sys.stderr)
+    test_literals = collect_test_literals(tests_dir)
+    print(f"Collected {len(test_literals)} string literals from the test suite.", file=sys.stderr)
+
+    state = load_handled_mail_state(ledger_path)
+    print(f"{len(state)} ledger identities to check.", file=sys.stderr)
+
+    client = connect_calendar()
+
+    rows = build_rows(state, client, test_literals)
+    output_text = render(rows, args.format)
+
+    if args.output:
+        Path(args.output).write_text(output_text, encoding="utf-8")
+        print(f"Wrote {len(rows)} rows to {args.output}", file=sys.stderr)
+    else:
+        print(output_text)
+
+
+if __name__ == "__main__":
+    main()
