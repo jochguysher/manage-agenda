@@ -445,3 +445,102 @@ way to tell them apart after the fact. Fixed going forward with an autouse `isol
 fixture in `tests/conftest.py` (redirects `manage_agenda.config.DATA_DIR` to a per-test
 `tmp_path`); the pre-existing pollution in the real file was not touched or "repaired" -
 reconstructing which entries are real would mean guessing at the user's data.
+
+## 9. Second review round: correctness fix, structural guarantees, deeper test isolation
+
+Seven items from a second pre-flight review, all closed before any probe or migration is run
+against real data.
+
+**A confirmed-gone event (404/410) is no longer treated as a user deletion.**
+`_confirm_missing_ids()` (extraction.py) previously returned one flat `confirmed` set,
+conflating "Calendar reports an explicit `status: cancelled` tombstone" with "Calendar has no
+record of this id at all" - a 404 is NOT proof of a user deletion; it is equally consistent
+with the event never having been created (a past bug, ledger corruption, a wrong/stale
+event_id). It now returns `(cancelled_ids, unknown_ids)`, threaded through
+`sync_calendar_changes()` (same return shape) up to `reconcile_handled_events()`. An identity
+whose only remaining tracked refs are all "unknown" is journaled with a new status
+`"unknown_event"` - excluded from future scans, but pre-empting `on_user_delete` entirely
+(neither `ignore` nor `requeue` fires) and never touching any mailbox. A mix of cancelled and
+unknown refs on the same identity resolves as `unknown_event` too, rather than partially
+applying `on_user_delete` to the cancelled ones - a mix is itself a sign something is off, not
+something to partially resolve as a normal deletion. A syncToken delta never produces an
+unknown id by itself (only the bootstrap path's targeted confirmation can), which is pinned by
+its own test.
+
+**The purge grace-pass already waited the full margin, not just one call - verified, not
+"fixed".** Re-examined `purge_expired_ledger_entries()`'s grace-pass logic (§8): an entry
+stamped with `recorded_at` on one call is only purged once `recorded_at + no_event_margin_days`
+has actually elapsed, confirmed by a new test that calls the function twice at the *same*
+instant and asserts the entry survives both times. The docstring wording ("exactly one grace
+pass") was genuinely ambiguous and easy to misread as "immune for one call regardless of
+elapsed time", so it was reworded, but the underlying behavior needed no code change.
+
+**`reconcile → migrate → purge` ordering is now enforced structurally.** A new
+`reconcile_migrate_and_purge()` performs all three, in that fixed order, in one call, forwarding
+`dry_run` to each - `process_email_cli` now calls this single function instead of three
+separate ones in sequence, so the ordering invariant (documented at length in §7/§8 for why it
+matters) can no longer regress by a future call site getting the order wrong.
+
+**`--dry-run` was renamed to `--dry-run-ledger`.** Reviewed as misleading: it only ever covered
+`reconcile_handled_events()`/`migrate_legacy_ledger_entries()`/`purge_expired_ledger_entries()`
+(the ledger-writing calls), never Calendar publish, mailbox marking, or
+`remember_handled_mail()` - scanning/extraction/publishing/marking all still run normally under
+it. Building a true global dry-run (gating publish and every mailbox-marking call too) was
+the alternative considered and rejected as the more invasive, higher-risk option for what was
+asked to be the simpler fix; the rename is a breaking change (`manage-agenda add --dry-run` now
+fails with "no such option" rather than silently doing something narrower than its name
+implied - the safe failure direction, and deliberately not aliased).
+
+**Structural test isolation, several gaps closed.** `tests/conftest.py` gained:
+- `isolated_msg_txt_dir`: patches `manage_agenda.base.DEFAULT_DATA_DIR` directly. This was the
+  real, previously-unpatched gap behind `~/Documents/txt/log/` continuing to fill with
+  test-run artifacts (confirmed in practice - directory names literally containing
+  `<MagicMock name='mock.model_name' ...>` were found there) even after `isolated_data_dir`
+  (§8) existed, since `DEFAULT_DATA_DIR` is a separate module-level constant
+  (`= config.MSG_TXT_DIR` at import time), never re-read.
+- `isolated_config_dir`: patches `manage_agenda.config.CONFIG_DIR` and (separately, since it's
+  a distinct name binding from `from manage_agenda.config import CONFIG_DIR`)
+  `manage_agenda.user_config.CONFIG_DIR` - the OAuth-credentials/`config.yaml` directory. No
+  pollution was found here in practice, but the risk shape is identical to
+  `DEFAULT_DATA_DIR`'s, so it was closed proactively.
+- `isolated_home`: redirects `HOME`/`XDG_DATA_HOME`/`XDG_CONFIG_HOME` env vars, as explicit
+  defense-in-depth for anything that resolves a real-user path lazily at call time (e.g.
+  socialModules' own `~/.mySocial/config` lookup). Does **not** by itself fix the three
+  already-baked constants above - those are computed once at import, before any per-test
+  monkeypatch can run.
+- `guard_real_data_directories_untouched`: snapshots `(mtime_ns, size)` for every file under
+  the real (unredirected, computed once at collection time) data/txt directories before and
+  after each test, failing loudly on any change - a safety net behind the isolation fixtures
+  for any code path they miss. mtime alone was tried first and found to miss a same-tick,
+  same-size-window content rewrite on this filesystem; size was added to the snapshot to catch
+  it (verified empirically, not just in theory).
+- `guard_no_real_network_connections`: blocks any non-loopback `socket.connect()` during a
+  test, so a test that forgot to mock an API client fails immediately instead of reaching (or
+  hanging trying to reach) a real Calendar/IMAP/Gmail/LLM endpoint. Loopback stays allowed.
+
+**Pollution audit.** Direct inspection of the real directories (not a script - read-only
+`stat`/`find`), reported and left untouched:
+- `~/.local/share/manage-agenda/handled_mail_ids.json` - confirmed polluted (§8), last written
+  before `isolated_data_dir` existed.
+- `~/.local/share/manage-agenda/event_keys.json` - present, but **no reference to it exists
+  anywhere in the current codebase** (`grep` found zero matches in `manage_agenda/` or
+  `tests/`) - an artifact of an older version of the tool, not of this redesign's work, and
+  inert regardless.
+- `~/Documents/txt/log/` - confirmed polluted, and **continued to be polluted after**
+  `isolated_data_dir` (§8) landed, since that fixture never covered `DEFAULT_DATA_DIR` (see
+  above) - only closed by `isolated_msg_txt_dir` in this round. Directory names in there
+  literally contain unconfigured mocks' reprs (e.g.
+  `log/<MagicMock name='mock.model_name' id='...'>/`), an unambiguous test-pollution signature.
+- `~/.config/manage-agenda/` (OAuth credentials / `config.yaml`) - empty, no evidence of
+  pollution, but see `isolated_config_dir` above for why it was still closed proactively.
+- `~/.mySocial/` (socialModules' own real account config/credentials) - no files newer than
+  the repository itself; no evidence any test read or wrote real account configuration.
+
+**Read-only diagnostic script**, `scripts/diagnose_ledger.py`: classifies every tracked ledger
+ref via `events.get()` (`active`/`cancelled`/`not_found`/`error`), and cross-references every
+ledger identity/calendar_id/event_id against string literals collected (via `ast`, not a naive
+text search) from the test suite, reporting a `high`/`medium`/`low` confidence per match -
+`low` explicitly for values that are also legitimate real-world identifiers (`primary`,
+`INBOX`), so a match there is never read as a reliable pollution signal on its own. Makes only
+`events.get()` calls (no insert/patch/delete) and writes nothing but its own optional report
+file. Not run by the assistant.

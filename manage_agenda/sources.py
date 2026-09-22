@@ -39,7 +39,14 @@ class Args:
     rule: str | None = None
     model: str | None = None
     reconfigure: bool = False
-    dry_run: bool = False
+    # Named "_ledger", not bare "dry_run": it only covers reconcile/migrate/purge (the
+    # ledger-writing calls in process_email_cli), never Calendar publish, mailbox marking, or
+    # remember_handled_mail - a flag literally named "dry_run" was reviewed as misleading
+    # about that scope (see docs/investigation-limite1.md §9), so it was renamed rather than
+    # widened - widening it correctly would touch publish/marking code across multiple
+    # functions, each a new place to miss a spot, for a request that asked for the simpler
+    # option.
+    dry_run_ledger: bool = False
 
 
 def get_add_sources(rules=None):
@@ -790,9 +797,9 @@ def purge_expired_ledger_entries(
     `dry_run=True` computes exactly what a real call would (the returned count is accurate
     either way) but never calls `_save_state` - nothing is dropped and no entry is stamped
     with a grace-pass `recorded_at`. Purging is the one truly destructive step of the three
-    `process_email_cli` runs in sequence (reconcile, migrate, purge) - a `--dry-run` pass that
-    left this one live would silently delete real ledger entries under a flag whose entire
-    point is "touch nothing".
+    `process_email_cli` runs in sequence (reconcile, migrate, purge) - a `--dry-run-ledger`
+    pass that left this one live would silently delete real ledger entries under a flag whose
+    entire point is "touch nothing".
 
     Returns the number of entries that were (or, dry_run only, would be) purged.
     """
@@ -1919,10 +1926,11 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         print(t("sources.no_message_read_fix_calendar"))
         return False
 
-    # --dry-run (args.dry_run) is scoped to reconcile/migrate/purge only - the ledger-writing
-    # calls below - never Calendar publish, mailbox marking, or remember_handled_mail;
-    # scanning/extraction/publishing still run normally under it.
-    dry_run = bool(getattr(args, "dry_run", False))
+    # --dry-run-ledger (args.dry_run_ledger) covers reconcile/migrate/purge only - the
+    # ledger-writing calls below - never Calendar publish, mailbox marking, or
+    # remember_handled_mail; scanning/extraction/publishing still run normally under it. See
+    # the field's own docstring on Args for why it's scoped and named this way.
+    dry_run = bool(getattr(args, "dry_run_ledger", False))
 
     # reconcile_migrate_and_purge() enforces reconcile -> migrate -> purge in that fixed
     # order structurally (see its own docstring for why the order matters) - not left to this

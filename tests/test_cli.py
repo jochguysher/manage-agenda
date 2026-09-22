@@ -128,18 +128,18 @@ class TestCliCommands(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.mock_process_email_cli.assert_called_once() # Now using self.mock_process_email_cli
 
-    def test_add_dry_run_flag_reaches_process_email_cli(self):
-        result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail", "--dry-run"])
+    def test_add_dry_run_ledger_flag_reaches_process_email_cli(self):
+        result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail", "--dry-run-ledger"])
         self.assertEqual(result.exit_code, 0)
         self.mock_process_email_cli.assert_called_once()
         called_args = self.mock_process_email_cli.call_args.args[0]
-        self.assertTrue(called_args.dry_run)
+        self.assertTrue(called_args.dry_run_ledger)
 
-    def test_add_without_dry_run_flag_defaults_to_false(self):
+    def test_add_without_dry_run_ledger_flag_defaults_to_false(self):
         result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])
         self.assertEqual(result.exit_code, 0)
         called_args = self.mock_process_email_cli.call_args.args[0]
-        self.assertFalse(called_args.dry_run)
+        self.assertFalse(called_args.dry_run_ledger)
 
     def test_add_no_posts(self):
         result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])

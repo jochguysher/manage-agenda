@@ -158,15 +158,16 @@ evaluate.help = t("cli.evaluate.help")
     help=t("cli.add.reconfigure_help"),
 )
 @click.option(
-    "--dry-run",
-    "dry_run",
+    "--dry-run-ledger",
+    "dry_run_ledger",
     is_flag=True,
     default=False,
-    help=t("cli.add.dry_run_help"),
+    help=t("cli.add.dry_run_ledger_help"),
 )
 @click.pass_context
 def add(
-    ctx, interactive, source, ai, model, force_refresh, destination, output, rule, reconfigure, dry_run
+    ctx, interactive, source, ai, model, force_refresh, destination, output, rule, reconfigure,
+    dry_run_ledger,
 ):
     verbose = ctx.obj["VERBOSE"]
     args = Args(
@@ -182,7 +183,7 @@ def add(
         force_refresh=force_refresh,
         rule=rule,
         reconfigure=reconfigure,
-        dry_run=dry_run,
+        dry_run_ledger=dry_run_ledger,
     )
 
     add_events_cli(args)

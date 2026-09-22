@@ -80,16 +80,19 @@ TRANSLATIONS = {
         "en": "Reopen the interactive setup for provider, model, and calendar, and save the result",
         "fr": "Rouvre l'assistant interactif pour le fournisseur, le modèle et le calendrier, et sauvegarde le résultat",
     },
-    "cli.add.dry_run_help": {
+    "cli.add.dry_run_ledger_help": {
         "en": (
             "Preview deleted-event reconciliation, legacy-event migration, and ledger "
-            "purging without writing anything (scanning/extraction/publishing still run "
-            "normally)"
+            "purging without writing anything (scoped to the ledger only - scanning/"
+            "extraction/publishing/mailbox marking still run normally, see the docs before "
+            "assuming this means nothing at all is written)"
         ),
         "fr": (
             "Prévisualise la réconciliation des événements supprimés, la migration des "
-            "événements existants et la purge du registre sans rien écrire (l'analyse, "
-            "l'extraction et la publication s'exécutent normalement)"
+            "événements existants et la purge du registre sans rien écrire (limité au "
+            "registre - l'analyse, l'extraction, la publication et le marquage des messages "
+            "s'exécutent normalement, voir la documentation avant de supposer que rien du "
+            "tout n'est écrit)"
         ),
     },
     "cli.auth.help": {
