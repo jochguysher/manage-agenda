@@ -330,3 +330,50 @@ message the old mechanism already relied on staying put). This must complete bef
 exclusion criteria is used, or those messages would be picked up as new by the newly-added
 `UNKEYWORD` search. A dedicated test asserts no already-handled message is reprocessed
 immediately after this migration step runs.
+
+**Status: documented, not yet implemented.** This is a mailbox-side migration (for an
+operator explicitly changing `processed_marker`), distinct from the Calendar-side migration
+in §7, and remains future work - nothing in the shipped code applies a keyword retroactively
+on a marker-mode switch yet.
+
+## 7. Migration — extendedProperties and event_end on pre-existing Calendar events, shipped
+
+`migrate_legacy_ledger_entries()` (called from `process_email_cli`, between reconcile and
+purge) patches `extendedProperties.private` onto Calendar events created before deterministic
+ids/origin stamping existed, and backfills each ledger ref's `event_end` from the same fetch.
+Per the original migration requirements: idempotent, never changes an event's own id, and
+never a full-ledger sweep every run.
+
+- **Idempotent, per-ref**: each ref gains `"migrated": true` once resolved (success or
+  confirmed-gone); a ref left un-migrated after an ambiguous API error is retried on a future
+  run, the same conservative pattern used throughout this codebase (see
+  `_get_event_if_present`).
+- **Never changes an event's own id**: only `events.patch()` is used, never delete+recreate;
+  the patch body never includes an `id` field.
+- **Scoped to the sync bootstrap window** (`_is_within_bootstrap_window`, the same 90-day
+  window `reconcile_handled_events`'s own bootstrap diff trusts): an older, never-migrated ref
+  is left alone - it is either already purged or close to it regardless of whether it ever
+  gets the origin stamp, so spending an API call on it buys nothing for the "state bounded by
+  current activity" goal.
+- **Existing `extendedProperties.private` keys are preserved**: the patch body is built by
+  reading the event's current `private` map (via the same `events.get()` used to check it)
+  and adding the new keys to a copy of it, rather than sending only the new keys - whether
+  Calendar's PATCH merges `extendedProperties.private` at the individual-key level or replaces
+  the whole map is undocumented and unverified (no probe covers it), so this doesn't rely on
+  either assumption.
+- **`event_end` backfill source, as actually implemented**: the live event's own `end` field,
+  read from the same `events.get()` call already needed to check/patch it - **not** a
+  `_times.json` log-file fallback as originally specified. Log files are keyed by the source's
+  own per-run `post_id` (see `process_email_cli`'s `metadata_extractor`), which is never
+  persisted in the ledger (only `mail_identity()` is, a different value) - there is no
+  reliable way to find the right log file from a ledger entry alone, so that fallback was not
+  built. A gone event (404/410) or one missing an `end` field simply leaves `event_end` absent
+  on the ref, which `purge_expired_ledger_entries()` already handles safely via the shorter
+  `no_event`-style margin from `recorded_at` - never a crash or incorrect data, only a
+  possibly shorter retention than a still-live event would have earned.
+- **Generation**: already correctly defaulted to 0 for any entry with no `generation` key (see
+  `_load_state`, landed in an earlier commit) - no separate migration logic needed for it.
+- **Messages already moved to Trash under the old `_delete_email` behavior**: out of scope for
+  this migration - it only touches Calendar events and the local ledger, never mailbox state.
+  A message already in Trash under the pre-redesign behavior is unaffected either way; nothing
+  attempts to recover it, and the ledger continues to correctly treat it as handled.

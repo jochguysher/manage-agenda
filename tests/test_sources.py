@@ -215,6 +215,39 @@ class TestProcessEmailCli(unittest.TestCase):
         self.assertEqual(call_args[3], "keyword")  # imap_marker_mode
         self.assertEqual(call_args[4], "$AgendaDone")  # imap_marker_value
 
+    @patch("manage_agenda.sources.purge_expired_ledger_entries")
+    @patch("manage_agenda.sources.migrate_legacy_ledger_entries")
+    @patch("manage_agenda.sources.reconcile_handled_events")
+    @patch("manage_agenda.sources.moduleRules")
+    def test_process_email_cli_runs_reconcile_then_migrate_then_purge_in_order(
+        self, mock_module_rules, mock_reconcile, mock_migrate, mock_purge
+    ):
+        """migrate must run between reconcile and purge: it backfills event_end on legacy
+        refs, which purge needs to give them their full margin instead of the shorter
+        no_event-style fallback."""
+        args = self.Args(
+            interactive=False, delete=None, source="gemini", verbose=False, destination="", text=""
+        )
+        mock_api_src = MagicMock()
+        mock_api_src.service = "gmail"
+        rules = mock_module_rules.from_config.return_value
+        rules.more = {"mail-account": {}}
+        rules.readConfigSrc.return_value = mock_api_src
+        mock_reconcile.return_value = set()
+
+        order = []
+        mock_reconcile.side_effect = lambda *a, **k: order.append("reconcile") or set()
+        mock_migrate.side_effect = lambda *a, **k: order.append("migrate") or 0
+        mock_purge.side_effect = lambda *a, **k: order.append("purge") or 0
+
+        with (
+            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources._get_emails_from_folder", return_value=None),
+        ):
+            process_email_cli(args, MagicMock(), selected_source="mail-account")
+
+        self.assertEqual(order, ["reconcile", "migrate", "purge"])
+
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
     @patch("manage_agenda.sources.moduleRules")

@@ -613,6 +613,62 @@ def _get_event_if_present(client, calendar_id, event_id):
         raise
 
 
+def migrate_one_legacy_event(client, calendar_id, event_id, identity, generation, event_index):
+    """Patch extendedProperties.private onto one pre-existing Calendar event (created before
+    deterministic ids/origin stamping existed - see docs/investigation-limite1.md migration
+    requirements), and read back event_end from the same fetch. Never touches the event's own
+    id - patch() cannot change it, and this function's body never includes one.
+
+    The existing `private` map is fetched and re-sent whole (existing keys plus the new ones),
+    rather than a patch body with only the new keys: whether Calendar's PATCH merges
+    extendedProperties.private at the individual-key level or replaces the whole map is
+    undocumented and unverified (no probe covers it) - sending the complete desired end state
+    is correct either way, so this deliberately does not rely on an assumption about it.
+
+    Returns (status, event_end):
+    - ("migrated", event_end): patched successfully; event_end from the live event (may be
+      None if the event has neither `end.dateTime` nor `end.date` - unusual, not an error).
+    - ("already_migrated", event_end): the event already carries origin=manage-agenda (e.g. a
+      previous partial migration run) - no patch call made, event_end still read from the
+      get() that was needed anyway to check.
+    - ("gone", None): the event is confirmed deleted (404/410) - nothing to patch or read;
+      logged and treated as a normal, non-fatal, non-retried outcome.
+    - ("retry", None): an ambiguous error (not a confirmed 404/410) on either call - left
+      un-migrated so a future run tries again, the same conservative pattern
+      _get_event_if_present uses for the same reason (proceeding on an unconfirmed answer
+      risks acting on stale or wrong data).
+    """
+    try:
+        existing = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+    except googleapiclient.errors.HttpError as error:
+        status_code = getattr(getattr(error, "resp", None), "status", None)
+        if status_code in (404, 410):
+            logging.info(f"migrate: {calendar_id}/{event_id} is gone - nothing to patch.")
+            return "gone", None
+        logging.warning(f"migrate: could not fetch {calendar_id}/{event_id}: {error}")
+        return "retry", None
+    except Exception as error:
+        logging.warning(f"migrate: could not fetch {calendar_id}/{event_id}: {error}")
+        return "retry", None
+
+    if not isinstance(existing, dict):
+        return "retry", None
+
+    event_end = _event_end_iso(existing)
+    private = dict((existing.get("extendedProperties") or {}).get("private") or {})
+    if private.get("origin") == "manage-agenda":
+        return "already_migrated", event_end
+
+    body = {"extendedProperties": {"private": private}}
+    _stamp_reconstructible_properties(body, identity, generation, event_index)
+    try:
+        client.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
+    except Exception as error:
+        logging.warning(f"migrate: could not patch {calendar_id}/{event_id}: {error}")
+        return "retry", None
+    return "migrated", event_end
+
+
 def calendar_sync_state_file():
     """Per-calendar Calendar API sync tokens, used to detect deleted events incrementally."""
     from manage_agenda.config import DATA_DIR

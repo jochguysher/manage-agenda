@@ -476,6 +476,82 @@ def reconcile_handled_events(args, path=None, sync_state_path=None, on_user_dele
     return still_handled
 
 
+def migrate_legacy_ledger_entries(args, path=None):
+    """One-time-per-ref migration: patch extendedProperties.private onto Calendar events
+    created before deterministic ids/origin stamping existed, and backfill each ref's
+    event_end while at it (free - the same events.get() call already fetches it) - see
+    docs/investigation-limite1.md migration requirements. Never touches an event's own id -
+    see migrate_one_legacy_event().
+
+    Idempotent per ref: a successfully-migrated or confirmed-gone ref is marked
+    "migrated": true and never touched again on a later call; a ref left un-migrated (an
+    ambiguous API error) is retried on a future run, matching the conservative pattern used
+    throughout this module.
+
+    Scoped to refs within the sync bootstrap window (same one reconcile's own bootstrap diff
+    trusts, via _is_within_bootstrap_window) - a ref older than that is left alone: it is
+    either already purged or close to it regardless of whether it ever gets the origin stamp,
+    so spending an API call on it buys nothing for the "state bounded by current activity"
+    goal this whole redesign exists for.
+
+    event_end backfill source, as actually implemented: the live event's own `end` field via
+    events.get() (needed anyway to check/patch it) - not a `_times.json` log-file fallback.
+    Log files are keyed by the source's own per-run post_id (see process_email_cli's/
+    process_txt_cli's metadata_extractor), which is never persisted in the ledger (only
+    mail_identity() is, a different value) - there is no reliable way to find the right log
+    file from a ledger entry alone. Leaving event_end absent for a gone event is the
+    documented, safe fallback: purge_expired_ledger_entries() already handles a missing
+    event_end via the shorter no_event-style margin from recorded_at - never a crash or wrong
+    data, just a possibly-shorter retention than a live event would have earned.
+
+    Returns the number of refs newly migrated or confirmed already-migrated this call.
+    """
+    path = Path(path) if path else handled_mail_file()
+    state = _load_state(path)
+    api_dst = getattr(args, "calendar_api", None)
+    client = api_dst.getClient() if api_dst is not None else None
+    if client is None:
+        return 0
+
+    from manage_agenda.extraction import _is_within_bootstrap_window, migrate_one_legacy_event
+
+    migrated_count = 0
+    changed = False
+    for identity, entry in state.items():
+        # Only "created" entries have live refs worth stamping. Deliberately excludes
+        # "cancelled_events" refs on an on_user_delete="ignore" entry (status "no_event") -
+        # those events are cancelled on Calendar, so there is nothing to stamp, and
+        # extendedProperties is not guaranteed to survive on a cancelled event anyway (see
+        # §3 correction 2 in the investigation doc).
+        if entry.get("status") != "created":
+            continue
+        events = entry.get("events") or []
+        generation = entry.get("generation", 0)
+        for index, ref in enumerate(events):
+            if not isinstance(ref, dict) or ref.get("migrated"):
+                continue
+            if not _is_within_bootstrap_window(ref.get("recorded_at")):
+                continue
+            calendar_id, event_id = ref.get("calendar_id"), ref.get("event_id")
+            if not calendar_id or not event_id:
+                continue
+            status, event_end = migrate_one_legacy_event(
+                client, calendar_id, event_id, identity, generation, index
+            )
+            if status == "retry":
+                continue
+            ref["migrated"] = True
+            if event_end and not ref.get("event_end"):
+                ref["event_end"] = event_end
+            changed = True
+            if status in ("migrated", "already_migrated"):
+                migrated_count += 1
+
+    if changed:
+        _save_state(path, state)
+    return migrated_count
+
+
 LEDGER_EVENT_END_MARGIN_DAYS = 30
 LEDGER_NO_EVENT_MARGIN_DAYS = 7
 
@@ -1625,9 +1701,13 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     # reconcile ever sees it, silently turning "the event was deleted" into "this message was
     # never seen", defeating on_user_delete entirely for anything past its purge margin too.
     handled = reconcile_handled_events(args)
+    # Migrate BEFORE purge too: it backfills event_end on legacy refs that predate that field,
+    # which purge_expired_ledger_entries() needs to give them their full margin instead of the
+    # shorter no_event-style fallback it would otherwise fall back to.
+    migrate_legacy_ledger_entries(args)
     purge_expired_ledger_entries()
-    # Loaded once, after reconcile and purge - metadata_extractor below does one dict lookup
-    # per message instead of re-reading the ledger file each time, and is also where a
+    # Loaded once, after reconcile/migrate/purge - metadata_extractor below does one dict
+    # lookup per message instead of re-reading the ledger file each time, and is also where a
     # pending_requeue entry (identity intentionally left out of `handled` above) is found for
     # the un-marking step below.
     handled_state = load_handled_mail_state()
