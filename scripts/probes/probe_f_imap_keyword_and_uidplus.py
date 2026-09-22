@@ -151,7 +151,8 @@ def check_hierarchy_separator_and_special_use(client, capabilities, folder):
         print("=> The design must REFUSE to scan this folder (it aliases the whole mailbox).")
 
 
-def check_move_or_copy_and_safe_deletion(client, capabilities, folder):
+def check_move_or_copy_and_safe_deletion(client, capabilities, folder, test_folder=TEST_FOLDER):
+    TEST_FOLDER = test_folder  # noqa: N806 - some servers only allow folders under a prefix, see --test-folder
     print(f"\n--- (5) {'MOVE' if capabilities.has_move else 'COPY + safe delete'} from {folder!r} ---")
     typ, _data = client.select(folder)
     if typ != "OK":
@@ -243,13 +244,22 @@ def main():
     parser = base_parser(__doc__)
     parser.add_argument("--account", required=True, help="socialModules account name. No default.")
     parser.add_argument("--folder", required=True, help="IMAP folder/mailbox to test in. No default.")
+    parser.add_argument(
+        "--test-folder",
+        default=TEST_FOLDER,
+        help=(
+            f"Throwaway folder the message is moved/copied to and back (default: {TEST_FOLDER}). "
+            "Some servers refuse top-level CREATE and only allow folders under a prefix "
+            "(e.g. 'Folders/AgendaProbeTestFolder'): read LIST \"\" \"*\" first."
+        ),
+    )
     args = parser.parse_args()
 
     if not confirm_or_dry_run(
         args.yes,
         f"On account {args.account!r}, folder {args.folder!r}: read CAPABILITY, test a keyword "
         f"STORE, read the hierarchy separator, check for \\All, and move/copy one message to a "
-        f"throwaway folder ({TEST_FOLDER}) and back.",
+        f"throwaway folder ({args.test_folder}) and back.",
     ):
         sys.exit(0)
 
@@ -263,7 +273,7 @@ def main():
     log_capabilities(capabilities)
     check_keyword(client, args.folder)
     check_hierarchy_separator_and_special_use(client, capabilities, args.folder)
-    check_move_or_copy_and_safe_deletion(client, capabilities, args.folder)
+    check_move_or_copy_and_safe_deletion(client, capabilities, args.folder, args.test_folder)
 
     print(
         f"\nVerdict to record for account {args.account!r}: keyword accepted+persisted? "

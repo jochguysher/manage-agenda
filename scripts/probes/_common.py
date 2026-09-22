@@ -22,13 +22,19 @@ def connect_calendar(calendar_id):
 
 
 def connect_imap(account_name):
-    """Read the named IMAP/Gmail account from socialModules config and return its api_src."""
+    """Read the named IMAP/Gmail account from socialModules config and return its api_src.
+
+    socialModules keys `rules.more` by rule tuple, e.g. ('imap', 'set', 'acme-auto', 'posts');
+    `account_name` is the human name from the command line - matched against the tuple's
+    third element (the config section) or the `section_name` in the account's details."""
     rules = moduleRules.from_config()
-    source_details = rules.more.get(account_name, {})
-    if not source_details and account_name not in (rules.more or {}):
-        print(f"No configured account named {account_name!r}. Check your socialModules config.")
-        sys.exit(1)
-    return rules.readConfigSrc("", account_name, source_details)
+    for src, details in (rules.more or {}).items():
+        names = {src} if isinstance(src, str) else {src[2] if len(src) > 2 else None}
+        names.add((details or {}).get("section_name"))
+        if account_name in names:
+            return rules.readConfigSrc("", src, details or {})
+    print(f"No configured account named {account_name!r}. Check your socialModules config.")
+    sys.exit(1)
 
 
 def base_parser(description):
