@@ -59,6 +59,7 @@ TEST_KEYWORD = "$AgendaProbeTest"
 TEST_FOLDER = "AgendaProbeTestFolder"
 
 _COPYUID_RE = re.compile(rb"\[COPYUID (\d+) (\S+) (\S+)\]")
+_COPYUID_UNTAGGED_RE = re.compile(rb"^\s*(\d+) (\S+) (\S+)\s*$")  # imaplib's untagged form
 
 
 @dataclass
@@ -169,6 +170,10 @@ def check_move_or_copy_and_safe_deletion(client, capabilities, folder, test_fold
 
     client.create(TEST_FOLDER)  # ignore failure if it already exists
 
+    # RFC 6851 puts MOVE's COPYUID in an untagged `* OK [COPYUID ...]`, which imaplib files
+    # (brackets and name stripped) under untagged_responses["COPYUID"], not in the command's
+    # returned data. Drop any stale one first so only this command's code is read below.
+    client.untagged_responses.pop("COPYUID", None)
     response_lines = []
     if capabilities.has_move:
         print(f"--- UID MOVE {test_uid_text} -> {TEST_FOLDER!r} (RFC 6851 advertised) ---")
@@ -211,6 +216,13 @@ def check_move_or_copy_and_safe_deletion(client, capabilities, folder, test_fold
             match = _COPYUID_RE.search(line)
             if match:
                 break
+    untagged = client.untagged_responses.pop("COPYUID", None) or []
+    print(f"untagged_responses['COPYUID'] after the command: {untagged}")
+    for line in untagged:
+        if match:
+            break
+        if isinstance(line, bytes):
+            match = _COPYUID_UNTAGGED_RE.match(line) or _COPYUID_RE.search(line)
     if match:
         uidvalidity, src_uid, dest_uid = (part.decode() for part in match.groups())
         print(f"=> COPYUID present: uidvalidity={uidvalidity}, src_uid={src_uid}, dest_uid={dest_uid}")

@@ -1617,6 +1617,9 @@ def _combine_with_marker_exclusion(criteria, source_details):
 
 
 _COPYUID_RE = re.compile(rb"\[COPYUID (\d+) (\S+) (\S+)\]")
+# The same response code as imaplib files it under untagged_responses["COPYUID"]: its
+# Response_code match strips the brackets and the code name, leaving b"uidvalidity src dest".
+_COPYUID_UNTAGGED_RE = re.compile(rb"^\s*(\d+) (\S+) (\S+)\s*$")
 
 
 def _imap_uid_for_sequence(client, sequence):
@@ -1635,12 +1638,51 @@ def _imap_uid_for_sequence(client, sequence):
 
 def _parse_copyuid(response_lines):
     """{"uidvalidity": ..., "uid": ...} from a `[COPYUID uidvalidity src-uid dest-uid]`
-    response code (RFC 4315), or None if absent (no UIDPLUS, or the server didn't include
-    one)."""
+    response code (RFC 4315) in a command's tagged response data, or None if absent (no
+    UIDPLUS, or the server didn't include one). See _copyuid_locator for where the code
+    actually arrives on a MOVE."""
     for line in response_lines or []:
         if not isinstance(line, bytes):
             continue
         match = _COPYUID_RE.search(line)
+        if match:
+            uidvalidity, _src_uid, dest_uid = (part.decode() for part in match.groups())
+            return {"uidvalidity": uidvalidity, "uid": dest_uid}
+    return None
+
+
+def _forget_untagged_copyuid(client):
+    """Drop any COPYUID imaplib still holds from an earlier command on this connection: its
+    untagged_responses accumulate until the next select(), so without this a stale code from
+    a previous COPY/MOVE could be attributed to the one about to run."""
+    responses = getattr(client, "untagged_responses", None)
+    if isinstance(responses, dict):
+        responses.pop("COPYUID", None)
+
+
+def _copyuid_locator(client, tagged_data):
+    """{"uidvalidity", "uid"} from the COPYUID response code of the COPY/MOVE that just ran,
+    or None. Read from both places it can arrive:
+
+    - the tagged completion (`A5 OK [COPYUID ...] Done`), which UID COPY uses (RFC 4315) and
+      which imaplib returns as the command's data - _parse_copyuid;
+    - an untagged `* OK [COPYUID ...]` sent before the tagged OK, which is where RFC 6851
+      puts it for UID MOVE (and which some servers use for COPY too). imaplib does not
+      return that with the command's data: its Response_code match files the code, brackets
+      and name stripped, under client.untagged_responses["COPYUID"] as
+      [b"uidvalidity src dest"]. Reading only the tagged data therefore never captured a
+      MOVE locator, and folder-mode requeue always fell back to the Message-ID search.
+    Call _forget_untagged_copyuid before the command so only this command's code is read."""
+    locator = _parse_copyuid(tagged_data)
+    if locator:
+        return locator
+    responses = getattr(client, "untagged_responses", None)
+    if not isinstance(responses, dict):
+        return None
+    for line in responses.pop("COPYUID", None) or []:
+        if not isinstance(line, bytes):
+            continue
+        match = _COPYUID_UNTAGGED_RE.match(line) or _COPYUID_RE.search(line)
         if match:
             uidvalidity, _src_uid, dest_uid = (part.decode() for part in match.groups())
             return {"uidvalidity": uidvalidity, "uid": dest_uid}
@@ -1659,7 +1701,7 @@ def _imap_move_known_uid_safely(client, capabilities, uid, dest_folder):
 
     Returns (success, locator). `locator` ({"folder": dest_folder, "uidvalidity": ...,
     "uid": ...}) is present only when the server included a COPYUID response code (requires
-    UIDPLUS).
+    UIDPLUS) - tagged or untagged, see _copyuid_locator.
 
     Does not SELECT anything - the caller is responsible for having the right folder selected
     before calling, and for re-selecting whatever it needs afterward.
@@ -1667,16 +1709,17 @@ def _imap_move_known_uid_safely(client, capabilities, uid, dest_folder):
     client.create(dest_folder)  # ignore failure if it already exists
     success = False
     locator = None
+    _forget_untagged_copyuid(client)
     if capabilities is not None and capabilities.has_move:
         typ, data = client.uid("MOVE", uid, dest_folder)
         success = typ == "OK"
         if success:
-            locator = _parse_copyuid(data)
+            locator = _copyuid_locator(client, data)
     else:
         typ, data = client.uid("COPY", uid, dest_folder)
         if typ == "OK":
             success = True
-            locator = _parse_copyuid(data)
+            locator = _copyuid_locator(client, data)
             if capabilities is not None and capabilities.has_uidplus:
                 client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
                 client.uid("EXPUNGE", uid)

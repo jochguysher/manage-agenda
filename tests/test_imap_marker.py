@@ -250,6 +250,67 @@ class TestImapMoveToFolderSafely(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(locator, {"folder": "Archive", "uidvalidity": "42", "uid": "999"})
 
+    def _client_whose_move_answers_with_an_untagged_copyuid(self, before=None):
+        """A server following RFC 6851: `* OK [COPYUID 42 777 999]` BEFORE the tagged OK,
+        which imaplib keeps out of the command's data and files, brackets and name stripped,
+        under untagged_responses["COPYUID"]. `before` seeds a stale code from an earlier
+        command on the same connection (imaplib only flushes them on select())."""
+        api_src, client = _client_with_uid()
+        client.untagged_responses = {"COPYUID": [before]} if before else {}
+
+        def uid(command, *args):
+            if command == "MOVE":
+                client.untagged_responses.setdefault("COPYUID", []).append(b"42 777 999")
+                return "OK", [None]  # the tagged data carries no COPYUID
+            return "OK", [b""]
+
+        client.uid.side_effect = uid
+        return api_src, client
+
+    def test_captures_the_copyuid_a_move_sends_untagged_per_rfc_6851(self):
+        api_src, client = self._client_whose_move_answers_with_an_untagged_copyuid()
+        capabilities = ImapCapabilities(
+            raw=["MOVE", "UIDPLUS"], has_uidplus=True, has_move=True, has_special_use=False
+        )
+
+        result, locator = _imap_move_to_folder_safely(api_src, capabilities, "INBOX", "1", "Archive")
+
+        self.assertTrue(result)
+        self.assertEqual(locator, {"folder": "Archive", "uidvalidity": "42", "uid": "999"})
+        # Consumed: the next command on this connection must not see this code again.
+        self.assertNotIn("COPYUID", client.untagged_responses)
+
+    def test_a_stale_untagged_copyuid_from_an_earlier_command_is_not_attributed_to_this_move(self):
+        api_src, client = _client_with_uid()
+        client.untagged_responses = {"COPYUID": [b"7 1 2"]}  # left over from an earlier COPY
+        client.uid.return_value = ("OK", [None])  # this MOVE answers with no COPYUID at all
+        capabilities = ImapCapabilities(
+            raw=["MOVE", "UIDPLUS"], has_uidplus=True, has_move=True, has_special_use=False
+        )
+
+        result, locator = _imap_move_to_folder_safely(api_src, capabilities, "INBOX", "1", "Archive")
+
+        self.assertTrue(result)
+        self.assertIsNone(locator)
+
+    def test_the_untagged_copyuid_is_read_for_a_copy_too(self):
+        api_src, client = _client_with_uid()
+        client.untagged_responses = {}
+
+        def uid(command, *args):
+            if command == "COPY":
+                client.untagged_responses["COPYUID"] = [b"42 777 999"]
+                return "OK", [None]
+            return "OK", [b""]
+
+        client.uid.side_effect = uid
+        capabilities = ImapCapabilities(raw=["UIDPLUS"], has_uidplus=True, has_move=False, has_special_use=False)
+
+        result, locator = _imap_move_to_folder_safely(api_src, capabilities, "INBOX", "1", "Archive")
+
+        self.assertTrue(result)
+        self.assertEqual(locator, {"folder": "Archive", "uidvalidity": "42", "uid": "999"})
+
     def test_reselects_source_folder_after_a_move(self):
         """The scan loop expects to still be working against source_folder afterward, not
         whatever this move last SELECTed."""

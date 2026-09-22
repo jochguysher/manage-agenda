@@ -863,6 +863,21 @@ looked that list up in `rules.more`, which fails on an unhashable key, so every 
 first saved choice crashed. The saved value is now turned back into a tuple. Both
 `migrate-ledger` and the diagnostic resolve the account through this saved value.
 
+**COPYUID was never captured on a MOVE.** Probe (f), run on 2026-09-22 against the IMAP
+server behind `acme-auto`/`acme-review` (UIDPLUS and MOVE advertised), reported "no COPYUID"
+after `UID MOVE`. The server was not at fault: RFC 6851 sends MOVE's COPYUID in an untagged
+`* OK [COPYUID ...]` before the tagged OK, and imaplib does not return that with the command's
+data. Its `Response_code` match files the code, brackets and name stripped, under
+`client.untagged_responses["COPYUID"]` as `[b"uidvalidity src dest"]`, where it accumulates
+until the next `select()`. `_imap_move_known_uid_safely` only parsed the tagged data
+(`_parse_copyuid`), so the folder-mode locator was never recorded and requeue always fell back
+to the Message-ID search. Now (`_copyuid_locator`) the tagged data is read first, then the
+untagged entry, which is dropped before the command runs so a stale code from an earlier
+COPY/MOVE on the same connection is never attributed to this one. Tests: a MOVE whose COPYUID
+only arrives untagged yields the locator and consumes the entry; a stale entry with a MOVE
+that sends none yields no locator; the untagged form is read for COPY too. The probe reads
+the same place, so its "no COPYUID" verdict from that run is superseded, not re-run.
+
 **Sync tokens are per (calendar account, calendar id).** `calendar_sync_tokens.json` is now
 `{"accounts": {account_key: {calendar_id: token}}}`. The account is read from the connection
 that makes the call (`api_dst.src`, through `connections.calendar_account_key()`, the same
