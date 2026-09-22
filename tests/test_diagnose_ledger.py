@@ -291,6 +291,36 @@ class TestConnectCalendar:
         rules.readConfigSrc.assert_not_called()
 
 
+class TestMainOutput:
+    def test_o_writes_the_csv_to_the_file_and_nothing_to_stdout(self, tmp_path, monkeypatch, capsys):
+        """-o exists so the report never shares stdout with whatever socialModules prints
+        there (its "Checking rules" banner lands ahead of the header in a redirection)."""
+        ledger = tmp_path / "ledger.json"
+        ledger.write_text(json.dumps({"messages": {"msg-1": {"events": [], "status": "legacy"}}}), encoding="utf-8")
+        report = tmp_path / "out" / "rapport.csv"
+        report.parent.mkdir()
+        client = MagicMock()
+        client.calendarList.return_value.list.return_value.execute.return_value = {"items": [{"id": "cal-1"}]}
+        api = MagicMock(src=("gcalendar", "set", "me@example.com"))
+        api.getClient.return_value = client
+        monkeypatch.setattr(diagnose_ledger, "connect_calendar", lambda interactive, rules: api)
+        rules = MagicMock()
+        rules.selectRule.return_value = [("gcalendar", "set", "me@example.com")]
+        monkeypatch.setattr("socialModules.moduleRules.moduleRules.from_config", classmethod(lambda cls: rules))
+        monkeypatch.setattr(
+            sys, "argv", ["diagnose_ledger.py", "--ledger", str(ledger), "--tests-dir", str(tmp_path), "-o", str(report)]
+        )
+
+        diagnose_ledger.main()
+
+        lines = report.read_text(encoding="utf-8").splitlines()
+        assert lines[0].startswith("identity,status,")
+        assert lines[1].startswith("msg-1,legacy,")
+        captured = capsys.readouterr()
+        assert "identity,status" not in captured.out and "msg-1" not in captured.out
+        assert "Wrote 1 rows" in captured.err
+
+
 class TestMainExitCodes:
     def test_an_unreadable_calendar_list_exits_with_its_code(self, tmp_path, monkeypatch):
         ledger = tmp_path / "ledger.json"

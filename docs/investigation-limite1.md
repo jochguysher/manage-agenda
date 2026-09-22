@@ -815,10 +815,12 @@ deleted event, almost at once.
    `systemctl --user list-timers --all`, `which -a manage-agenda`). With the editable install,
    they run the working tree, not a frozen release.
 2. Back up `~/.local/share/manage-agenda`, `~/.config/manage-agenda` and `MSG_TXT_DIR/log`.
-3. `scripts/diagnose_ledger.py` (the same account rule as the two commands, through
-   `select_calendar_account`: the saved calendar account by default, else the only
+3. `scripts/diagnose_ledger.py -o rapport.csv` (the same account rule as the two commands,
+   through `select_calendar_account`: the saved calendar account by default, else the only
    configured one, a stop asking for `-i` with several; `-i` always offers the choice and,
-   like everything this script does, changes nothing; same exit codes), then
+   like everything this script does, changes nothing; same exit codes). Use `-o`, not a
+   shell redirection: socialModules prints its "Checking rules" banner on stdout when the
+   config is read, and a redirected file would carry it ahead of the CSV header. Then
    clean up the ledger by hand. It reports `calendar_inaccessible` for refs that aren't this
    account's, without querying them. Those are **not** `not_found` and not a cleanup signal:
    rerun with `-i` for the other account. A real entry of another account never shows up as
@@ -989,7 +991,8 @@ additions only, and existing keys were preserved (§7).
   nothing on stdout, `readConfigSrc` never called), or with none
   `EXIT_NO_CALENDAR_ACCOUNT`; an unreadable calendar list exits `main()` with
   `EXIT_CALENDAR_LIST_UNREADABLE`; with an account saved, `-i` still offers the choice and
-  leaves the config file byte-identical.
+  leaves the config file byte-identical; `-o` writes the CSV to the file, header first,
+  with nothing of the report on stdout.
 - `tests/test_connections.py`: the saved rule key read back as a list still resolves.
 - Sync tokens (`tests/test_event_deletion_detection.py`, and end to end through `add` in
   `tests/test_ledger_migration_gate.py`):

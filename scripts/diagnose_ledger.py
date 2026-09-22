@@ -37,13 +37,15 @@ so this is a starting point for finding more, NOT a verdict on its own:
 Read-only with respect to application state: makes only calendarList.list() and events.get()
 calls to Calendar (never insert/patch/delete), and never writes to the ledger file or any
 other manage-agenda state (the saved calendar_account is read, never written).
-The only file this script itself writes is its own report, and only if --output is given.
+The only file this script itself writes is its own report, and only if -o/--output is given.
+Use -o rather than a shell redirection: socialModules prints a "Checking rules" banner on
+stdout when its config is read, which a redirection would put ahead of the CSV header.
 Not run by the assistant - the user runs and reviews this themselves, and decides what (if
 anything) to clean up.
 
 Usage:
     python scripts/diagnose_ledger.py [-i] [--ledger PATH] [--tests-dir PATH]
-                                       [--format csv|json] [--output PATH]
+                                       [--format csv|json] [-o PATH]
 """
 
 import argparse
@@ -231,7 +233,16 @@ def main():
         help="Choose the calendar account to diagnose. Default: the saved one `add` uses, else the only configured one.",
     )
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
-    parser.add_argument("--output", default=None, help="Output file path. Default: stdout.")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "Write the report to this file instead of stdout. Prefer it over a shell "
+            "redirection: socialModules prints its own banner on stdout at import, which "
+            "would land in a redirected file ahead of the CSV header."
+        ),
+    )
     args = parser.parse_args()
 
     ledger_path = Path(args.ledger) if args.ledger else handled_mail_file()
