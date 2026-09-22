@@ -1,5 +1,6 @@
 import pytest
 
+
 @pytest.fixture(autouse=True)
 def isolated_log_file(monkeypatch, tmp_path):
     """

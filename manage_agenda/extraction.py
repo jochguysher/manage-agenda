@@ -86,8 +86,8 @@ def extract_json(text):
 
 def get_event_from_llm(model, prompt, post_id, verbose=False):
     """Get event data from an LLM and parse its calendar JSON response."""
-    from manage_agenda.sources import print_first_lines
     from manage_agenda.exceptions import LLMError
+    from manage_agenda.sources import print_first_lines
 
     print(t("extraction.calling_llm", model=model.model_name))
     event, vcal_json = None, None
@@ -908,7 +908,6 @@ def _visits_from_occupancy(event, content_text, args, rules):
     """Choose a visit before the next occupation, inside the configured hours."""
     from manage_agenda.scheduling import (
         availability_for,
-        busy_intervals,
         plan_room_visits,
     )
 

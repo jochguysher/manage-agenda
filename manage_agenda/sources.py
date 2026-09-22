@@ -7,13 +7,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import dateparser
 from socialModules import moduleHtml
+from socialModules.configMod import select_from_list
 from socialModules.moduleContent import display_posts
 from socialModules.moduleRules import moduleRules
-from socialModules.configMod import CONFIGDIR, select_from_list
 
 from manage_agenda.base import write_file
 from manage_agenda.config import config
@@ -29,16 +28,16 @@ class Args:
     """Arguments container for CLI commands."""
 
     interactive: bool = False
-    delete: Optional[bool] = None
-    source: Optional[str] = None
-    ai: Optional[str] = None
+    delete: bool | None = None
+    source: str | None = None
+    ai: str | None = None
     verbose: bool = False
-    destination: Optional[str] = None
-    text: Optional[str] = None
+    destination: str | None = None
+    text: str | None = None
     output: str = "calendar"
     force_refresh: bool = False
-    rule: Optional[str] = None
-    model: Optional[str] = None
+    rule: str | None = None
+    model: str | None = None
     reconfigure: bool = False
     dry_run: bool = False
 

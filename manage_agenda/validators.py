@@ -5,7 +5,7 @@ Validation utilities for manage-agenda.
 import logging
 import re
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import pytz
 
@@ -131,7 +131,7 @@ def validate_event_dict(event: dict[str, Any]) -> list[str]:
     return errors
 
 
-def validate_llm_response(response: str) -> Optional[dict[str, Any]]:
+def validate_llm_response(response: str) -> dict[str, Any] | None:
     """Validate and parse LLM JSON response.
 
     Args:
@@ -192,7 +192,7 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
-def validate_api_key(api_key: Optional[str], service: str) -> bool:
+def validate_api_key(api_key: str | None, service: str) -> bool:
     """Validate API key format.
 
     Args:

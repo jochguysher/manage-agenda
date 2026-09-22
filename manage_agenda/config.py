@@ -6,7 +6,6 @@ import datetime
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 # Base directories
 BASE_DIR = Path(__file__).parent.parent
@@ -63,8 +62,8 @@ class Config:
     ON_USER_DELETE: str = os.getenv("ON_USER_DELETE", "ignore")
 
     # API Keys
-    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
-    MISTRAL_API_KEY: Optional[str] = os.getenv("MISTRAL_API_KEY")
+    GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
+    MISTRAL_API_KEY: str | None = os.getenv("MISTRAL_API_KEY")
 
     # Ollama
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -106,7 +105,7 @@ class Config:
         return True
 
     @classmethod
-    def get_api_key(cls, service: str) -> Optional[str]:
+    def get_api_key(cls, service: str) -> str | None:
         """Get API key for a specific service with validation."""
         key_map = {
             "gemini": cls.GEMINI_API_KEY,

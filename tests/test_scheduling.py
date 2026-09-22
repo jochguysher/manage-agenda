@@ -13,7 +13,6 @@ from manage_agenda.scheduling import (
     propose_visit,
 )
 
-
 TODAY = datetime.date(2026, 9, 21)
 
 

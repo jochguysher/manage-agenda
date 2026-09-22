@@ -15,7 +15,6 @@ import sys
 import time
 
 import googleapiclient.errors
-
 from _common import base_parser, confirm_or_dry_run, connect_calendar
 
 # base32hex: lowercase a-v and 0-9 only, 5-1024 chars (Google's documented constraint).

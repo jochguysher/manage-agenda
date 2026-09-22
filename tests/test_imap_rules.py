@@ -5,14 +5,14 @@ from unittest.mock import MagicMock
 
 from manage_agenda.sources import (
     Args,
+    _get_emails_from_folder,
+    _imap_rule_mode,
+    _mark_imap_seen,
     build_imap_from_search,
     mail_identity,
     parse_from_list,
     remember_handled_mail,
     unseen_messages,
-    _get_emails_from_folder,
-    _imap_rule_mode,
-    _mark_imap_seen,
 )
 
 
