@@ -2,31 +2,41 @@ import datetime
 import unittest
 from unittest.mock import MagicMock, patch
 
+from manage_agenda.config import Config
 from manage_agenda.events import adjust_event_times, update_event_status_cli
 from manage_agenda.sources import Args
 
 
 class TestEvents(unittest.TestCase):
     def test_adjust_event_times_both_present(self):
-        event = {
-            "start": {"dateTime": "2024-01-01T10:00:00"},
-            "end": {"dateTime": "2024-01-01T11:00:00"},
-        }
-        result = adjust_event_times(event)
+        # A naive dateTime (no explicit timeZone) is localized via Config.DEFAULT_TIMEZONE -
+        # pinned here rather than left to whatever the real environment's DEFAULT_TIMEZONE
+        # happens to be (the repo's own .env sets America/Toronto, UTC-5 in January, which
+        # silently broke this test's fixed 09:00/09:30 expectations below before
+        # _default_naive_timezone() resolved the value fresh instead of caching it at
+        # events.py's import time - see docs/investigation-limite1.md §10/§11).
+        with patch.object(Config, "DEFAULT_TIMEZONE", "Europe/Berlin"):
+            event = {
+                "start": {"dateTime": "2024-01-01T10:00:00"},
+                "end": {"dateTime": "2024-01-01T11:00:00"},
+            }
+            result = adjust_event_times(event)
         self.assertEqual(result["start"]["dateTime"], "2024-01-01T09:00:00+00:00")
         self.assertEqual(result["end"]["dateTime"], "2024-01-01T10:00:00+00:00")
         self.assertEqual(result["start"]["timeZone"], "UTC")
         self.assertEqual(result["end"]["timeZone"], "UTC")
 
     def test_adjust_event_times_start_missing(self):
-        event = {"end": {"dateTime": "2024-01-01T11:00:00"}}
-        result = adjust_event_times(event)
+        with patch.object(Config, "DEFAULT_TIMEZONE", "Europe/Berlin"):
+            event = {"end": {"dateTime": "2024-01-01T11:00:00"}}
+            result = adjust_event_times(event)
         self.assertEqual(result["start"]["dateTime"], "2024-01-01T09:30:00+00:00")
         self.assertEqual(result["start"]["timeZone"], "UTC")
 
     def test_adjust_event_times_end_missing(self):
-        event = {"start": {"dateTime": "2024-01-01T10:00:00"}}
-        result = adjust_event_times(event)
+        with patch.object(Config, "DEFAULT_TIMEZONE", "Europe/Berlin"):
+            event = {"start": {"dateTime": "2024-01-01T10:00:00"}}
+            result = adjust_event_times(event)
         self.assertEqual(result["end"]["dateTime"], "2024-01-01T09:30:00+00:00")
         self.assertEqual(result["end"]["timeZone"], "UTC")
 

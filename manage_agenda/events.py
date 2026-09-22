@@ -16,11 +16,30 @@ from manage_agenda.i18n import t
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-try:
-    DEFAULT_NAIVE_TIMEZONE = pytz.timezone(config.DEFAULT_TIMEZONE)
-except pytz.exceptions.UnknownTimeZoneError:
-    logging.error(f"Invalid timezone '{config.DEFAULT_TIMEZONE}' in config. Falling back to UTC.")
-    DEFAULT_NAIVE_TIMEZONE = pytz.utc
+def _default_naive_timezone():
+    """The pytz timezone used to localize a naive event start/end time (no explicit
+    timeZone) - resolved fresh on EVERY call from config.DEFAULT_TIMEZONE, never cached as a
+    module-level constant.
+
+    This used to be a `DEFAULT_NAIVE_TIMEZONE = pytz.timezone(config.DEFAULT_TIMEZONE)`
+    constant computed once at import time - the same baked-at-import pattern behind the
+    ledger/config-path pollution bug fixed elsewhere in this redesign (see
+    docs/investigation-limite1.md §10), just for a timezone instead of a path. It surfaced as
+    three test_events.py failures (test_adjust_event_times_*) that looked like unrelated
+    flakiness: the constant silently read whatever DEFAULT_TIMEZONE the local .env happened
+    to set (America/Toronto, UTC-5 in January) instead of the Europe/Berlin (UTC+1) the tests
+    assumed - a 6-hour discrepancy - because nothing isolates that env var in tests and the
+    constant, once baked, ignored the timezone test_config.py's own patch.object(Config,
+    "DEFAULT_TIMEZONE", ...) calls elsewhere set for their own purposes. Bounded-purge
+    entries stamp their event_end from Calendar's own live event, not from this function, but
+    an event manage-agenda CREATES from a naive datetime is stamped via this - so a wrong
+    default timezone here does eventually skew purge timing by the same offset, once that
+    event's own end date is later read back."""
+    try:
+        return pytz.timezone(config.DEFAULT_TIMEZONE)
+    except pytz.exceptions.UnknownTimeZoneError:
+        logging.error(f"Invalid timezone '{config.DEFAULT_TIMEZONE}' in config. Falling back to UTC.")
+        return pytz.utc
 
 
 def filter_events_by_title(api_cal, events, text_filter):
@@ -103,9 +122,9 @@ def _parse_datetime_to_utc(dt_str, tz_name=None):
                     f"Unknown timezone '{tz_name}'. "
                     f"Using default timezone: {config.DEFAULT_TIMEZONE}"
                 )
-                dt_obj = DEFAULT_NAIVE_TIMEZONE.localize(dt_obj)
+                dt_obj = _default_naive_timezone().localize(dt_obj)
         else:
-            dt_obj = DEFAULT_NAIVE_TIMEZONE.localize(dt_obj)
+            dt_obj = _default_naive_timezone().localize(dt_obj)
 
     return dt_obj.astimezone(pytz.utc)
 
