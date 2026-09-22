@@ -1238,4 +1238,269 @@ TRANSLATIONS = {
         "en": "Skip this item",
         "fr": "Ignorer cet élément",
     },
+    # --- gui: the desktop window (manage_agenda.gui) and its dialogs ---
+    'events.review_title': {
+        "en": 'Review the event',
+        "fr": "Relire l'événement",
+    },
+    'events.review_summary': {
+        "en": 'Title',
+        "fr": 'Titre',
+    },
+    'events.review_location': {
+        "en": 'Location',
+        "fr": 'Lieu',
+    },
+    'events.review_description': {
+        "en": 'Description',
+        "fr": 'Description',
+    },
+    'events.review_start': {
+        "en": 'Start (local time)',
+        "fr": 'Début (heure locale)',
+    },
+    'events.review_end': {
+        "en": 'End (local time)',
+        "fr": 'Fin (heure locale)',
+    },
+    'events.review_datetime_hint': {
+        "en": 'Format: {format}',
+        "fr": 'Format : {format}',
+    },
+    'events.review_accept': {
+        "en": 'Accept',
+        "fr": 'Accepter',
+    },
+    'events.review_retry': {
+        "en": 'Ask the model again',
+        "fr": 'Redemander au modèle',
+    },
+    'events.review_invalid_datetime': {
+        "en": 'Start and end must follow the format {format}.',
+        "fr": 'Le début et la fin doivent suivre le format {format}.',
+    },
+    'gui.window_title': {
+        "en": 'manage-agenda',
+        "fr": 'manage-agenda',
+    },
+    'gui.nav.add': {
+        "en": 'Add events',
+        "fr": 'Ajouter des événements',
+    },
+    'gui.nav.calendar_ops': {
+        "en": 'Calendar operations',
+        "fr": 'Opérations sur le calendrier',
+    },
+    'gui.nav.ledger': {
+        "en": 'Ledger',
+        "fr": 'Registre',
+    },
+    'gui.nav.evaluate': {
+        "en": 'Evaluate models',
+        "fr": 'Évaluer les modèles',
+    },
+    'gui.nav.auth': {
+        "en": 'Authentication',
+        "fr": 'Authentification',
+    },
+    'gui.nav.lists': {
+        "en": 'Lists',
+        "fr": 'Listes',
+    },
+    'gui.nav.install': {
+        "en": 'Install browser',
+        "fr": 'Installer le navigateur',
+    },
+    'gui.nav.settings': {
+        "en": 'Settings',
+        "fr": 'Réglages',
+    },
+    'gui.nav.unknown': {
+        "en": 'Screen',
+        "fr": 'Écran',
+    },
+    'gui.log_panel_title': {
+        "en": 'Log',
+        "fr": 'Journal',
+    },
+    'gui.run': {
+        "en": 'Run',
+        "fr": 'Lancer',
+    },
+    'gui.cancel': {
+        "en": 'Cancel',
+        "fr": 'Annuler',
+    },
+    'gui.cancel_tooltip': {
+        "en": 'Stops the running job at its next question. A call in progress (model, mailbox, browser consent) is not interrupted.',
+        "fr": "Arrête le job en cours à sa prochaine question. Un appel en cours (modèle, boîte mail, consentement navigateur) n'est pas interrompu.",
+    },
+    'gui.job_busy': {
+        "en": 'A job is already running.',
+        "fr": 'Un job est déjà en cours.',
+    },
+    'gui.job_started': {
+        "en": 'Running: {name}',
+        "fr": 'En cours : {name}',
+    },
+    'gui.job_finished': {
+        "en": 'Done.',
+        "fr": 'Terminé.',
+    },
+    'gui.job_finished_with_code': {
+        "en": 'Done with exit code {code}.',
+        "fr": 'Terminé avec le code {code}.',
+    },
+    'gui.job_failed': {
+        "en": 'Failed: {error}',
+        "fr": 'Échec : {error}',
+    },
+    'gui.job_failed_title': {
+        "en": 'The job failed',
+        "fr": 'Le job a échoué',
+    },
+    'gui.job_cancelled': {
+        "en": 'Cancelled.',
+        "fr": 'Annulé.',
+    },
+    'gui.close_while_running': {
+        "en": 'A job is still running. Close anyway? It stops at its next question; a call in progress finishes on its own.',
+        "fr": "Un job est encore en cours. Fermer quand même ? Il s'arrête à sa prochaine question ; un appel en cours se termine seul.",
+    },
+    'gui.close_job_still_running': {
+        "en": 'The job did not stop in time; closing anyway.',
+        "fr": "Le job ne s'est pas arrêté à temps ; fermeture quand même.",
+    },
+    'gui.port_called_outside_job': {
+        "en": 'A prompt was requested on the GUI thread: core code must run through the job runner.',
+        "fr": "Une question a été demandée sur le thread de l'interface : le cœur doit passer par le lanceur de jobs.",
+    },
+    'gui.dialog.choose_one_title': {
+        "en": 'Choose one',
+        "fr": 'Choisissez',
+    },
+    'gui.dialog.choose_many_title': {
+        "en": 'Choose one or more',
+        "fr": 'Choisissez un ou plusieurs',
+    },
+    'gui.dialog.confirm_title': {
+        "en": 'Confirm',
+        "fr": 'Confirmer',
+    },
+    'gui.dialog.ask_text_title': {
+        "en": 'Input',
+        "fr": 'Saisie',
+    },
+    'gui.dialog.ask_multiline_title': {
+        "en": 'Text',
+        "fr": 'Texte',
+    },
+    'gui.dialog.ask_multiline_hint': {
+        "en": 'Leave empty to give nothing.',
+        "fr": 'Laissez vide pour ne rien fournir.',
+    },
+    'gui.dialog.action_title': {
+        "en": 'What next?',
+        "fr": 'Que faire ?',
+    },
+    'gui.dialog.select_events_title': {
+        "en": 'Select events',
+        "fr": 'Sélectionnez des événements',
+    },
+    'gui.dialog.select_all': {
+        "en": 'Select all',
+        "fr": 'Tout sélectionner',
+    },
+    'gui.dialog.select_none': {
+        "en": 'Select none',
+        "fr": 'Tout désélectionner',
+    },
+    'gui.dialog.ok': {
+        "en": 'OK',
+        "fr": 'OK',
+    },
+    'gui.dialog.cancel': {
+        "en": 'Cancel',
+        "fr": 'Annuler',
+    },
+    'gui.dialog.yes': {
+        "en": 'Yes',
+        "fr": 'Oui',
+    },
+    'gui.dialog.no': {
+        "en": 'No',
+        "fr": 'Non',
+    },
+    'gui.lists.service': {
+        "en": 'Service',
+        "fr": 'Service',
+    },
+    'gui.lists.account': {
+        "en": 'Account',
+        "fr": 'Compte',
+    },
+    'gui.lists.refresh': {
+        "en": 'Fetch',
+        "fr": 'Charger',
+    },
+    'gui.lists.job': {
+        "en": 'Listing',
+        "fr": 'Listage',
+    },
+    'gui.lists.column_title': {
+        "en": 'Title',
+        "fr": 'Titre',
+    },
+    'gui.lists.column_date': {
+        "en": 'Date',
+        "fr": 'Date',
+    },
+    'gui.lists.empty': {
+        "en": 'Nothing to show.',
+        "fr": 'Rien à afficher.',
+    },
+    'gui.lists.no_account': {
+        "en": 'No account configured for this service (see ~/.mySocial/config/.rssBlogs).',
+        "fr": 'Aucun compte configuré pour ce service (voir ~/.mySocial/config/.rssBlogs).',
+    },
+    'gui.auth.service': {
+        "en": 'Service',
+        "fr": 'Service',
+    },
+    'gui.auth.account': {
+        "en": 'Account',
+        "fr": 'Compte',
+    },
+    'gui.auth.check': {
+        "en": 'Check',
+        "fr": 'Vérifier',
+    },
+    'gui.auth.run_oauth': {
+        "en": 'Authorize in the browser',
+        "fr": 'Autoriser dans le navigateur',
+    },
+    'gui.auth.job_check': {
+        "en": 'Authentication check',
+        "fr": "Vérification de l'authentification",
+    },
+    'gui.auth.job_oauth': {
+        "en": 'Browser consent',
+        "fr": 'Consentement navigateur',
+    },
+    'gui.auth.browser_note': {
+        "en": 'Authorizing opens your browser; the window waits until the consent is finished and cannot cancel it.',
+        "fr": "L'autorisation ouvre votre navigateur ; la fenêtre attend la fin du consentement et ne peut pas l'annuler.",
+    },
+    'gui.auth.status_ok': {
+        "en": 'Authorized.',
+        "fr": 'Autorisé.',
+    },
+    'gui.auth.status_failed': {
+        "en": 'Not authorized.',
+        "fr": 'Non autorisé.',
+    },
+    'gui.auth.no_account': {
+        "en": 'No account configured for this service.',
+        "fr": 'Aucun compte configuré pour ce service.',
+    },
 }

@@ -1,0 +1,83 @@
+"""The window builds offscreen, with every screen, and create_window() installs exactly what
+run() needs: the log handler (surviving setup_logging) and the GUI-thread UI."""
+
+import logging
+
+import pytest
+
+from manage_agenda.base import PACKAGE_LOGGER_NAME, setup_logging
+from manage_agenda.gui import app as gui_app
+from manage_agenda.gui.log_panel import QtLogHandler
+from manage_agenda.gui.main_window import SCREEN_CLASSES, MainWindow
+from manage_agenda.ui import echo, get_ui
+
+
+def test_main_window_has_every_screen(qapp):
+    window = MainWindow()
+    assert [type(screen) for screen in window.screens] == list(SCREEN_CLASSES)
+    assert window.nav.count() == len(SCREEN_CLASSES)
+    assert window.stack.count() == len(SCREEN_CLASSES)
+    assert all(screen.title() for screen in window.screens)
+    assert not window.cancel_button.isEnabled()
+    window.close()
+
+
+def test_create_window_installs_the_log_handler_and_the_gui_thread_ui(qapp, pump, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "gui.log"))
+    package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
+    window = gui_app.create_window(verbose=False)
+    try:
+        handlers = [h for h in package_logger.handlers if isinstance(h, QtLogHandler)]
+        assert handlers == [window.log_handler]
+        assert not getattr(window.log_handler, "manage_agenda_handler", False)
+
+        # setup_logging() replaces its own handlers, not this one.
+        setup_logging(False)
+        assert window.log_handler in package_logger.handlers
+
+        logging.getLogger("manage_agenda.sources").warning("hello panel")
+        assert pump(lambda: any("hello panel" in line for line in window.log_panel.lines()))
+
+        # On the GUI thread, output reaches the panel and prompts are refused.
+        echo("outside a job")
+        assert "outside a job" in window.log_panel.lines()
+        with pytest.raises(RuntimeError):
+            get_ui().confirm("?")
+    finally:
+        gui_app.release_window(window)
+        for handler in list(package_logger.handlers):
+            if getattr(handler, "manage_agenda_handler", False):
+                package_logger.removeHandler(handler)
+                handler.close()
+    assert window.log_handler not in package_logger.handlers
+    assert type(get_ui()).__name__ == "ConsoleUI"
+
+
+def test_job_lifecycle_updates_the_status_bar_and_cancel_button(qapp, pump):
+    window = MainWindow()
+    assert window.runner.submit("demo", lambda: 0)
+    assert pump(lambda: not window.runner.is_busy())
+    assert not window.cancel_button.isEnabled()
+    assert window.status_label.text()
+    assert "=== demo ===" in window.log_panel.lines()
+
+    assert window.runner.submit("code", lambda: 3)
+    assert pump(lambda: not window.runner.is_busy())
+    assert "3" in window.status_label.text()
+    window.close()
+
+
+def test_a_failing_job_reports_in_the_status_bar_and_log(qapp, pump):
+    window = MainWindow()
+
+    def boom():
+        raise RuntimeError("kaboom")
+
+    window.runner.submit("bad", boom)
+    assert pump(lambda: not window.runner.is_busy())
+    assert "RuntimeError: kaboom" in window.status_label.text()
+    assert any("RuntimeError: kaboom" in line for line in window.log_panel.lines())
+    for widget in qapp.topLevelWidgets():
+        if widget is not window:
+            widget.close()
+    window.close()

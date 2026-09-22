@@ -30,7 +30,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 # An explicit list, no discovery: a subpackage left out here ships in an editable install
 # but not in the non-editable `pip install '.[test]'` CI runs.
-packages = ["manage_agenda", "manage_agenda.ui"]
+packages = ["manage_agenda", "manage_agenda.ui", "manage_agenda.gui", "manage_agenda.gui.screens"]
 
 [project.urls]
 Homepage = "https://github.com/fernand0/manage-agenda"
@@ -41,12 +41,18 @@ CI = "https://github.com/fernand0/manage-agenda/actions"
 [project.scripts]
 manage-agenda = "manage_agenda.cli:cli"
 
+[project.gui-scripts]
+manage-agenda-gui = "manage_agenda.gui.app:main"
+
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov", "pytest-mock"]
-dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
+# The desktop window (`manage-agenda gui`). PySide6 is LGPL; it is only imported by
+# manage_agenda.gui, so every other command works without it.
+gui = ["PySide6>=6.8"]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit", "PySide6>=6.8", "pytest-qt"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit", "PySide6>=6.8", "pytest-qt"]
 
 [tool.ruff]
 line-length = 100
