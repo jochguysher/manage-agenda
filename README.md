@@ -269,6 +269,16 @@ Configuration can be set via environment variables or a `.env` file. See [`.env.
 | `LOG_FILE` | Path to log file | `manage_agenda.log` |
 | `DEFAULT_EMAIL_TAG` | Gmail label/tag for event emails | `zAgenda` |
 
+## Interface Language
+
+The CLI's own text (prompts, messages, and `--help` output) is available in English and French. The language is detected automatically from the host's locale (`LC_ALL`, then `LANG`, then `LANGUAGE`) and falls back to English if neither is set or recognized. To force a language regardless of the system locale, set it in `config.yaml`:
+
+```yaml
+language: fr
+```
+
+`--help` itself is translated (e.g. `LANG=fr_FR.UTF-8 manage-agenda add --help` prints French option descriptions); Click's own built-in `--help`/`--version` flag text stays English, since that's framework-level rather than part of this tool's interface.
+
 ## Key Capabilities
 
 - **Multi-event extraction** from a single source, with individual processing per event
