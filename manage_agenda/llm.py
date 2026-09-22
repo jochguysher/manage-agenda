@@ -35,6 +35,7 @@ except Exception:
 from socialModules.configMod import CONFIGDIR, select_from_list
 
 from manage_agenda.exceptions import LLMError
+from manage_agenda.i18n import t
 from manage_agenda.interactive import select_one
 
 
@@ -107,7 +108,7 @@ class OllamaClient(LLMClient):
                     )
 
             _, self.model_name = select_from_list(
-                models, identifier="model", title="Available models"
+                models, identifier="model", title=t("llm.available_models")
             )
         else:
             if isinstance(model_name, int):
@@ -243,11 +244,13 @@ def select_llm(args, config_path=None):
     elif not reconfigure and saved.get("provider"):
         ai = saved["provider"]
     elif args.interactive or reconfigure:
-        ai = select_one(["ollama", "gemini", "mistral"], title="Select model provider", default="ollama")
+        ai = select_one(
+            ["ollama", "gemini", "mistral"], title=t("llm.select_provider_title"), default="ollama"
+        )
         prompted = True
     else:
         ai = "ollama"
-    print(f"Selected AI: {ai}")
+    print(t("llm.selected_ai", ai=ai))
 
     if explicit_model:
         model_name = explicit_model
