@@ -123,6 +123,66 @@ class TestProcessEmailCli(unittest.TestCase):
             ["interactive", "delete", "source", "verbose", "destination", "text"],
         )
 
+    @patch("manage_agenda.sources._imap_store_keyword")
+    @patch("manage_agenda.sources._delete_email")
+    @patch("manage_agenda.sources.moduleRules")
+    @patch("manage_agenda.extraction.select_api")
+    @patch("manage_agenda.extraction.select_calendars")
+    @patch("manage_agenda.extraction.write_file")
+    @patch("manage_agenda.sources.write_file")
+    def test_process_email_cli_keyword_marker_skips_delete_and_stores_the_keyword(
+        self,
+        mock_source_write_file,
+        mock_write_file,
+        mock_select_calendars,
+        mock_select_api_destination,
+        mock_module_rules,
+        mock_delete_email,
+        mock_store_keyword,
+    ):
+        """An IMAP account configured with processed_marker=keyword:... must never fall
+        through to _delete_email (that would untag/move the message, defeating the whole
+        point of a marker mode - staying put) and must store the keyword instead."""
+        args = self.Args(
+            interactive=False, delete=None, source="gemini", verbose=False, destination="", text=""
+        )
+        mock_model = MagicMock()
+        mock_model.generate_text.return_value = """```json
+{"summary": "Test Event", "start": {"dateTime": "2024-01-01T10:00:00"}, "end": {"dateTime": "2024-01-01T11:00:00"}}
+```"""
+        mock_api_src = MagicMock()
+        mock_api_src.service = "imap"
+        del mock_api_src.getPostIdM  # force the getPostId() fallback, matching real accounts without it
+        mock_api_src.getPostId.return_value = "post_id"
+        mock_api_src.getPostDate.return_value = formatdate(
+            timeval=datetime.datetime.now().timestamp(), localtime=True
+        )
+        mock_api_src.getPostTitle.return_value = "Test title"
+        mock_api_src.getPostBody.return_value = "Test Body"
+
+        message = MagicMock()
+        message.get.side_effect = lambda key, default=None: {
+            "Message-ID": "<msg-1@example.com>"
+        }.get(key, default)
+
+        source_details = {"folder": "INBOX", "processed_marker": "keyword:$AgendaDone"}
+        rules = mock_module_rules.from_config.return_value
+        rules.more = {"mail-account": source_details}
+        rules.readConfigSrc.return_value = mock_api_src
+
+        mock_api_dst = MagicMock()
+        mock_select_api_destination.return_value = mock_api_dst
+        mock_select_calendars.return_value = ["primary"]
+
+        with (
+            patch("manage_agenda.sources.prepare_calendar", return_value=True),
+            patch("manage_agenda.sources._get_emails_from_folder", return_value=[("5", message)]),
+        ):
+            process_email_cli(args, mock_model, selected_source="mail-account")
+
+        mock_delete_email.assert_not_called()
+        mock_store_keyword.assert_called_once_with(mock_api_src, "INBOX", "5", "$AgendaDone", add=True)
+
     @patch("manage_agenda.sources.display_posts")
     @patch("manage_agenda.sources._get_events_from_calendar")
     @patch("manage_agenda.sources.moduleRules")

@@ -164,6 +164,33 @@ class TestImapFolderRead(unittest.TestCase):
         ]
         self.assertEqual(body_calls, ["2"])
 
+    def test_matches_are_returned_highest_sequence_number_first(self):
+        """A safety invariant folder-mode marking depends on (see
+        _imap_move_to_folder_safely): messages must be handed back highest-sequence-number
+        first, and in order, so that expunging one (which only renumbers HIGHER-numbered
+        messages) can never invalidate a not-yet-processed message's sequence number."""
+        one = EmailMessage()
+        one["Message-ID"] = "<one@acme.example>"
+        two = EmailMessage()
+        two["Message-ID"] = "<two@acme.example>"
+        three = EmailMessage()
+        three["Message-ID"] = "<three@acme.example>"
+        bodies = {"1": one, "2": two, "3": three}
+        api = MagicMock()
+        client = api.getClient.return_value
+        client.select.return_value = ("OK", [b"1"])
+        client.search.return_value = ("OK", [b"1 2 3"])
+
+        def fetch(sequence, query):
+            return ("OK", [(sequence.encode(), bodies[sequence].as_bytes())])
+
+        client.fetch.side_effect = fetch
+        from manage_agenda.sources import _fetch_imap_matches
+
+        posts = _fetch_imap_matches(api, "INBOX", "ALL")
+
+        self.assertEqual([post[0] for post in posts], ["3", "2", "1"])
+
     def test_mark_seen_does_not_move_the_message(self):
         api = MagicMock()
         api.getClient.return_value.store.return_value = ("OK", [b""])

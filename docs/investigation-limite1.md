@@ -178,11 +178,34 @@ backend; Gmail reached over plain IMAP is treated exactly like any other IMAP4re
 nothing about it may be assumed. An earlier draft of this section proposed
 `X-GM-LABELS`-over-IMAP as a per-provider special case; that proposal is withdrawn.
 
-`imap_processed_marker` config, one of:
+`processed_marker` config (shipped under this name, not `imap_processed_marker` as first
+drafted here — it lives in the same per-account `source_details` dict as the pre-existing
+`mark`/`folder`/`channel`/`from` keys, which are all unprefixed, so this one is too), one of:
 - `keyword:<name>` — e.g. `keyword:$AgendaDone`. Generic IMAP keyword STORE, nothing
   provider-specific.
-- `flag:\Seen` — kept for `mark: seen` backward compatibility (see §6 migration).
+- `flag:seen` (or bare `flag`) — kept for `mark: seen` backward compatibility (see §6
+  migration); `mark: seen` with no explicit `processed_marker` is still read as `flag_seen`
+  automatically, unchanged.
 - `folder:<path>` — a dedicated folder (created if absent), never Trash.
+
+**Scope limitation, shipped as implemented**: `processed_marker` only takes effect for
+accounts configured with `folder`/`channel`/`from` (the `_fetch_imap_matches` raw-SEARCH-
+criteria scan path). The tag-based default scan (`setLabels`/`setChannel`/`getPosts`, used
+when none of those are set) has no seam to add server-side exclusion (`UNKEYWORD`/
+`UNDELETED`) to without modifying socialModules — and a marker there would leave processed
+messages sitting in the scanned label forever, with every run re-fetching a set that grows
+with the tool's whole history instead of its current activity, which is exactly what this
+redesign exists to prevent. A `processed_marker` configured on such an account is refused
+(treated as a config mistake) and logged, not silently accepted; accounts on that path keep
+using `_delete_email` (label removal) exactly as before.
+
+**"folder" mode, as shipped, is mark-only**: moving a message to the dedicated folder on
+success works end-to-end (MOVE when advertised, else COPY + capability-gated safe deletion -
+see below), but the COPYUID locator is not yet captured or stored in the ledger, so a future
+`requeue` resolution cannot yet relocate a moved message back by UID - it would need to fall
+back to the `UID SEARCH HEADER Message-ID` path from the start. Capturing the locator is
+deferred to the commit that implements requeue's actual un-marking step (see §6-adjacent
+"Per-marker behavior" below), since that is the first consumer of it.
 
 **Default marker per account**, chosen from probe (f)'s result for that specific account:
 `keyword` if `PERMANENTFLAGS` advertises `\*` **and** a STORE/FETCH round trip confirms the
@@ -258,6 +281,16 @@ from the user's. Consequences by capability:
   an arbitrary pick among several candidates.
 - **flag:\Seen**: unchanged from today's `mark: seen` behavior - the message is never moved
   or otherwise touched; exclusion is by the `\Seen` flag already read via `SEARCH`.
+
+**Ordering invariant marking depends on, as shipped**: `_fetch_imap_matches` always hands
+messages back highest-sequence-number-first, and that order is preserved unchanged all the
+way to the per-message marking call. This is load-bearing: an expunge (implicit in `MOVE`, or
+explicit via `UID EXPUNGE`) only renumbers messages with a *higher* sequence number than the
+one just removed, never a lower one - so processing highest-first guarantees that marking one
+message can never invalidate the still-to-be-processed sequence number of another. Nothing in
+the marking code itself enforces this; it is a property of the scan order that must not be
+changed (e.g. by sorting ascending, or re-fetching mid-scan) without re-deriving this
+argument.
 
 ### Test coverage (expanded capability matrix)
 

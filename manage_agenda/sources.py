@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -622,6 +623,198 @@ def _imap_rule_mode(args):
     return None
 
 
+@dataclass
+class ImapCapabilities:
+    """CAPABILITY, read once per connection and logged - every marking/deletion decision
+    below is gated on this, never on server/provider identity (see
+    docs/investigation-limite1.md - the IMAP backend must be quasi-universal, with zero
+    Gmail-specific code, including for Gmail reached over plain IMAP)."""
+
+    raw: list
+    has_uidplus: bool
+    has_move: bool
+    has_special_use: bool
+
+    @classmethod
+    def detect(cls, client):
+        typ, data = client.capability()
+        raw = []
+        if typ == "OK" and data:
+            for line in data:
+                text = line.decode() if isinstance(line, bytes) else str(line)
+                raw.extend(text.split())
+        upper = {token.upper() for token in raw}
+        return cls(
+            raw=raw,
+            has_uidplus="UIDPLUS" in upper,
+            has_move="MOVE" in upper,
+            has_special_use="SPECIAL-USE" in upper,
+        )
+
+
+def _imap_capabilities_once(api_src):
+    """ImapCapabilities.detect(), once for this connection - never call this per message."""
+    client = api_src.getClient()
+    if client is None:
+        return None
+    capabilities = ImapCapabilities.detect(client)
+    logging.info(f"IMAP capabilities for this connection: {capabilities}")
+    return capabilities
+
+
+def _uses_imap_search_criteria(source_details):
+    """Whether this account's scan goes through the raw-SEARCH-criteria path
+    (_fetch_imap_matches, via folder/channel/from config) rather than the tag-based
+    setLabels/setChannel/getPosts path - see _imap_marker_mode()."""
+    return bool(source_details.get("folder") or source_details.get("channel") or "from" in source_details)
+
+
+def _imap_marker_mode(source_details):
+    """(mode, value) from the `processed_marker` config: ("keyword", name), ("folder", path),
+    ("flag_seen", None), or (None, None) if unconfigured (the account keeps today's default:
+    _delete_email moves the message to Trash / removes its label). Backward compatible:
+    `mark: seen` with no explicit `processed_marker` is `flag_seen`, matching pre-existing
+    behavior exactly.
+
+    Only meaningful for accounts using the folder/channel/from-configured search path
+    (_fetch_imap_matches): that is the only place server-side scan exclusion (UNKEYWORD/
+    UNDELETED) can be injected without modifying socialModules. The tag-based default scan
+    (setLabels/setChannel/getPosts) has no such seam - a marker configured there would leave
+    processed messages in the scanned label forever, with each run re-fetching a set that
+    grows with the tool's whole history instead of its current activity, the exact problem
+    this redesign exists to eliminate. Configuring a marker on such an account is treated as
+    a mistake and logged, not silently accepted.
+    """
+    raw = str(source_details.get("processed_marker") or "").strip()
+    if raw.startswith("keyword:"):
+        mode, value = "keyword", raw.split(":", 1)[1].strip()
+    elif raw.startswith("folder:"):
+        mode, value = "folder", raw.split(":", 1)[1].strip()
+    elif raw in ("flag:seen", "flag:\\Seen", "flag"):
+        mode, value = "flag_seen", None
+    elif source_details.get("mark") == "seen":
+        mode, value = "flag_seen", None
+    else:
+        return None, None
+
+    if not _uses_imap_search_criteria(source_details):
+        logging.warning(
+            f"processed_marker {raw!r} is configured but this account has no folder/channel/"
+            "from criteria, so it never uses the search-criteria scan path - marking would "
+            "have no server-side scan exclusion and would grow the scanned set with every "
+            "processed message. Ignoring it; add folder/channel/from, or drop the setting."
+        )
+        return None, None
+    return mode, value
+
+
+def _imap_exclusion_criterion(source_details):
+    """Server-side SEARCH exclusion matching this account's marker mode, or None.
+
+    "keyword" excludes via UNKEYWORD - moves the "already handled" check from a per-message
+    ledger lookup (fetch header, compare identity) to the server, so an already-marked
+    message is never even fetched again. "folder" excludes via UNDELETED unconditionally
+    (not just when UIDPLUS is absent): see _imap_move_to_folder_safely - without UIDPLUS the
+    original is left flagged \\Deleted rather than expunged, and it must never be re-offered.
+    "flag_seen" adds no exclusion criterion - unchanged from today's mark:seen behavior,
+    ledger-only (see docs/investigation-limite1.md §5).
+    """
+    mode, value = _imap_marker_mode(source_details)
+    if mode == "keyword":
+        return f"UNKEYWORD {value}"
+    if mode == "folder":
+        return "UNDELETED"
+    return None
+
+
+def _combine_with_marker_exclusion(criteria, source_details):
+    exclusion = _imap_exclusion_criterion(source_details)
+    if not exclusion:
+        return criteria
+    if criteria:
+        return f"({criteria} {exclusion})"
+    return f"({exclusion})"
+
+
+_COPYUID_RE = re.compile(rb"\[COPYUID (\d+) (\S+) (\S+)\]")
+
+
+def _imap_uid_for_sequence(client, sequence):
+    """The UID (RFC 3501) of the message at this sequence number, in the currently-selected
+    folder - needed because UID EXPUNGE (the only safe way to expunge a single message
+    without UIDPLUS purging every \\Deleted message in the folder) takes a UID, not a
+    sequence number."""
+    typ, data = client.fetch(str(sequence), "(UID)")
+    if typ != "OK" or not data or not data[0]:
+        return None
+    part = data[0]
+    text = part.decode() if isinstance(part, bytes) else str(part)
+    match = re.search(r"UID (\d+)", text)
+    return match.group(1) if match else None
+
+
+def _imap_move_to_folder_safely(api_src, capabilities, source_folder, sequence, dest_folder):
+    """Move one message (by sequence number, in the currently-selected source_folder) to
+    dest_folder. MOVE when advertised (RFC 6851); otherwise COPY, then delete the original
+    only when UIDPLUS (RFC 4315) lets it be scoped to exactly this message's UID via
+    `UID EXPUNGE` - NEVER a bare EXPUNGE, which would purge every \\Deleted message already
+    in the folder, including ones a user deleted through their own client and expects to
+    stay merely flagged until that client expunges them. Without UIDPLUS, the original is
+    left flagged \\Deleted and excluded from future scans via the UNDELETED criterion
+    _imap_exclusion_criterion() adds for folder mode.
+
+    Re-selects source_folder before returning either way, since the caller's scan loop
+    expects to still be working against it, not whatever this move last SELECTed.
+
+    Safe to call mid-scan, one message at a time, only because _fetch_imap_matches always
+    hands its caller messages highest-sequence-number-first: an expunge (implicit in MOVE, or
+    explicit via UID EXPUNGE) only renumbers messages with a HIGHER sequence number than the
+    one just removed, never a lower one - so a not-yet-processed message's `sequence` is never
+    invalidated by marking an earlier (higher-numbered) one. This function does not itself
+    enforce that ordering; it is the caller's responsibility (see process_email_cli).
+    """
+    client = api_src.getClient()
+    if client is None:
+        return False
+    client.select(source_folder)
+    uid = _imap_uid_for_sequence(client, sequence)
+    if uid is None:
+        client.select(source_folder)
+        return False
+    client.create(dest_folder)  # ignore failure if it already exists
+
+    success = False
+    if capabilities is not None and capabilities.has_move:
+        typ, _data = client.uid("MOVE", uid, dest_folder)
+        success = typ == "OK"
+    else:
+        typ, _data = client.uid("COPY", uid, dest_folder)
+        if typ == "OK":
+            success = True
+            if capabilities is not None and capabilities.has_uidplus:
+                client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+                client.uid("EXPUNGE", uid)
+            else:
+                # No UIDPLUS (or capabilities unknown): never a bare EXPUNGE here - leave the
+                # original flagged \Deleted, excluded from future scans by UNDELETED instead.
+                client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+    client.select(source_folder)
+    return success
+
+
+def _imap_store_keyword(api_src, folder, sequence, name, add=True):
+    """STORE (or, with add=False, remove) a custom IMAP keyword on one message, by sequence
+    number - matches _mark_imap_seen's convention (valid only within the current connection's
+    session, immediately after the SEARCH/FETCH that produced it)."""
+    client = api_src.getClient()
+    if client is None:
+        return False
+    client.select(folder)
+    op = "+FLAGS" if add else "-FLAGS"
+    typ, _data = client.store(str(sequence), op, f"({name})")
+    return typ == "OK"
+
+
 def _mark_imap_seen(api_src, folder, sequence):
     """Mark one message read. The message stays in its folder."""
     client = api_src.getClient()
@@ -659,7 +852,13 @@ def _fetch_imap_matches(api_src, folder, criteria, handled=None):
     if typ != "OK" or not data or not data[0]:
         print(t("sources.no_messages_match", criteria=criteria))
         return None
-    # Highest sequence numbers are the most recently arrived.
+    # Highest sequence numbers are the most recently arrived - and this descending order is
+    # also a safety invariant folder-mode marking depends on (see
+    # _imap_move_to_folder_safely): expunging (via UID MOVE or UID EXPUNGE) a message only
+    # renumbers messages with a HIGHER sequence number in the mailbox, never a lower one. As
+    # long as `posts` is processed highest-first (never sorted ascending, never reordered),
+    # marking one message can never invalidate the still-to-be-processed sequence number of
+    # another.
     sequences = list(reversed(data[0].split()))[:IMAP_SCAN_WINDOW]
     known = set(handled) if handled is not None else load_handled_mail_ids()
     posts = []
@@ -703,6 +902,7 @@ def _get_emails_from_folder(args, api_src, folder=None, source_details=None, han
         from manage_agenda.scheduling import combine_imap_search, imap_age_criteria
 
         criteria = combine_imap_search(criteria, imap_age_criteria(source_details))
+        criteria = _combine_with_marker_exclusion(criteria, source_details)
         return _fetch_imap_matches(api_src, folder, criteria, handled=handled)
 
     if not folder:
@@ -1069,6 +1269,18 @@ def process_email_cli(args, model, selected_source=None, rules=None):
             print(t("sources.skipped_handled_messages", skipped=skipped))
 
     if posts:
+        # Computed once per connection (never per message - see ImapCapabilities), and only
+        # when actually needed: folder mode is the only marker touching CAPABILITY-gated
+        # behavior. Deliberately inside `if posts:` - nothing below is reached otherwise.
+        is_imap_source = "imap" in (getattr(api_src, "service", "") or "").lower()
+        imap_marker_mode, imap_marker_value = (
+            _imap_marker_mode(source_details) if is_imap_source else (None, None)
+        )
+        imap_capabilities = (
+            _imap_capabilities_once(api_src)
+            if is_imap_source and imap_marker_mode == "folder"
+            else None
+        )
 
         def metadata_extractor(post, i):
             # Use getPostIdM if it exists, otherwise use getPostId
@@ -1097,9 +1309,9 @@ def process_email_cli(args, model, selected_source=None, rules=None):
             )
 
         def item_cleaner(post, i, post_id):
-            if "imap" in api_src.service.lower() and source_details.get("mark") == "seen":
-                return
-            if "imap" in api_src.service.lower():
+            if is_imap_source and imap_marker_mode:
+                return  # marked instead of deleted/untagged - see on_item_done
+            if is_imap_source:
                 post_pos = i + 1
             else:
                 post_pos = post_id
@@ -1107,13 +1319,20 @@ def process_email_cli(args, model, selected_source=None, rules=None):
 
         def on_item_done(post, i, calendar_result):
             remember_handled_mail(mail_identity(post), events=_extract_event_refs(calendar_result))
-            if "imap" in (getattr(api_src, "service", "") or "").lower() and source_details.get(
-                "mark"
-            ) == "seen":
-                sequence = post[0] if isinstance(post, tuple) else None
-                folder = source_details.get("folder") or source_details.get("channel") or "INBOX"
-                if sequence:
-                    _mark_imap_seen(api_src, folder, sequence)
+            if not is_imap_source or not imap_marker_mode:
+                return
+            sequence = post[0] if isinstance(post, tuple) else None
+            folder = source_details.get("folder") or source_details.get("channel") or "INBOX"
+            if not sequence:
+                return
+            if imap_marker_mode == "keyword":
+                _imap_store_keyword(api_src, folder, sequence, imap_marker_value, add=True)
+            elif imap_marker_mode == "flag_seen":
+                _mark_imap_seen(api_src, folder, sequence)
+            elif imap_marker_mode == "folder":
+                _imap_move_to_folder_safely(
+                    api_src, imap_capabilities, folder, sequence, imap_marker_value
+                )
 
         from manage_agenda.scheduling import message_age_limit_days
 
