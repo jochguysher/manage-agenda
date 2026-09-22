@@ -192,7 +192,8 @@ class TestCliCommands(unittest.TestCase):
         result = self.runner.invoke(self.cli.cli, ["auth"])
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Enable the Gcalendar API", result.output)
+        self.assertIn("Google was not contacted", result.output)
+        self.assertIn("/path/to/config", result.output)
 
     @patch("manage_agenda.cli.authorize")
     def test_auth_verbose(self, mock_authorize):

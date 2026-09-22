@@ -41,8 +41,8 @@ manage-agenda = "manage_agenda.cli:cli"
 test = ["pytest", "pytest-cov", "pytest-mock"]
 dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "black", "isort", "ruff", "bandit"]
 
-[tool.uv]
-dev-dependencies = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "black", "isort", "ruff", "bandit"]
+[dependency-groups]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "black", "isort", "ruff", "bandit"]
 
 [tool.black]
 line-length = 100

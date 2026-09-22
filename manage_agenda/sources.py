@@ -1,4 +1,6 @@
 import datetime
+import email
+import hashlib
 import json
 import logging
 import os
@@ -14,7 +16,7 @@ from socialModules.configMod import CONFIGDIR, select_from_list
 
 from manage_agenda.base import write_file
 from manage_agenda.config import config
-from manage_agenda.connections import select_api
+from manage_agenda.connections import prepare_calendar, select_api
 from manage_agenda.extraction import _process_event_with_llm_and_calendar
 from manage_agenda.llm import select_llm
 from manage_agenda.web import reduce_html
@@ -33,6 +35,7 @@ class Args:
     text: Optional[str] = None
     output: str = "calendar"
     force_refresh: bool = False
+    rule: Optional[str] = None
 
 
 def get_add_sources(rules=None):
@@ -108,14 +111,304 @@ def _get_events_from_calendar(args, api_src, calendar=None):
     return posts
 
 
-def _get_emails_from_folder(args, api_src, folder=None):
+IMAP_MATCH_LIMIT = 30
+IMAP_SCAN_WINDOW = 200
+_IMAP_HEADER = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)])"
+
+
+def handled_mail_file():
+    """Message identities already sent through extraction."""
+    from manage_agenda.config import DATA_DIR
+
+    return Path(DATA_DIR) / "handled_mail_ids.json"
+
+
+def _read_id_set(path):
+    if not path.is_file():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    ids = data.get("ids") if isinstance(data, dict) else None
+    if not isinstance(ids, list):
+        return set()
+    return {str(item) for item in ids}
+
+
+def _write_id_set(path, ids):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"ids": sorted(ids)}, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def mail_identity(post):
+    """Stable id for a message: Message-ID, otherwise a hash of From, Date and Subject."""
+    message = post[1] if isinstance(post, tuple) and len(post) >= 2 else post
+    if not hasattr(message, "get"):
+        return ""
+    message_id = message.get("Message-ID") or message.get("Message-Id") or message.get("id") or ""
+    message_id = str(message_id).strip().strip("<>")
+    if message_id:
+        return message_id
+    parts = [str(message.get(key) or "") for key in ("From", "Date", "Subject")]
+    if not any(parts):
+        return ""
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+def load_handled_mail_ids(path=None):
+    return _read_id_set(Path(path) if path else handled_mail_file())
+
+
+def remember_handled_mail(identity, path=None):
+    if not identity:
+        return
+    path = Path(path) if path else handled_mail_file()
+    known = _read_id_set(path)
+    if identity in known:
+        return
+    _write_id_set(path, known | {identity})
+
+
+def unseen_messages(posts, handled=None, path=None):
+    """Drop messages whose identity was already handled, including repeats inside this batch."""
+    known = set(handled) if handled is not None else load_handled_mail_ids(path)
+    fresh = []
+    batch = set()
+    skipped = 0
+    for post in posts:
+        identity = mail_identity(post)
+        if identity and (identity in known or identity in batch):
+            skipped += 1
+            continue
+        if identity:
+            batch.add(identity)
+        fresh.append(post)
+    return fresh, skipped
+
+
+def _split_sender_rules(value):
+    """Split on commas that are not inside double quotes."""
+    parts = []
+    current = []
+    in_quotes = False
+    for char in str(value):
+        if char == '"':
+            in_quotes = not in_quotes
+            current.append(char)
+        elif char == "," and not in_quotes:
+            piece = "".join(current).strip()
+            if piece:
+                parts.append(piece)
+            current = []
+        else:
+            current.append(char)
+    piece = "".join(current).strip()
+    if piece:
+        parts.append(piece)
+    return parts
+
+
+def _clean_imap_text(value):
+    cleaned = "".join(char for char in str(value) if char not in '"\\\r\n')
+    return " ".join(cleaned.split())
+
+
+def _parse_sender_rule(text):
+    """One sender rule: address, domain, display name, or name plus address/domain.
+
+    A name with spaces is quoted or prefixed with name:. Inside one rule the
+    name and the address are both required (AND). Separate rules are OR.
+    """
+    rest = text.strip()
+    if not rest:
+        return None
+    name = None
+    if rest.lower().startswith("name:"):
+        rest = rest[5:].strip()
+        if rest.startswith('"'):
+            end = rest.find('"', 1)
+            if end < 0:
+                name = rest[1:]
+                rest = ""
+            else:
+                name = rest[1:end]
+                rest = rest[end + 1 :].strip()
+        else:
+            bits = rest.split(None, 1)
+            name = bits[0] if bits else ""
+            rest = bits[1].strip() if len(bits) > 1 else ""
+    elif rest.startswith('"'):
+        end = rest.find('"', 1)
+        if end < 0:
+            name = rest[1:]
+            rest = ""
+        else:
+            name = rest[1:end]
+            rest = rest[end + 1 :].strip()
+    elif "@" not in rest:
+        name = rest
+        rest = ""
+    address = _clean_imap_text(rest) if rest else ""
+    name = _clean_imap_text(name) if name else ""
+    if not name and not address:
+        return None
+    return {"name": name or None, "address": address or None}
+
+
+def parse_from_list(value):
+    if not value:
+        return []
+    rules = []
+    for part in _split_sender_rules(value):
+        rule = _parse_sender_rule(part)
+        if rule:
+            rules.append(rule)
+    return rules
+
+
+def _sender_criterion(rule):
+    """Match the raw From header so the display name and the address both count."""
+    if not rule:
+        return None
+    parts = []
+    if rule.get("name"):
+        parts.append(f'HEADER FROM "{rule["name"]}"')
+    if rule.get("address"):
+        parts.append(f'HEADER FROM "{rule["address"]}"')
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return "(" + " ".join(parts) + ")"
+
+
+def build_imap_from_search(senders):
+    """OR-combined From criteria. Read mail is included. An empty list matches nothing."""
+    criteria = []
+    for sender in senders or []:
+        rule = sender if isinstance(sender, dict) else _parse_sender_rule(str(sender))
+        piece = _sender_criterion(rule)
+        if piece:
+            criteria.append(piece)
+    if not criteria:
+        return None
+    if len(criteria) == 1:
+        one = criteria[0]
+        return one if one.startswith("(") else f"({one})"
+    expression = criteria[-1]
+    for piece in reversed(criteria[:-1]):
+        expression = f"OR {piece} {expression}"
+    return f"({expression})"
+
+
+def _imap_rule_mode(args):
+    explicit = getattr(args, "rule", None)
+    if explicit:
+        return explicit
+    if getattr(args, "source", None) == "imap":
+        return "review" if args.interactive else "auto"
+    return None
+
+
+def _mark_imap_seen(api_src, folder, sequence):
+    """Mark one message read. The message stays in its folder."""
+    client = api_src.getClient()
+    if client is None:
+        return False
+    client.select(folder)
+    typ, _data = client.store(str(sequence), "+FLAGS", "\\Seen")
+    return typ == "OK"
+
+
+def _fetched_message(fetched):
+    if not fetched:
+        return None
+    for part in fetched:
+        if isinstance(part, tuple) and len(part) >= 2 and isinstance(part[1], (bytes, bytearray)):
+            return email.message_from_bytes(part[1])
+    return None
+
+
+def _fetch_imap_matches(api_src, folder, criteria, handled=None):
+    """Read matching mail, including messages the user has already opened.
+
+    A read flag only means someone looked at the message. The event may still
+    be missing. Messages manage-agenda has already examined are skipped.
+    """
+    client = api_src.getClient()
+    if client is None:
+        print("IMAP is not connected")
+        return None
+    typ, _data = client.select(folder)
+    if typ != "OK":
+        print(f"Could not open {folder}")
+        return None
+    typ, data = client.search(None, criteria)
+    if typ != "OK" or not data or not data[0]:
+        print(f"No messages match {criteria}")
+        return None
+    # Highest sequence numbers are the most recently arrived.
+    sequences = list(reversed(data[0].split()))[:IMAP_SCAN_WINDOW]
+    known = set(handled) if handled is not None else load_handled_mail_ids()
+    posts = []
+    skipped = 0
+    for sequence in sequences:
+        sequence_text = sequence.decode() if isinstance(sequence, bytes) else str(sequence)
+        typ, header_fetch = client.fetch(sequence_text, _IMAP_HEADER)
+        header = _fetched_message(header_fetch) if typ == "OK" else None
+        identity = mail_identity((sequence_text, header)) if header is not None else ""
+        if identity and identity in known:
+            skipped += 1
+            continue
+        typ, body_fetch = client.fetch(sequence_text, "(BODY.PEEK[])")
+        message = _fetched_message(body_fetch) if typ == "OK" else None
+        if message is None:
+            continue
+        posts.append((sequence_text, message))
+        if identity:
+            known.add(identity)
+        if len(posts) >= IMAP_MATCH_LIMIT:
+            break
+    if skipped:
+        print(f"Skipped {skipped} message(s) already handled")
+    return posts or None
+
+
+def _get_emails_from_folder(args, api_src, folder=None, source_details=None):
     """Helper function to get emails from a specific folder."""
     "FIXME: maybe a folder argument?"
 
     posts = None
+    source_details = source_details or {}
+
+    configured_folder = source_details.get("folder") or source_details.get("channel")
+    if configured_folder or "from" in source_details:
+        folder = folder or configured_folder or "INBOX"
+        criteria = build_imap_from_search(parse_from_list(source_details.get("from", "")))
+        if criteria is None:
+            print(f"No sender rules for {folder}. Nothing is read.")
+            return None
+        from manage_agenda.scheduling import combine_imap_search, imap_age_criteria
+
+        criteria = combine_imap_search(criteria, imap_age_criteria(source_details))
+        return _fetch_imap_matches(api_src, folder, criteria)
 
     if not folder:
-        folder = "INBOX/zAgenda" if "imap" in api_src.service.lower() else "zAgenda"
+        tag = config.DEFAULT_EMAIL_TAG or "zAgenda"
+        folder = tag
+        if "imap" in (getattr(api_src, "service", "") or "").lower():
+            # Dovecot-style accounts nest the tag under INBOX. Proton Bridge
+            # exposes it as a top-level mailbox, so accept whichever exists.
+            api_src.setLabels()
+            for candidate in (f"INBOX/{tag}", tag):
+                if api_src.getLabels(candidate):
+                    folder = candidate
+                    break
+            else:
+                folder = f"INBOX/{tag}"
     api_src.setPostsType("posts")
     api_src.setLabels()
     label = api_src.getLabels(folder)
@@ -247,9 +540,11 @@ def _delete_email(args, api_src, post_id, source_name, rules=None):
                     return  # Exit after last attempt failure
 
 
-def _is_post_too_old(args, time_difference):
+def _is_post_too_old(args, time_difference, max_days=7):
     """Checks if an email is too old and confirms processing if interactive."""
-    if time_difference.days > 7:
+    if max_days is None or max_days < 0:
+        return False
+    if time_difference.days > max_days:
         if args.interactive:
             confirmation = input(
                 f"The post has {time_difference.days} days. Do you want to process it? (y/n): "
@@ -264,7 +559,15 @@ def _is_post_too_old(args, time_difference):
 
 
 def _process_common_flow(
-    args, model, items, metadata_extractor, content_extractor, item_cleaner=None, rules=None
+    args,
+    model,
+    items,
+    metadata_extractor,
+    content_extractor,
+    item_cleaner=None,
+    rules=None,
+    on_item_done=None,
+    max_message_age_days=7,
 ):
     """
     Common flow for processing items (emails, web pages).
@@ -272,41 +575,55 @@ def _process_common_flow(
     metadata_extractor: func(item, index) -> (post_id, post_title, post_date)
     content_extractor: func(item, index, post_date_time, post_title) -> content_text
     item_cleaner: func(item, index, post_id) -> void
+    on_item_done: func(item, index) -> void, called once the item has been considered
     """
+    from manage_agenda.exceptions import CalendarError, LLMError
+
     processed_any_event = False
     for i, item in enumerate(items):
-        # 1. Metadata
-        post_id, post_title, post_date = metadata_extractor(item, i)
+        finished = False
+        try:
+            # 1. Metadata
+            post_id, post_title, post_date = metadata_extractor(item, i)
 
-        print(f"Processing Title: {post_title}", flush=True)
+            print(f"Processing Title: {post_title}", flush=True)
 
-        # 2. Check Age
-        post_date_time, time_difference = _get_post_datetime_and_diff(post_date)
-        if _is_post_too_old(args, time_difference):
-            continue
+            # 2. Check Age
+            post_date_time, time_difference = _get_post_datetime_and_diff(post_date)
+            if _is_post_too_old(args, time_difference, max_message_age_days):
+                finished = True
+                continue
 
-        # 3. Content
-        content_text = content_extractor(item, i, post_date_time, post_title)
-        if not content_text:
-            continue
+            # 3. Content
+            content_text = content_extractor(item, i, post_date_time, post_title)
+            if not content_text:
+                finished = True
+                continue
 
-        # 4. Save & Print (Common)
-        write_file(f"log/{post_id}_text.txt", content_text)
-        if args.verbose:
-            print_first_10_lines(content_text, "content")
+            # 4. Save & Print (Common)
+            write_file(f"log/{post_id}_text.txt", content_text)
+            if args.verbose:
+                print_first_10_lines(content_text, "content")
 
-        # 5. Process with LLM
-        processed_event, calendar_result = _process_event_with_llm_and_calendar(
-            args, model, content_text, post_date_time, post_id, post_title, rules=rules
-        )
+            # 5. Process with LLM
+            try:
+                processed_event, calendar_result = _process_event_with_llm_and_calendar(
+                    args, model, content_text, post_date_time, post_id, post_title, rules=rules
+                )
+            except (LLMError, CalendarError) as error:
+                print(error)
+                print("Stopping this scan. Unfinished messages will be tried again.")
+                return processed_any_event
+            finished = True
 
-        # processed_event = True
-
-        if processed_event:
-            processed_any_event = True
-            # 6. Post-process
-            if item_cleaner:
-                item_cleaner(item, i, post_id)
+            if processed_event:
+                processed_any_event = True
+                # 6. Post-process
+                if item_cleaner:
+                    item_cleaner(item, i, post_id)
+        finally:
+            if finished and on_item_done:
+                on_item_done(item, i)
 
     return processed_any_event
 
@@ -396,13 +713,22 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     """Processes emails and creates calendar events."""
 
     rules = rules or moduleRules.from_config()
+    source_details = {}
     if selected_source:
-        source_details = rules.more.get(selected_source, {})
+        source_details = rules.more.get(selected_source, {}) or {}
         api_src = rules.readConfigSrc("", selected_source, source_details)
     else:
         api_src = select_api(args, "email", rules=rules)
 
-    posts = _get_emails_from_folder(args, api_src)
+    if not prepare_calendar(args, rules):
+        print("No message was read. Fix the calendar connection, then run the scan again.")
+        return False
+
+    posts = _get_emails_from_folder(args, api_src, source_details=source_details)
+    if posts:
+        posts, skipped = unseen_messages(posts)
+        if skipped:
+            print(f"Skipped {skipped} message(s) already handled")
 
     if posts:
 
@@ -417,21 +743,50 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         def content_extractor(post, i, post_date_time, post_title):
             full_email_content = api_src.getPostBody(post)
             date_message = str(post_date_time).split(" ")[0]
+            sender = ""
+            if hasattr(api_src, "getPostFrom"):
+                try:
+                    sender = api_src.getPostFrom(post) or ""
+                except Exception:
+                    sender = ""
             return (
+                f"From: {sender}\n"
                 f"Subject: {post_title}\n"
                 f"Message: {full_email_content}\n"
                 f"Message date: {date_message}\n"
             )
 
         def item_cleaner(post, i, post_id):
+            if "imap" in api_src.service.lower() and source_details.get("mark") == "seen":
+                return
             if "imap" in api_src.service.lower():
                 post_pos = i + 1
             else:
                 post_pos = post_id
             _delete_email(args, api_src, post_pos, selected_source, rules=rules)
 
+        def on_item_done(post, i):
+            remember_handled_mail(mail_identity(post))
+            if "imap" in (getattr(api_src, "service", "") or "").lower() and source_details.get(
+                "mark"
+            ) == "seen":
+                sequence = post[0] if isinstance(post, tuple) else None
+                folder = source_details.get("folder") or source_details.get("channel") or "INBOX"
+                if sequence:
+                    _mark_imap_seen(api_src, folder, sequence)
+
+        from manage_agenda.scheduling import message_age_limit_days
+
         return _process_common_flow(
-            args, model, posts, metadata_extractor, content_extractor, item_cleaner, rules=rules
+            args,
+            model,
+            posts,
+            metadata_extractor,
+            content_extractor,
+            item_cleaner,
+            rules=rules,
+            on_item_done=on_item_done,
+            max_message_age_days=message_age_limit_days(source_details),
         )
     return False  # Default return if something went wrong before the main logic
 
@@ -586,17 +941,20 @@ def add_events_cli(args, rules=None):
         print(f"Source: {args.source}")
         logging.debug(f"Sources: {sources}")
         logging.debug(f"More options: {more_options}")
+    matches = []
     if args.source:
         matches = [item for item in sources if args.source in item]
         if not matches and more_options:
             matches = [item for item in more_options if args.source in str(item)]
-    if args.interactive:
+    mode = _imap_rule_mode(args)
+    if mode and matches:
+        tagged = [item for item in matches if (rules.more.get(item) or {}).get("mode") == mode]
+        if tagged:
+            matches = tagged
+    if args.interactive and not (args.source == "imap" and mode):
         sel, selected = select_from_list(
             sources, more_options=more_options, title="Sources of information"
         )
-        # selected = rules.selectRuleInteractive(
-        #     sources, title="Select Rule", more_options=more_options
-        # )
     else:
         selected = matches[0] if matches else None
     if selected:

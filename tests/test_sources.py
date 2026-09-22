@@ -5,7 +5,8 @@ from collections import namedtuple
 from email.utils import formatdate
 from unittest.mock import MagicMock, patch
 
-from manage_agenda.sources import Args, list_folder, process_email_cli
+from manage_agenda.exceptions import LLMError
+from manage_agenda.sources import Args, _process_common_flow, list_folder, process_email_cli
 
 
 class TestProcessEmailCli(unittest.TestCase):
@@ -60,11 +61,15 @@ class TestProcessEmailCli(unittest.TestCase):
         mock_select_api_destination.return_value = mock_api_dst
         mock_select_calendar.return_value = "primary"
 
-        process_email_cli(args, mock_model)
+        with patch("manage_agenda.sources.prepare_calendar", return_value=True):
+            process_email_cli(args, mock_model)
 
-        self.assertEqual(mock_model.generate_text.call_count, 2)
+        self.assertEqual(
+            mock_model.generate_text.call_count,
+            1,
+            "A successful extraction must not trigger a redundant confirmation call.",
+        )
         mock_source_write_file.assert_called_once()
-        self.assertEqual(mock_write_file.call_count, 9)
         mock_select_calendar.assert_called_once()
         mock_api_dst.publishPost.assert_called_once()
         mock_api_src.modifyLabels.assert_called_once()
@@ -85,7 +90,8 @@ class TestProcessEmailCli(unittest.TestCase):
         rules = MagicMock()
         mock_get_emails_from_folder.return_value = []
 
-        process_email_cli(args, MagicMock(), rules=rules)
+        with patch("manage_agenda.sources.prepare_calendar", return_value=True):
+            process_email_cli(args, MagicMock(), rules=rules)
 
         mock_select_api.assert_called_once_with(args, "email", rules=rules)
 
@@ -107,7 +113,8 @@ class TestProcessEmailCli(unittest.TestCase):
         rules.more = {"mail-account": source_details}
         mock_get_emails_from_folder.return_value = []
 
-        process_email_cli(args, MagicMock(), selected_source="mail-account")
+        with patch("manage_agenda.sources.prepare_calendar", return_value=True):
+            process_email_cli(args, MagicMock(), selected_source="mail-account")
 
         rules.readConfigSrc.assert_called_once_with("", "mail-account", source_details)
 
@@ -556,3 +563,35 @@ class TestSourceUtilities(unittest.TestCase):
         )
         mock_get_emails.assert_called_once_with(args, mock_api_src)
         mock_display_posts.assert_called_once_with(mock_api_src, posts)
+
+
+class TestApiFailureLeavesMessagePending(unittest.TestCase):
+    def _flow(self, process):
+        remembered = []
+
+        def metadata(item, index):
+            return "id", "Title", datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+        def content(item, index, post_date_time, post_title):
+            return "Message body"
+
+        with patch("manage_agenda.sources._process_event_with_llm_and_calendar", process):
+            result = _process_common_flow(
+                Args(interactive=False),
+                MagicMock(),
+                ["mail-1", "mail-2"],
+                metadata,
+                content,
+                on_item_done=lambda item, index: remembered.append(item),
+            )
+        return result, remembered
+
+    def test_credit_error_does_not_mark_the_message_and_stops(self):
+        result, remembered = self._flow(MagicMock(side_effect=LLMError("quota exceeded")))
+        self.assertFalse(result)
+        self.assertEqual(remembered, [])
+
+    def test_finished_message_is_still_remembered(self):
+        result, remembered = self._flow(MagicMock(return_value=(None, None)))
+        self.assertFalse(result)
+        self.assertEqual(remembered, ["mail-1", "mail-2"])

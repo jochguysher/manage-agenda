@@ -1,10 +1,17 @@
 import unittest
 from collections import namedtuple
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from socialModules.configMod import safe_get, select_from_list
 
-from manage_agenda.connections import authorize, select_api, select_calendar
+from manage_agenda.connections import (
+    authorize,
+    describe_auth_failure,
+    select_api,
+    select_calendar,
+)
+from manage_agenda.exceptions import CalendarError
 from manage_agenda.sources import Args
 
 
@@ -27,6 +34,32 @@ class TestConnections(unittest.TestCase):
         mock_calendar_api.setCalendarList.assert_called_once()
         mock_select_from_list.assert_called_once()
         self.assertEqual(result, "id1")
+
+    def test_select_calendar_without_a_client(self):
+        calendar_api = MagicMock()
+        calendar_api.getClient.return_value = None
+        calendar_api.user = "someone@example.com"
+        with self.assertRaises(CalendarError) as raised:
+            select_calendar(calendar_api)
+        self.assertIn(".Gcalendar_example.com_someone.json", str(raised.exception))
+        calendar_api.setCalendarList.assert_not_called()
+
+    def test_auth_failure_names_the_file_without_the_leading_dot(self):
+        folder = Path("/tmp/manage-agenda-auth-msg")
+        folder.mkdir(exist_ok=True)
+        expected = folder / ".Gcalendar_example.com_someone.json"
+        neighbor = folder / "Gcalendar_example.com_someone.json"
+        expected.unlink(missing_ok=True)
+        neighbor.write_text('{"installed": {}}', encoding="utf-8")
+        api = MagicMock()
+        api.confName.return_value = str(expected)
+        api.getServer.return_value = "gmail.com"
+        api.getNick.return_value = "someone"
+        message = describe_auth_failure(api)
+        self.assertIn(str(expected), message)
+        self.assertIn(str(neighbor), message)
+        self.assertIn("Google was not contacted", message)
+        neighbor.unlink(missing_ok=True)
 
     def test_safe_get(self):
         data = {"a": {"b": {"c": "value"}}}
@@ -79,10 +112,13 @@ class TestConnections(unittest.TestCase):
         )
         mock_rules = MagicMock()
         mock_module_rules.from_config.return_value = mock_rules
-        with patch("builtins.input", return_value="gmail"):
+        with patch(
+            "manage_agenda.connections.select_from_list",
+            return_value=(1, "gmail"),
+        ):
             authorize(args)
         mock_module_rules.from_config.assert_called_once()
-        mock_rules.selectRuleInteractive.assert_called_once_with("gmail")
+        mock_rules.selectRuleInteractive.assert_called_once_with("gmail", title="Account")
 
     @patch("manage_agenda.connections.moduleRules")
     def test_select_api_interactive(self, mock_module_rules):

@@ -90,10 +90,11 @@ class TestOllamaClient(unittest.TestCase):
     @patch("manage_agenda.llm.chat", side_effect=Exception("API Error"))
     def test_ollama_generate_text_error(self, mock_chat):
         """Test OllamaClient generate_text error handling."""
-        client = OllamaClient(model_name="llama2")
-        result = client.generate_text("test prompt")
+        from manage_agenda.exceptions import LLMError
 
-        self.assertIsNone(result)
+        client = OllamaClient(model_name="llama2")
+        with self.assertRaises(LLMError):
+            client.generate_text("test prompt")
 
     @patch("manage_agenda.llm.ollama.list")
     def test_ollama_list_models(self, mock_list):
@@ -190,10 +191,11 @@ class TestGeminiClient(unittest.TestCase):
         mock_client_instance.models.generate_content.side_effect = Exception("API Error")
         mock_genai_client.return_value = mock_client_instance
 
-        client = GeminiClient(model_name="gemini-pro")
-        result = client.generate_text("test prompt")
+        from manage_agenda.exceptions import LLMError
 
-        self.assertIsNone(result)
+        client = GeminiClient(model_name="gemini-pro")
+        with self.assertRaises(LLMError):
+            client.generate_text("test prompt")
 
     @patch("manage_agenda.llm.genai.Client")
     @patch("manage_agenda.llm.load_config")
@@ -293,10 +295,11 @@ class TestMistralClient(unittest.TestCase):
         mock_models.data = [MagicMock(id="mistral-small")]
         mock_mistral.models.list.return_value = mock_models
 
-        client = MistralClient(model_name="mistral-small")
-        result = client.generate_text("test prompt")
+        from manage_agenda.exceptions import LLMError
 
-        self.assertIsNone(result)
+        client = MistralClient(model_name="mistral-small")
+        with self.assertRaises(LLMError):
+            client.generate_text("test prompt")
 
 
 class TestSelectLlm(unittest.TestCase):
@@ -391,7 +394,7 @@ class TestSelectLlm(unittest.TestCase):
             text="",
         )
         model = select_llm(args)
-        mock_gemini_client.assert_called_with("gemini-2.5-flash")
+        mock_gemini_client.assert_called_with("gemini-3.8-flash")
         self.assertEqual(model, mock_gemini_client.return_value)
 
         args = self.Args(

@@ -1,10 +1,16 @@
+import os
 import sys
 from runpy import run_module
 
 import click
 
 from .base import setup_logging
-from .connections import authorize
+from .connections import (
+    authorize,
+    complete_desktop_oauth,
+    credential_path,
+    describe_auth_failure,
+)
 from .evaluation import evaluate_models
 from .events import (
     clean_events_cli,
@@ -120,8 +126,14 @@ def evaluate(ctx, type_, output, prompt):
     default="calendar",
     help="Output destination: calendar or file",
 )
+@click.option(
+    "--rule",
+    type=click.Choice(["auto", "review"]),
+    default=None,
+    help="IMAP sender rule. Default is auto, or review when -s imap -i",
+)
 @click.pass_context
-def add(ctx, interactive, source, ai, force_refresh, destination, output):
+def add(ctx, interactive, source, ai, force_refresh, destination, output, rule):
     """Add entries to the calendar."""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
@@ -134,6 +146,7 @@ def add(ctx, interactive, source, ai, force_refresh, destination, output):
         text=None,
         output=output,
         force_refresh=force_refresh,
+        rule=rule,
     )
 
     add_events_cli(args)
@@ -162,31 +175,21 @@ def auth(ctx, interactive):
     if verbose:
         print(f"Args: {args}")
     api_src = authorize(args)
-    if not api_src.getClient():
-        msg = (
-            "1. Enable the Gcalendar API:\n"
-            "   Go to the Google Cloud Console. https://console.cloud.google.com/\n"
-            "   If you don't have a project, create one.\n"
-            '   Search for "Gmail API" in the API Library. \n'
-            "   Enable the Gmail API. \n"
-            "2. Create Credentials: \n"
-            '   In the Google Cloud Console, go to "APIs & Services" > "Credentials". \n'
-            '   Click "Create credentials" and choose "OAuth client ID".  \n'
-            "   You might be asked to configure the consent screen first. \n"
-            '   If so, click "Configure consent screen", choose "External",\n'
-            "     give your app a name, and save.\n"
-            '   Back on the "Create credentials" page, select "Web application\n" '
-            "     as the Application type. \n"
-            "   Give your OAuth 2.0 client a name. \n"
-            '   Add http://localhost:8080 to "Authorized JavaScript origins". \n'
-            '   Add http://localhost:8080/oauth2callback to "Authorized redirect URIs". \n'
-            '   Click "Create". \n'
-            "   Download the resulting JSON file (this is your credentials.json file). \n"
-            f"  and rename (or make a link) to: {api_src.confName((api_src.getServer(), api_src.getNick()))}\n"
-        )
-        print(msg)
-    else:
+    if api_src is not None and api_src.getClient():
         print("This account has been correctly authorized")
+        return
+
+    print(describe_auth_failure(api_src))
+    if api_src is not None and os.path.isfile(credential_path(api_src)):
+        print("Opening the browser for Google consent.")
+        if complete_desktop_oauth(api_src):
+            print("This account has been correctly authorized")
+            return
+        return
+    print(
+        "Create a Desktop app OAuth client and save the JSON under the expected name, "
+        "then run: uv run manage-agenda auth -i"
+    )
 
 
 @cli.command()

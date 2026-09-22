@@ -34,6 +34,8 @@ except Exception:
 
 from socialModules.configMod import CONFIGDIR, select_from_list
 
+from manage_agenda.exceptions import LLMError
+
 
 # This shouln't go here?
 def load_config(config_file):
@@ -130,7 +132,7 @@ class OllamaClient(LLMClient):
             if "model requires more system memory" in str(e) or "out of memory" in str(e).lower():
                 logging.error(f"Ollama model {self.model_name} requires more memory than available: {e}")
                 return "Memory"
-            return None
+            raise LLMError(str(e)) from e
 
     @staticmethod
     def list_models():
@@ -172,7 +174,7 @@ class GeminiClient(LLMClient):
             return response.text
         except Exception as e:
             logging.error(f"Error generating text with Gemini: {e}")
-            return None
+            raise LLMError(str(e)) from e
 
     #@staticmethod
     def list_models(self):
@@ -203,7 +205,7 @@ class MistralClient(LLMClient):
             return response.choices[0].message.content
         except Exception as e:
             logging.error(f"Error generating text with Mistral: {e}")
-            return None
+            raise LLMError(str(e)) from e
 
     @staticmethod
     def list_models(self):
@@ -231,7 +233,7 @@ def select_llm(args):
         if args.interactive:
             model = GeminiClient()
         else:
-            model = GeminiClient("gemini-2.5-flash")
+            model = GeminiClient("gemini-3.8-flash")
         return model
     elif ai == "mistral":
         model = MistralClient()

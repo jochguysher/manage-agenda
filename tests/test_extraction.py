@@ -1,14 +1,18 @@
 import datetime
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from manage_agenda.extraction import (
     add_message_to_event_description,
     create_event_dict,
     extract_json,
+    get_event_from_llm_with_retry,
 )
 from manage_agenda.sources import Args
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures" / "llm_responses"
 
 
 class TestExtraction(unittest.TestCase):
@@ -224,3 +228,60 @@ more text"""
         mock_select_api.assert_not_called()
         mock_select_calendar.assert_not_called()
         mock_write_file.assert_called()
+
+
+class TestMultiEventRetryPreservesDistinctDates(unittest.TestCase):
+    """Regression test for the "all extracted events share one date" bug.
+
+    get_event_from_llm_with_retry used to always make a second, independent
+    LLM call to "confirm" a first successful extraction (event_old started
+    empty, so the first result was always judged unstable), then
+    unconditionally REPLACE the first result with whatever that second call
+    returned - no merge, no validation. A correct multi-event extraction from
+    call 1 was silently discarded if call 2 (same prompt, fresh
+    non-deterministic generation) returned something worse, e.g. a single
+    collapsed event.
+
+    The fix: accept a successful extraction immediately, with no redundant
+    confirmation call.
+    """
+
+    def setUp(self):
+        self.multi_event_response = (FIXTURES_DIR / "multiple_events.txt").read_text(
+            encoding="utf-8"
+        )
+        patcher = patch("manage_agenda.extraction.write_file")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _model_with_responses(self, responses):
+        model = MagicMock()
+        model.model_name = "fixture"
+        model.generate_text.side_effect = responses
+        return model
+
+    def test_successful_multi_event_extraction_is_not_overwritten(self):
+        """A single-event response queued after the good multi-event one must
+        never be reached: the first, correct extraction is final."""
+        single_event_would_collapse_it = (
+            '{"summary": "", "start": {"dateTime": "2030-02-10", "timeZone": ""},'
+            ' "end": {"dateTime": "", "timeZone": ""}}'
+        )
+        model = self._model_with_responses(
+            [self.multi_event_response, single_event_would_collapse_it]
+        )
+        args = Args(interactive=False, verbose=False)
+
+        event, _, _ = get_event_from_llm_with_retry(model, "prompt", "post_multi", args)
+
+        self.assertEqual(
+            model.generate_text.call_count,
+            1,
+            "A redundant confirmation call was made after a successful extraction.",
+        )
+        self.assertIsInstance(event, (list, tuple))
+        self.assertEqual(len(event), 2)
+        self.assertEqual(
+            [item["start"]["dateTime"] for item in event],
+            ["2030-02-10", "2030-03-11"],
+        )

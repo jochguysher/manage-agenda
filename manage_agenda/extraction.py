@@ -2,6 +2,7 @@
 
 import ast
 import datetime
+import hashlib
 import json
 import logging
 import time
@@ -84,10 +85,16 @@ def extract_json(text):
 def get_event_from_llm(model, prompt, post_id, verbose=False):
     """Get event data from an LLM and parse its calendar JSON response."""
     from manage_agenda.sources import print_first_lines
+    from manage_agenda.exceptions import LLMError
+
     print(f"Calling LLM {model.model_name}")
     event, vcal_json = None, None
     start_time = time.time()
-    llm_response = model.generate_text(prompt)
+    try:
+        llm_response = model.generate_text(prompt)
+    except LLMError as error:
+        print(f"LLM API error: {error}")
+        return None, "ServiceError", time.time() - start_time
     write_file(f"log/{model.model_name}/{post_id}_llm.txt", llm_response)
     elapsed_time = time.time() - start_time
     print(f"AI call took {format_time(elapsed_time)} ({elapsed_time:.2f} seconds)")
@@ -142,7 +149,15 @@ def _with_source(args, source):
 
 
 def get_event_from_llm_with_retry(model, prompt, post_id, args):
-    """Call an LLM repeatedly and switch models if a memory error occurs."""
+    """Call an LLM repeatedly and switch models if a memory error occurs.
+
+    A successful extraction is accepted as soon as it is produced. Earlier
+    versions re-queried the model once more "to confirm" the first event's
+    date, then unconditionally replaced the whole result with whatever that
+    second, independent call returned. For a multi-event extraction, that
+    silently discarded a correct list of distinct events in favor of the
+    second call's (possibly collapsed or shorter) answer.
+    """
     event = None
     vcal_json = None
     elapsed_time = 0
@@ -150,31 +165,16 @@ def get_event_from_llm_with_retry(model, prompt, post_id, args):
     json_error_occurred = False
     retries = 0
     max_retries = 3
-    event_old = create_event_dict()
 
     while (
-        args.interactive
-        and not event
+        not event
         and not memory_error_occurred
         and not json_error_occurred
         and retries < max_retries
-    ) or (
-        not args.interactive
-        and (
-            not event
-            or (
-                event
-                and (
-                    (event[0] if isinstance(event, (list, tuple)) else event)["start"]["dateTime"]
-                    != event_old["start"]["dateTime"]
-                )
-                and retries < 2
-            )
-        )
     ):
-        if event and not args.interactive:
-            event_old = event[0] if isinstance(event, (list, tuple)) else event
         event, vcal_json, elapsed_time = get_event_from_llm(model, prompt, post_id, args.verbose)
+        if vcal_json == "ServiceError" or _is_occupancy_payload(event):
+            return event, vcal_json, elapsed_time
         retries += 1
 
         if vcal_json == "MemoryError":
@@ -204,11 +204,6 @@ def get_event_from_llm_with_retry(model, prompt, post_id, args):
             json_error_occurred = False
             print("Error in generated Json...")
 
-    if event and (
-        (event[0] if isinstance(event, (list, tuple)) else event)["start"]["dateTime"]
-        != event_old["start"]["dateTime"]
-    ):
-        print("Events matching, we'll add the event to the calendar")
     if not event and retries >= max_retries:
         vcal_json = "RetryError"
         print("Max retries reached. Skipping event processing.")
@@ -228,25 +223,38 @@ def _create_llm_prompt(*args):
         )
 
     content_text = content_text.replace("\r", "")
+    prompt_template = _prompt_template_for(content_text)
+    return (
+        prompt_template.replace("{event}", str(event)).replace("{content_text}", content_text)
+    )
+
+
+def _from_header(content_text):
+    for line in (content_text or "").splitlines():
+        if line.lower().startswith("from:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _prompt_template_for(content_text):
+    from manage_agenda.scheduling import prompt_template_for
+
+    specific = prompt_template_for(_from_header(content_text))
+    if specific:
+        return specific
     prompt_file = Path(__file__).parent / "prompts" / "event_extraction_prompt.txt"
     if prompt_file.exists():
-        prompt_template = prompt_file.read_text(encoding="utf-8")
-    else:
-        prompt_template = (
-            "Extract event information from the provided text and fill in the JSON structure below.\n\n"
-            f"JSON structure to fill:\n'{event}'\n\n"
-            "INSTRUCTIONS:\n"
-            "1. Extract event details from the message body ('Message:') and subject ('Subject:').\n"
-            "2. Use the reference date marked with 'Message date:' when interpreting relative dates (e.g., 'next Thursday').\n"
-            "3. Default timezone is CET if not specified otherwise.\n"
-            "4. The result must be a valid JSON with all fields and values enclosed in double quotes.\n"
-            "5. Replace any double or single quotes inside the extracted content with single quotes (') to avoid JSON parsing errors.\n"
-            "6. Place the start and end times in event['start']['dateTime'] and event['end']['dateTime'] respectively.\n"
-            "7. Do not translate the text; keep all information in the original language.\n"
-            "8. Return ONLY the completed JSON structure without any additional comments or explanations.\n\n"
-            f"SOURCE TEXT:\n{content_text}.\n"
-        )
-    return prompt_template.format(event=event, content_text=content_text)
+        return prompt_file.read_text(encoding="utf-8")
+    return (
+        "Extract event information from the provided text and fill in the JSON structure below.\n\n"
+        "JSON structure to fill:\n{event}\n\n"
+        "SOURCE TEXT:\n{content_text}\n"
+    )
+
+
+def _is_occupancy_payload(event):
+    item = event[0] if isinstance(event, (list, tuple)) and event else event
+    return isinstance(item, dict) and item.get("kind") == "room_occupancy"
 
 
 def _extract_event_with_llm_retry(
@@ -271,8 +279,11 @@ def _extract_event_with_llm_retry(
         total_elapsed_time += elapsed_time
         if args.verbose:
             print_first_lines(event, n=None, title="Event")
-        if event is None and vcal_json in {"MemoryError", "RetryError"}:
+        if event is None and vcal_json in {"MemoryError", "RetryError", "ServiceError"}:
             return event, vcal_json, total_elapsed_time, False, False, False
+
+        if _is_occupancy_payload(event):
+            return event, vcal_json, total_elapsed_time, True, False, False
 
         if event:
             if not isinstance(event, (list, tuple)):
@@ -382,23 +393,36 @@ def _process_event_with_llm_and_calendar(
             )
             break
 
-        event, _, elapsed_time, extraction_success, need_restart, need_another_ai = (
+        event, vcal_json, elapsed_time, extraction_success, need_restart, need_another_ai = (
             _extract_event_with_llm_retry(
                 args, model, content_text, reference_date_time, post_identifier, subject_for_print
             )
         )
+        if vcal_json == "ServiceError":
+            from manage_agenda.exceptions import LLMError
+
+            raise LLMError("The model API did not answer. This message stays pending.")
         if need_restart or need_another_ai:
             return None, None
         if not extraction_success or event is None:
             return None, None
 
-        events = list(event)
-        if getattr(args, "output", "calendar") == "calendar":
-            api_dst = select_api(args, "gcalendar", rules=rules, title="Select Calendar")
-            selected_calendar = select_calendar(api_dst, title=events[0]["summary"], args=args)
+        from manage_agenda.scheduling import as_occupancy, is_occupancy_sender
+
+        sender = _from_header(content_text)
+        if _is_occupancy_payload(event) or is_occupancy_sender(sender):
+            event = as_occupancy(event)
+            events, api_dst, selected_calendar = _visits_from_occupancy(
+                event, content_text, args, rules
+            )
+            if not events:
+                print("No visit fits the hours, the weekdays, and the next room occupation.")
+                return None, None
         else:
-            api_dst = None
-            selected_calendar = None
+            events = list(event)
+            api_dst, selected_calendar = _selected_calendar(
+                args, rules, title=events[0].get("summary", "Event")
+            )
         calendar_results = []
 
         if getattr(args, "output", "calendar") == "calendar" and not selected_calendar:
@@ -441,8 +465,16 @@ def _process_event_with_llm_and_calendar(
                 file_name = f"log/{post_identifier}_{idx}_times.json"
                 if getattr(args, "output", "calendar") == "calendar":
                     published, calendar_result = _publish_event_to_calendar(
-                        api_dst, single_event, selected_calendar
+                        api_dst, single_event, selected_calendar, source_id=post_identifier
                     )
+                    if not published or (
+                        isinstance(calendar_result, dict) and not calendar_result.get("success")
+                    ):
+                        from manage_agenda.exceptions import CalendarError
+
+                        raise CalendarError(
+                            "The calendar was not updated. This message stays pending."
+                        )
                 else:
                     write_file(
                         f"log/{model.model_name}/{post_identifier}_{idx}_times.json",
@@ -452,11 +484,13 @@ def _process_event_with_llm_and_calendar(
                     published = True
                 if published:
                     calendar_results.append(calendar_result)
-                    print(
-                        "Calendar event created"
-                        if getattr(args, "output", "calendar") == "calendar"
-                        else f"File {post_identifier}_{idx}_times.json created"
-                    )
+                    if getattr(args, "output", "calendar") == "calendar":
+                        if isinstance(calendar_result, dict) and calendar_result.get("duplicate"):
+                            print(f"Already on the calendar, skipped: {single_event.get('summary')}")
+                        else:
+                            print("Calendar event created")
+                    else:
+                        print(f"File {post_identifier}_{idx}_times.json created")
                     success = True
                     write_file(file_name, json.dumps(single_event))
 
@@ -470,15 +504,260 @@ def _process_event_with_llm_and_calendar(
     return None, None
 
 
-def _publish_event_to_calendar(api_dst, event, selected_calendar):
-    """Publish an event, retrying once after correcting invalid timezones."""
+def event_key_file():
+    """Local record of event identities already created or found on a calendar."""
+    from manage_agenda.config import DATA_DIR
+
+    return Path(DATA_DIR) / "event_keys.json"
+
+
+def _read_id_set(path):
+    if not path.is_file():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    ids = data.get("ids") if isinstance(data, dict) else None
+    if not isinstance(ids, list):
+        return set()
+    return {str(item) for item in ids}
+
+
+def _write_id_set(path, ids):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"ids": sorted(ids)}, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _normalize_summary(event):
+    return " ".join((event.get("summary") or "").casefold().split())
+
+
+def _start_token(event):
+    """Minute-precision UTC token so the same slot matches across formats."""
+    start = event.get("start") or {}
+    if start.get("date") and not start.get("dateTime"):
+        return f"d:{start['date']}"
+    raw = start.get("dateTime") or ""
+    if not raw:
+        return ""
+    try:
+        moment = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return str(raw)
+    if moment.tzinfo is None:
+        tzname = start.get("timeZone") or "UTC"
+        try:
+            import pytz
+
+            moment = pytz.timezone(tzname).localize(moment)
+        except Exception:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+    moment = moment.astimezone(datetime.timezone.utc).replace(second=0, microsecond=0)
+    return moment.strftime("%Y-%m-%dT%H:%M")
+
+
+def _identity_hash(*parts):
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def event_identity(event, source_id=""):
+    """Slot key (summary + start) and, when known, a key that also includes the source mail."""
+    summary = _normalize_summary(event)
+    start = _start_token(event)
+    slot = _identity_hash(summary, start) if summary and start else ""
+    source = _identity_hash(str(source_id), summary, start) if source_id and summary and start else ""
+    return slot, source
+
+
+def _stamp_event_identity(event, source_id=""):
+    slot, source = event_identity(event, source_id)
+    private = event.setdefault("extendedProperties", {}).setdefault("private", {})
+    if slot:
+        private["manageAgendaSlot"] = slot
+    if source:
+        private["manageAgendaSource"] = source
+    return slot, source
+
+
+def _remember_event_keys(event, source_id="", path=None):
+    slot, source = event_identity(event, source_id)
+    keys = {key for key in (slot, source) if key}
+    if not keys:
+        return
+    path = Path(path) if path else event_key_file()
+    known = _read_id_set(path)
+    if keys.issubset(known):
+        return
+    _write_id_set(path, known | keys)
+
+
+def _calendar_items(response):
+    if not isinstance(response, dict):
+        return []
+    items = response.get("items")
+    return items if isinstance(items, list) else []
+
+
+def _start_window(event):
+    start = event.get("start") or {}
+    if start.get("date") and not start.get("dateTime"):
+        day = datetime.date.fromisoformat(start["date"])
+        opening = datetime.datetime.combine(day, datetime.time.min, tzinfo=datetime.timezone.utc)
+        return opening, opening + datetime.timedelta(days=1)
+    raw = start.get("dateTime") or ""
+    if not raw:
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    moment = moment.astimezone(datetime.timezone.utc)
+    return moment - datetime.timedelta(minutes=1), moment + datetime.timedelta(minutes=1)
+
+
+def _same_slot(existing, event):
+    return _normalize_summary(existing) == _normalize_summary(event) and _start_token(
+        existing
+    ) == _start_token(event)
+
+
+def find_existing_event(api_dst, event, calendar_id, source_id="", key_file=None):
+    """Return an existing calendar event that is the same appointment, if one is known."""
+    slot, source = event_identity(event, source_id)
+    known = _read_id_set(Path(key_file) if key_file else event_key_file())
+    if (slot and slot in known) or (source and source in known):
+        return {"duplicate": True, "htmlLink": ""}
+
+    client = api_dst.getClient()
+    for name, value in (("manageAgendaSlot", slot), ("manageAgendaSource", source)):
+        if not value:
+            continue
+        try:
+            response = (
+                client.events()
+                .list(
+                    calendarId=calendar_id,
+                    privateExtendedProperty=f"{name}={value}",
+                    maxResults=1,
+                    singleEvents=True,
+                )
+                .execute()
+            )
+        except Exception as error:
+            logging.warning(f"Could not look up {name}: {error}")
+            continue
+        items = _calendar_items(response)
+        if items:
+            return items[0]
+
+    window = _start_window(event)
+    if not window:
+        return None
+    time_min, time_max = window
+    try:
+        response = (
+            client.events()
+            .list(
+                calendarId=calendar_id,
+                timeMin=time_min.isoformat().replace("+00:00", "Z"),
+                timeMax=time_max.isoformat().replace("+00:00", "Z"),
+                singleEvents=True,
+                maxResults=20,
+            )
+            .execute()
+        )
+    except Exception as error:
+        logging.warning(f"Could not list events around the start time: {error}")
+        return None
+    for item in _calendar_items(response):
+        if _same_slot(item, event):
+            return item
+    return None
+
+
+def _selected_calendar(args, rules, title):
+    """Use the calendar chosen before the scan, or ask once if it was not prepared."""
+    if getattr(args, "output", "calendar") != "calendar":
+        return None, None
+    api_dst = getattr(args, "calendar_api", None)
+    selected_calendar = getattr(args, "calendar_id", None)
+    if api_dst and selected_calendar:
+        return api_dst, selected_calendar
+    api_dst = select_api(args, "gcalendar", rules=rules, title="Select Calendar")
+    selected_calendar = select_calendar(api_dst, title=title, args=args)
+    return api_dst, selected_calendar
+
+
+def _visits_from_occupancy(event, content_text, args, rules):
+    """Choose a visit before the next occupation, inside the configured hours."""
+    from manage_agenda.scheduling import (
+        availability_for,
+        busy_intervals,
+        plan_room_visits,
+    )
+
+    payload = event[0] if isinstance(event, (list, tuple)) else event
+    sender = _from_header(content_text)
+    constraints = availability_for(sender)
+    api_dst = None
+    selected_calendar = None
+    busy = []
+    api_dst, selected_calendar = _selected_calendar(args, rules, title="Visite")
+    if api_dst and selected_calendar:
+        busy = _calendar_busy(api_dst, selected_calendar, constraints)
+    visits = plan_room_visits(payload, constraints, busy=busy, sender=sender)
+    return visits, api_dst, selected_calendar
+
+
+def _calendar_busy(api_dst, calendar_id, constraints):
+    from manage_agenda.scheduling import busy_intervals
+
+    start = datetime.datetime.now(datetime.timezone.utc)
+    end = start + datetime.timedelta(days=constraints.horizon_days)
+    try:
+        response = (
+            api_dst.getClient()
+            .events()
+            .list(
+                calendarId=calendar_id,
+                timeMin=start.isoformat().replace("+00:00", "Z"),
+                timeMax=end.isoformat().replace("+00:00", "Z"),
+                singleEvents=True,
+                maxResults=100,
+            )
+            .execute()
+        )
+    except Exception as error:
+        logging.warning(f"Could not read the calendar while choosing a visit: {error}")
+        return []
+    return busy_intervals(response)
+
+
+def _publish_event_to_calendar(api_dst, event, selected_calendar, source_id=""):
+    """Publish an event, skipping one that is already on the calendar."""
     from manage_agenda.events import _ensure_valid_event_timezones
 
+    _stamp_event_identity(event, source_id)
+    existing = find_existing_event(api_dst, event, selected_calendar, source_id)
+    if existing:
+        _remember_event_keys(event, source_id)
+        link = existing.get("htmlLink", "") if isinstance(existing, dict) else ""
+        return True, {"success": True, "duplicate": True, "post_url": link}
+
+    def _insert(body):
+        result = api_dst.publishPost(post={"event": body, "idCal": selected_calendar}, api=api_dst)
+        if isinstance(result, dict) and result.get("success"):
+            _remember_event_keys(body, source_id)
+        return True, result
+
     try:
-        return True, api_dst.publishPost(
-            post={"event": event, "idCal": selected_calendar},
-            api=api_dst,
-        )
+        return _insert(event)
     except googleapiclient.errors.HttpError as error:
         logging.error(f"Error creating calendar event: {error}")
         if "Invalid time zone definition for end time'" in str(error):
@@ -487,10 +766,7 @@ def _publish_event_to_calendar(api_dst, event, selected_calendar):
             )
             event = _ensure_valid_event_timezones(event, fallback_tz="UTC")
             try:
-                return True, api_dst.publishPost(
-                    post={"event": event, "idCal": selected_calendar},
-                    api=api_dst,
-                )
+                return _insert(event)
             except Exception as retry_error:
                 logging.error(f"Retry after timezone correction failed: {retry_error}")
     return False, None
