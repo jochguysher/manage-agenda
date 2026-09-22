@@ -4,7 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from manage_agenda.extraction import _check_events_exist, event_identity
+import googleapiclient.errors
+
+from manage_agenda.extraction import _load_sync_tokens, event_identity, sync_calendar_changes
 from manage_agenda.sources import (
     Args,
     _extract_event_refs,
@@ -16,81 +18,113 @@ from manage_agenda.sources import (
 )
 
 
-class Http404(Exception):
-    def __init__(self, status=404):
-        self.resp = SimpleNamespace(status=status)
+def http_error(status):
+    return googleapiclient.errors.HttpError(SimpleNamespace(status=status, reason=""), b"{}")
 
 
-def _fake_batch_api(responses):
-    """responses: {(calendar_id, event_id): (response_dict_or_None, exception_or_None)}"""
-    client = MagicMock()
+class ScriptedCalendarClient:
+    """Each events().list(...).execute() call pops the next scripted response or exception."""
 
-    def get(calendarId, eventId):
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def events(self):
+        return self
+
+    def list(self, **kwargs):
+        self.calls.append(kwargs)
+        outcome = self._responses.pop(0)
         request = MagicMock()
-        request.result = responses[(calendarId, eventId)]
+        if isinstance(outcome, BaseException):
+            request.execute.side_effect = outcome
+        else:
+            request.execute.return_value = outcome
         return request
 
-    client.events.return_value.get.side_effect = get
 
-    class FakeBatch:
-        def __init__(self):
-            self.calls = []
-
-        def add(self, request, callback=None):
-            self.calls.append((request, callback))
-
-        def execute(self):
-            for request, callback in self.calls:
-                response, exception = request.result
-                callback(None, response, exception)
-
-    client.new_batch_http_request.side_effect = FakeBatch
+def _api(responses):
+    client = ScriptedCalendarClient(responses)
     api = MagicMock()
     api.getClient.return_value = client
     return api, client
 
 
-class TestCheckEventsExist(unittest.TestCase):
-    def test_present_cancelled_and_deleted_are_told_apart(self):
-        api, client = _fake_batch_api(
-            {
-                ("cal-1", "ev-present"): ({"status": "confirmed"}, None),
-                ("cal-1", "ev-cancelled"): ({"status": "cancelled"}, None),
-                ("cal-1", "ev-deleted"): (None, Http404()),
-            }
+class TestSyncCalendarChanges(unittest.TestCase):
+    def setUp(self):
+        self.path = Path("/tmp") / (self.id().replace(".", "_") + ".json")
+        self.path.unlink(missing_ok=True)
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+        self.addCleanup(lambda: Path(str(self.path) + ".tmp").unlink(missing_ok=True))
+
+    def test_first_call_seeds_a_token_and_reports_no_deletions(self):
+        api, client = _api([{"items": [{"id": "e1", "status": "confirmed"}], "nextSyncToken": "tok-1"}])
+
+        result = sync_calendar_changes(api, "cal-1", path=self.path)
+
+        self.assertEqual(result, set())
+        self.assertEqual(_load_sync_tokens(self.path), {"cal-1": "tok-1"})
+        self.assertNotIn("syncToken", client.calls[0])
+
+    def test_pagination_is_followed_until_the_last_page(self):
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        api, client = _api(
+            [
+                {"items": [{"id": "e1", "status": "confirmed"}], "nextPageToken": "page-2"},
+                {"items": [{"id": "e2", "status": "cancelled"}], "nextSyncToken": "tok-2"},
+            ]
         )
-        triples = [
-            ("msg-1", "cal-1", "ev-present"),
-            ("msg-2", "cal-1", "ev-cancelled"),
-            ("msg-3", "cal-1", "ev-deleted"),
-        ]
 
-        result = _check_events_exist(api, triples)
+        result = sync_calendar_changes(api, "cal-1", path=self.path)
 
-        self.assertTrue(result[("msg-1", "cal-1", "ev-present")])
-        self.assertFalse(result[("msg-2", "cal-1", "ev-cancelled")])
-        self.assertFalse(result[("msg-3", "cal-1", "ev-deleted")])
-        client.new_batch_http_request.assert_called_once()
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[1]["pageToken"], "page-2")
+        self.assertEqual(result, {"e2"})
+        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-2")
 
-    def test_unknown_error_keeps_the_event_treated_as_present(self):
-        api, _client = _fake_batch_api({("cal-1", "ev-x"): (None, Http404(status=500))})
-        result = _check_events_exist(api, [("msg-1", "cal-1", "ev-x")])
-        self.assertTrue(result[("msg-1", "cal-1", "ev-x")])
+    def test_existing_token_is_sent_and_cancelled_ids_are_reported(self):
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        api, client = _api(
+            [
+                {
+                    "items": [
+                        {"id": "e1", "status": "confirmed"},
+                        {"id": "e2", "status": "cancelled"},
+                    ],
+                    "nextSyncToken": "tok-new",
+                }
+            ]
+        )
 
-    def test_more_than_fifty_events_are_chunked_into_several_batches(self):
-        responses = {("cal-1", f"ev-{i}"): ({"status": "confirmed"}, None) for i in range(120)}
-        api, client = _fake_batch_api(responses)
-        triples = [(f"msg-{i}", "cal-1", f"ev-{i}") for i in range(120)]
+        result = sync_calendar_changes(api, "cal-1", path=self.path)
 
-        result = _check_events_exist(api, triples)
+        self.assertEqual(client.calls[0]["syncToken"], "tok-old")
+        self.assertEqual(result, {"e2"})
+        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-new")
 
-        self.assertEqual(len(result), 120)
-        self.assertEqual(client.new_batch_http_request.call_count, 3)
+    def test_expired_token_is_reseeded_without_reporting_deletions(self):
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        api, client = _api(
+            [
+                http_error(410),
+                {"items": [{"id": "e1", "status": "confirmed"}], "nextSyncToken": "tok-fresh"},
+            ]
+        )
 
-    def test_empty_input_makes_no_api_call(self):
-        api, client = _fake_batch_api({})
-        self.assertEqual(_check_events_exist(api, []), {})
-        client.new_batch_http_request.assert_not_called()
+        result = sync_calendar_changes(api, "cal-1", path=self.path)
+
+        self.assertEqual(result, set())
+        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-fresh")
+        self.assertNotIn("syncToken", client.calls[1])
+
+    def test_other_api_error_is_conservative_and_keeps_the_old_token(self):
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        api, _client = _api([http_error(500)])
+
+        result = sync_calendar_changes(api, "cal-1", path=self.path)
+
+        self.assertEqual(result, set())
+        self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-old")
 
 
 class TestEventIdentityIsCalendarScoped(unittest.TestCase):
@@ -177,13 +211,21 @@ class TestHandledMailStateMigration(unittest.TestCase):
 class TestReconcileHandledEvents(unittest.TestCase):
     def setUp(self):
         self.path = Path("/tmp") / (self.id().replace(".", "_") + ".json")
+        self.sync_path = Path("/tmp") / (self.id().replace(".", "_") + "_sync.json")
         self.path.unlink(missing_ok=True)
+        self.sync_path.unlink(missing_ok=True)
         self.addCleanup(lambda: self.path.unlink(missing_ok=True))
         self.addCleanup(lambda: Path(str(self.path) + ".tmp").unlink(missing_ok=True))
+        self.addCleanup(lambda: self.sync_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: Path(str(self.sync_path) + ".tmp").unlink(missing_ok=True))
 
     def _write_state(self, messages):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps({"messages": messages}), encoding="utf-8")
+
+    def _seed_sync_token(self, calendar_id, token):
+        self.sync_path.parent.mkdir(parents=True, exist_ok=True)
+        self.sync_path.write_text(json.dumps({"tokens": {calendar_id: token}}), encoding="utf-8")
 
     def test_message_with_deleted_event_is_released_for_reprocessing(self):
         self._write_state(
@@ -199,22 +241,47 @@ class TestReconcileHandledEvents(unittest.TestCase):
                 "msg-legacy": {"events": [], "status": "legacy"},
             }
         )
-        api, _client = _fake_batch_api(
-            {
-                ("cal-1", "ev-gone"): (None, Http404()),
-                ("cal-1", "ev-present"): ({"status": "confirmed"}, None),
-            }
+        self._seed_sync_token("cal-1", "tok-old")
+        api, _client = _api(
+            [
+                {
+                    "items": [
+                        {"id": "ev-gone", "status": "cancelled"},
+                        {"id": "ev-present", "status": "confirmed"},
+                    ],
+                    "nextSyncToken": "tok-new",
+                }
+            ]
         )
         args = Args(interactive=False)
         args.calendar_api = api
 
-        still_handled = reconcile_handled_events(args, path=self.path)
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
 
         self.assertEqual(still_handled, {"msg-present", "msg-legacy"})
         remaining_state = load_handled_mail_state(self.path)
         self.assertNotIn("msg-gone", remaining_state)
         self.assertIn("msg-present", remaining_state)
         self.assertIn("msg-legacy", remaining_state)
+
+    def test_one_sync_call_per_calendar_regardless_of_event_count(self):
+        self._write_state(
+            {
+                f"msg-{i}": {
+                    "events": [{"calendar_id": "cal-1", "event_id": f"ev-{i}"}],
+                    "status": "created",
+                }
+                for i in range(10)
+            }
+        )
+        self._seed_sync_token("cal-1", "tok-old")
+        api, client = _api([{"items": [], "nextSyncToken": "tok-new"}])
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(len(client.calls), 1)
 
     def test_no_calendar_connection_keeps_everything_handled(self):
         self._write_state(
@@ -223,7 +290,7 @@ class TestReconcileHandledEvents(unittest.TestCase):
         args = Args(interactive=False)
         args.calendar_api = None
 
-        still_handled = reconcile_handled_events(args, path=self.path)
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
 
         self.assertEqual(still_handled, {"msg-1"})
         self.assertIn("msg-1", load_handled_mail_state(self.path))
@@ -234,11 +301,14 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self._write_state(
             {"<gone@x>": {"events": [{"calendar_id": "cal-1", "event_id": "ev-gone"}], "status": "created"}}
         )
-        api, _client = _fake_batch_api({("cal-1", "ev-gone"): (None, Http404())})
+        self._seed_sync_token("cal-1", "tok-old")
+        api, _client = _api(
+            [{"items": [{"id": "ev-gone", "status": "cancelled"}], "nextSyncToken": "tok-new"}]
+        )
         args = Args(interactive=False)
         args.calendar_api = api
 
-        still_handled = reconcile_handled_events(args, path=self.path)
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
 
         message = EmailMessage()
         message["Message-ID"] = "<gone@x>"
@@ -246,6 +316,20 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
         self.assertEqual(skipped, 0)
         self.assertEqual([item[0] for item in fresh], [1])
+
+    def test_first_ever_run_bootstraps_and_releases_nothing(self):
+        self._write_state(
+            {"msg-1": {"events": [{"calendar_id": "cal-1", "event_id": "ev-1"}], "status": "created"}}
+        )
+        api, client = _api([{"items": [], "nextSyncToken": "tok-first"}])
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(still_handled, {"msg-1"})
+        self.assertNotIn("syncToken", client.calls[0])
+        self.assertEqual(_load_sync_tokens(self.sync_path)["cal-1"], "tok-first")
 
 
 if __name__ == "__main__":

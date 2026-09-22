@@ -229,13 +229,15 @@ def _extract_event_refs(calendar_result):
     return refs
 
 
-def reconcile_handled_events(args, path=None):
+def reconcile_handled_events(args, path=None, sync_state_path=None):
     """Drop messages whose recorded Calendar events have all been deleted, so they get reprocessed.
 
     Messages with no recorded event (too old, empty content, output=file, or migrated from the
     legacy ledger format) are left untouched: there is nothing to check, so they stay skipped.
-    Uses one grouped (batched) Calendar lookup for every event on record, instead of one API
-    call per message, to limit API traffic.
+
+    Uses Calendar's incremental sync (syncToken) - the mechanism sync clients use - to learn
+    what was cancelled since the last run: one cheap call per calendar, regardless of how many
+    events are on record, instead of one check per known event.
     """
     path = Path(path) if path else handled_mail_file()
     state = _load_state(path)
@@ -244,15 +246,18 @@ def reconcile_handled_events(args, path=None):
     if client is None:
         return set(state.keys())
 
-    from manage_agenda.extraction import _check_events_exist
+    from manage_agenda.extraction import sync_calendar_changes
 
-    triples = [
-        (identity, ev.get("calendar_id"), ev.get("event_id"))
-        for identity, entry in state.items()
+    calendar_ids = {
+        ev.get("calendar_id")
+        for entry in state.values()
         for ev in entry.get("events") or []
-        if ev.get("calendar_id") and ev.get("event_id")
-    ]
-    exists = _check_events_exist(api_dst, triples)
+        if ev.get("calendar_id")
+    }
+    cancelled_by_calendar = {
+        calendar_id: sync_calendar_changes(api_dst, calendar_id, path=sync_state_path)
+        for calendar_id in calendar_ids
+    }
 
     still_handled = set()
     changed = False
@@ -263,7 +268,9 @@ def reconcile_handled_events(args, path=None):
             still_handled.add(identity)
             continue
         remaining = [
-            ev for ev in events if exists.get((identity, ev.get("calendar_id"), ev.get("event_id")), True)
+            ev
+            for ev in events
+            if ev.get("event_id") not in cancelled_by_calendar.get(ev.get("calendar_id"), set())
         ]
         if remaining:
             still_handled.add(identity)

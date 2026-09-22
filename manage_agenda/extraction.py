@@ -652,82 +652,111 @@ def find_existing_event(api_dst, event, calendar_id, source_id=""):
     return None
 
 
-_EVENT_EXISTENCE_BATCH_SIZE = 50
+def calendar_sync_state_file():
+    """Per-calendar Calendar API sync tokens, used to detect deleted events incrementally."""
+    from manage_agenda.config import DATA_DIR
+
+    return Path(DATA_DIR) / "calendar_sync_tokens.json"
 
 
-def _chunked(items, size):
-    items = list(items)
-    for start in range(0, len(items), size):
-        yield items[start : start + size]
+def _load_sync_tokens(path):
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(tokens, dict):
+        return {}
+    return {str(key): str(value) for key, value in tokens.items()}
 
 
-def _event_missing_status(error):
-    """Google's not-found statuses for a deleted or never-existing event."""
-    status = getattr(getattr(error, "resp", None), "status", None)
-    return status in (404, 410)
+def _save_sync_tokens(path, tokens):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"tokens": tokens}, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
 
 
-def _check_events_exist(api_dst, triples):
-    """Check whether each (identity, calendar_id, event_id) is still on its calendar.
+def _list_all_pages(client, calendar_id, sync_token=None):
+    """Every event on one calendar since `sync_token` (or a full listing without one).
 
-    Uses one batched HTTP request per chunk of up to 50 events, instead of one call per
-    event, to limit API traffic. An event is "missing" only when Calendar answers 404/410
-    or reports it as cancelled; any other error is treated as "still there" so a transient
-    API problem cannot cause a message to be silently reprocessed.
-
-    Returns {(identity, calendar_id, event_id): bool}.
+    Follows nextPageToken across pages; the last page carries nextSyncToken, which the caller
+    stores and passes back next time to get only what changed since this call. Raises
+    googleapiclient.errors.HttpError on failure - in particular 410 Gone when sync_token has
+    expired and a fresh one must be seeded instead.
     """
-    results = {}
-    if not triples:
-        return results
+    items = []
+    next_sync_token = None
+    page_token = None
+    while True:
+        kwargs = {
+            "calendarId": calendar_id,
+            "showDeleted": True,
+            "singleEvents": True,
+            "pageToken": page_token,
+        }
+        if sync_token:
+            kwargs["syncToken"] = sync_token
+        response = client.events().list(**kwargs).execute()
+        items.extend(_calendar_items(response))
+        next_sync_token = response.get("nextSyncToken", next_sync_token)
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return items, next_sync_token
+
+
+def sync_calendar_changes(api_dst, calendar_id, path=None):
+    """Ids cancelled on one calendar since the last call, via Calendar's incremental sync.
+
+    This is the mechanism sync clients use: one cheap call returns only what changed since a
+    stored syncToken, regardless of how many events are being tracked - not one check per known
+    event. The first call for a calendar (no token yet), or one made after a stored token has
+    expired (Calendar answers 410 Gone), only seeds/reseeds the token and reports no deletions:
+    without a prior valid token there is no "since when" to compare against, so nothing can be
+    said about what changed. Any other API error is treated the same way, conservatively.
+
+    Returns the set of event ids reported as cancelled.
+    """
+    path = Path(path) if path else calendar_sync_state_file()
+    tokens = _load_sync_tokens(path)
+    token = tokens.get(calendar_id)
     client = api_dst.getClient()
-    for chunk in _chunked(triples, _EVENT_EXISTENCE_BATCH_SIZE):
-        _check_events_exist_chunk(client, chunk, results)
-    return results
 
+    def _bootstrap():
+        try:
+            _items, fresh_token = _list_all_pages(client, calendar_id)
+        except Exception as error:
+            logging.warning(f"Could not seed a Calendar sync token for {calendar_id}: {error}")
+            return set()
+        if fresh_token:
+            tokens[calendar_id] = fresh_token
+            _save_sync_tokens(path, tokens)
+        return set()
 
-def _check_events_exist_chunk(client, chunk, results):
-    def _make_callback(triple):
-        def _callback(request_id, response, exception):
-            if exception is not None:
-                results[triple] = not _event_missing_status(exception)
-                return
-            results[triple] = (response or {}).get("status") != "cancelled"
-
-        return _callback
-
-    try:
-        batch = client.new_batch_http_request()
-    except Exception:
-        batch = None
-
-    if batch is None:
-        for triple in chunk:
-            _, calendar_id, event_id = triple
-            results[triple] = _event_exists_single(client, calendar_id, event_id)
-        return
-
-    for triple in chunk:
-        _, calendar_id, event_id = triple
-        batch.add(
-            client.events().get(calendarId=calendar_id, eventId=event_id),
-            callback=_make_callback(triple),
-        )
+    if not token:
+        return _bootstrap()
 
     try:
-        batch.execute()
+        items, fresh_token = _list_all_pages(client, calendar_id, sync_token=token)
+    except googleapiclient.errors.HttpError as error:
+        if getattr(getattr(error, "resp", None), "status", None) == 410:
+            logging.info(f"Calendar sync token expired for {calendar_id}, reseeding.")
+            tokens.pop(calendar_id, None)
+            return _bootstrap()
+        logging.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
+        return set()
     except Exception as error:
-        logging.warning(f"Batch event existence check failed: {error}")
-        for triple in chunk:
-            results.setdefault(triple, True)
+        logging.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
+        return set()
 
+    if fresh_token:
+        tokens[calendar_id] = fresh_token
+        _save_sync_tokens(path, tokens)
 
-def _event_exists_single(client, calendar_id, event_id):
-    try:
-        response = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
-        return (response or {}).get("status") != "cancelled"
-    except Exception as error:
-        return not _event_missing_status(error)
+    return {item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")}
 
 
 def _selected_calendar(args, rules, title):
