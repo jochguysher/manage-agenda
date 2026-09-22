@@ -724,6 +724,30 @@ def _list_all_pages(client, calendar_id, sync_token=None, time_min=None):
     return items, next_sync_token
 
 
+def _confirm_missing_ids(client, calendar_id, missing_ids):
+    """Tell a genuine deletion apart from "just outside the bootstrap listing's time window".
+
+    One targeted get() per id - only for the ids a bounded bootstrap listing did not account
+    for at all, typically a handful, never the whole tracked set. An id is confirmed deleted on
+    404/410 or an explicit "cancelled" status; any other error is inconclusive and is left out,
+    the same conservative default used everywhere else here, so a transient API problem cannot
+    cause a message to be silently reprocessed.
+    """
+    confirmed = set()
+    for event_id in missing_ids:
+        try:
+            response = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        except googleapiclient.errors.HttpError as error:
+            if getattr(getattr(error, "resp", None), "status", None) in (404, 410):
+                confirmed.add(event_id)
+            continue
+        except Exception:
+            continue
+        if (response or {}).get("status") == "cancelled":
+            confirmed.add(event_id)
+    return confirmed
+
+
 def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=None):
     """Ids that need to be treated as deleted on one calendar, via Calendar's incremental sync.
 
@@ -734,11 +758,13 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=Non
 
     The first call for a calendar (no token yet), or one made after a stored token has expired
     (Calendar answers 410 Gone), has no "since when" to diff against, so instead it does one
-    bounded full listing (see _SYNC_BOOTSTRAP_WINDOW_DAYS) to seed a fresh token, and reports
-    as deleted any id in `tracked_event_ids` that is absent from that listing - covering
-    deletions that happened before this tool ever ran, or during the gap before a reseed, at
-    the cost of the same bootstrap window limitation. Any other API error is conservative:
-    nothing is reported and the stored token, if any, is left untouched.
+    bounded full listing (see _SYNC_BOOTSTRAP_WINDOW_DAYS) to seed a fresh token - covering
+    deletions that happened before this tool ever ran, or during the gap before a reseed. A
+    tracked id absent from that listing is not immediately assumed deleted, since it may simply
+    fall outside the listing's time window: it is instead confirmed with one targeted lookup
+    (see _confirm_missing_ids), so that window is a cost bound, not a source of false positives.
+    Any other API error is conservative: nothing is reported and the stored token, if any, is
+    left untouched.
 
     Returns the set of event ids to treat as deleted.
     """
@@ -761,13 +787,13 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_event_ids=None, path=Non
             _save_sync_tokens(path, tokens)
         else:
             logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
-        present_ids = {
-            item.get("id") for item in items if item.get("status") != "cancelled" and item.get("id")
-        }
+        listed_ids = {item.get("id") for item in items if item.get("id")}
         cancelled_ids = {
             item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")
         }
-        return cancelled_ids | (tracked_event_ids - present_ids)
+        missing_ids = tracked_event_ids - listed_ids
+        confirmed_missing = _confirm_missing_ids(client, calendar_id, missing_ids) if missing_ids else set()
+        return cancelled_ids | confirmed_missing
 
     if not token:
         return _bootstrap()

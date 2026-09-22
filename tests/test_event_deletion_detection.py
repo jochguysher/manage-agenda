@@ -23,11 +23,15 @@ def http_error(status):
 
 
 class ScriptedCalendarClient:
-    """Each events().list(...).execute() call pops the next scripted response or exception."""
+    """list(...) pops the next scripted response/exception in order; get(...) is looked up
+    by (calendarId, eventId) - order-independent, since _confirm_missing_ids may call it for
+    several ids in whatever order a set iterates."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, get_responses=None):
         self._responses = list(responses)
+        self._get_responses = dict(get_responses or {})
         self.calls = []
+        self.get_calls = []
 
     def events(self):
         return self
@@ -42,9 +46,19 @@ class ScriptedCalendarClient:
             request.execute.return_value = outcome
         return request
 
+    def get(self, calendarId, eventId):
+        self.get_calls.append((calendarId, eventId))
+        outcome = self._get_responses.get((calendarId, eventId))
+        request = MagicMock()
+        if isinstance(outcome, BaseException):
+            request.execute.side_effect = outcome
+        else:
+            request.execute.return_value = outcome
+        return request
 
-def _api(responses):
-    client = ScriptedCalendarClient(responses)
+
+def _api(responses, get_responses=None):
+    client = ScriptedCalendarClient(responses, get_responses=get_responses)
     api = MagicMock()
     api.getClient.return_value = client
     return api, client
@@ -89,19 +103,45 @@ class TestSyncCalendarChanges(unittest.TestCase):
 
         self.assertNotIn("pageToken", client.calls[0])
 
-    def test_bootstrap_reports_tracked_ids_missing_from_the_listing_as_deleted(self):
-        api, _client = _api([{"items": [{"id": "e-still-there", "status": "confirmed"}]}])
+    def test_bootstrap_confirms_a_missing_tracked_id_before_reporting_it_deleted(self):
+        api, client = _api(
+            [{"items": [{"id": "e-still-there", "status": "confirmed"}]}],
+            get_responses={("cal-1", "e-gone"): http_error(404)},
+        )
 
         result = sync_calendar_changes(
             api, "cal-1", tracked_event_ids={"e-still-there", "e-gone"}, path=self.path
         )
 
         self.assertEqual(result, {"e-gone"})
+        self.assertEqual(client.get_calls, [("cal-1", "e-gone")])
 
-    def test_reseed_after_expiry_also_diffs_tracked_ids(self):
+    def test_id_missing_from_the_window_but_still_on_calendar_is_not_reported(self):
+        """A tracked id can be absent from the bounded bootstrap listing just because its start
+        time falls outside the window, not because it was deleted - the targeted confirmation
+        must tell the two apart instead of treating "absent from the listing" as proof."""
+        api, client = _api(
+            [{"items": []}],
+            get_responses={("cal-1", "e-far-future"): {"status": "confirmed"}},
+        )
+
+        result = sync_calendar_changes(api, "cal-1", tracked_event_ids={"e-far-future"}, path=self.path)
+
+        self.assertEqual(result, set())
+        self.assertEqual(client.get_calls, [("cal-1", "e-far-future")])
+
+    def test_confirmation_call_is_not_made_for_ids_already_seen_in_the_listing(self):
+        api, client = _api([{"items": [{"id": "e-still-there", "status": "confirmed"}]}])
+
+        sync_calendar_changes(api, "cal-1", tracked_event_ids={"e-still-there"}, path=self.path)
+
+        self.assertEqual(client.get_calls, [])
+
+    def test_reseed_after_expiry_also_confirms_missing_tracked_ids(self):
         self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
         api, _client = _api(
-            [http_error(410), {"items": [{"id": "e-still-there", "status": "confirmed"}]}]
+            [http_error(410), {"items": [{"id": "e-still-there", "status": "confirmed"}]}],
+            get_responses={("cal-1", "e-gone"): http_error(410)},
         )
 
         result = sync_calendar_changes(
@@ -378,12 +418,16 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertEqual(_load_sync_tokens(self.sync_path)["cal-1"], "tok-first")
 
     def test_first_ever_run_also_detects_a_deletion_via_the_bootstrap_diff(self):
-        """No prior sync token yet still catches a deletion, by diffing tracked ids against
-        the bootstrap listing - not just "no baseline, so report nothing"."""
+        """No prior sync token yet still catches a deletion: a tracked id absent from the
+        bootstrap listing is confirmed by a targeted lookup, not just "no baseline, report
+        nothing"."""
         self._write_state(
             {"msg-1": {"events": [{"calendar_id": "cal-1", "event_id": "ev-gone"}], "status": "created"}}
         )
-        api, _client = _api([{"items": [], "nextSyncToken": "tok-first"}])
+        api, _client = _api(
+            [{"items": [], "nextSyncToken": "tok-first"}],
+            get_responses={("cal-1", "ev-gone"): http_error(404)},
+        )
         args = Args(interactive=False)
         args.calendar_api = api
 
