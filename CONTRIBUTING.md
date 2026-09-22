@@ -176,8 +176,17 @@ manage-agenda/
 │   ├── evaluation.py      # LLM evaluation workflows
 │   ├── events.py          # Calendar event operations
 │   ├── extraction.py      # LLM event extraction
+│   ├── i18n.py            # t(): interface language resolution
+│   ├── interactive.py     # questionary lists (console only, see "The UI port")
 │   ├── llm.py             # LLM provider clients and selection
+│   ├── messages.py        # en/fr message catalogue
+│   ├── scheduling.py      # Availability and room-visit planning
 │   ├── sources.py         # Source ingestion workflows
+│   ├── ui/                # The UI port (see below)
+│   │   ├── __init__.py    # UI protocol, get_ui()/set_ui()/use_ui(), echo()
+│   │   ├── console.py     # ConsoleUI: the terminal implementation
+│   │   └── fake.py        # ScriptedUI: answers from a queue, for tests
+│   ├── user_config.py     # config.yaml (saved provider/model/calendars)
 │   └── web.py             # Web scraping
 ├── tests/                 # Test suite
 ├── .env.example          # Environment template
@@ -185,6 +194,56 @@ manage-agenda/
 ├── pyproject.toml        # Project configuration
 └── README.md
 ```
+
+A new subpackage must be added to `[tool.setuptools] packages` in `pyproject.toml`: the
+list is explicit, and a package left out of it is silently missing from the non-editable
+install CI uses.
+
+## The UI port
+
+Library code (everything under `manage_agenda/` except `cli.py`) never reads the terminal
+or writes to stdout directly. Every question goes through the current UI object, and every
+line shown to the user goes through `echo`:
+
+```python
+from manage_agenda.ui import echo, get_ui
+
+if get_ui().confirm(t("sources.confirm_remove_label")):
+    ...
+chosen = get_ui().choose_one(options, title=t("..."), identifier="summary")
+echo(t("extraction.calendar_event_created"))
+```
+
+`manage_agenda.ui.UI` lists the prompt kinds (`choose_one`, `choose_many`, `choose_action`,
+`confirm`, `ask_text`, `ask_multiline`, `review_event`, `select_events`, `echo`).
+`ConsoleUI`, the default, reproduces the classic terminal behaviour, so the CLI does not
+change; a GUI answers the same questions with dialogs. Any implementation may raise
+`manage_agenda.exceptions.UserCancelled` (a `BaseException`, like `KeyboardInterrupt`) when
+the user backs out - never catch it in library code.
+
+Rules, enforced by `tests/test_no_stdin_in_library.py` (an AST walk over the package):
+
+- no `input()`, `click.prompt()`, `click.confirm()`, socialModules' `select_from_list()` or
+  `rules.selectRuleInteractive()` outside `manage_agenda/ui/console.py`;
+- no import of `manage_agenda.interactive` outside `manage_agenda/ui/console.py`; library
+  code uses `manage_agenda.ui.select_one` / `select_many`, which dispatch to the current UI;
+- no `questionary` outside `interactive.py`.
+
+In tests, install a `ScriptedUI` with the answers the flow will ask for, then assert on what
+it asked:
+
+```python
+from manage_agenda.ui import use_ui
+from manage_agenda.ui.fake import ScriptedUI
+
+with use_ui(ScriptedUI([("confirm", True), ("choose_one", 0)])) as ui:
+    process_something(args)
+assert [call.kind for call in ui.calls] == ["confirm", "choose_one"]
+```
+
+pytest-style tests can take the `scripted_ui` fixture instead (it also checks every queued
+answer was consumed). `ScriptedUI(lenient=True)` answers unqueued prompts with a neutral
+default (first option, nothing, no) for tests that do not care about the prompts.
 
 ## Getting Help
 
