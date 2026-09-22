@@ -570,7 +570,13 @@ class TestApiFailureLeavesMessagePending(unittest.TestCase):
         remembered = []
 
         def metadata(item, index):
-            return "id", "Title", datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+            return (
+                "id",
+                "Title",
+                datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000"),
+                None,
+                0,
+            )
 
         def content(item, index, post_date_time, post_title):
             return "Message body"

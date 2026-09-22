@@ -1,6 +1,7 @@
 """LLM-driven calendar event extraction and publication helpers."""
 
 import ast
+import base64
 import datetime
 import hashlib
 import json
@@ -383,13 +384,24 @@ def _process_event_with_llm_and_calendar(
     post_identifier,
     subject_for_print,
     rules=None,
+    dedup_identity=None,
+    generation=0,
 ):
-    """Extract events, validate their dates, and publish or write them."""
+    """Extract events, validate their dates, and publish or write them.
+
+    `dedup_identity`/`generation` feed the deterministic event id (see
+    deterministic_event_id()). `dedup_identity` defaults to `post_identifier` when not given
+    explicitly (web/txt sources, which have no ledger/generation concept - always
+    generation=0); the email flow passes mail_identity() and the ledger's tracked
+    generation for that identity instead.
+    """
     from manage_agenda.events import (
         _validate_event_dates_interactive,
         _validate_event_dates_non_interactive,
         adjust_event_times,
     )
+
+    identity = dedup_identity if dedup_identity is not None else post_identifier
 
     success = False
     should_process = True
@@ -480,11 +492,17 @@ def _process_event_with_llm_and_calendar(
                     calendar_result = []
                     all_published = True
                     for calendar_id in selected_calendars:
-                        # A separate copy per calendar: publishing stamps identity properties
-                        # onto the event dict that are scoped to one calendar, and would
-                        # otherwise be overwritten before the next calendar's insert.
+                        # A separate copy per calendar: the id and extendedProperties are
+                        # identical across calendars now (the deterministic id is not
+                        # calendar-scoped), but a retry-path mutation (e.g. the timezone
+                        # correction below) for one calendar must not leak into the next.
                         published, single_result = _publish_event_to_calendar(
-                            api_dst, deepcopy(single_event), calendar_id, source_id=post_identifier
+                            api_dst,
+                            deepcopy(single_event),
+                            calendar_id,
+                            source_id=identity,
+                            generation=generation,
+                            event_index=idx,
                         )
                         if not published or (
                             isinstance(single_result, dict) and not single_result.get("success")
@@ -538,66 +556,6 @@ def _process_event_with_llm_and_calendar(
     return None, None
 
 
-def _normalize_summary(event):
-    return " ".join((event.get("summary") or "").casefold().split())
-
-
-def _start_token(event):
-    """Minute-precision UTC token so the same slot matches across formats."""
-    start = event.get("start") or {}
-    if start.get("date") and not start.get("dateTime"):
-        return f"d:{start['date']}"
-    raw = start.get("dateTime") or ""
-    if not raw:
-        return ""
-    try:
-        moment = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return str(raw)
-    if moment.tzinfo is None:
-        tzname = start.get("timeZone") or "UTC"
-        try:
-            import pytz
-
-            moment = pytz.timezone(tzname).localize(moment)
-        except Exception:
-            moment = moment.replace(tzinfo=datetime.timezone.utc)
-    moment = moment.astimezone(datetime.timezone.utc).replace(second=0, microsecond=0)
-    return moment.strftime("%Y-%m-%dT%H:%M")
-
-
-def _identity_hash(*parts):
-    raw = "|".join(parts)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-
-
-def event_identity(event, source_id="", calendar_id=""):
-    """Slot key (calendar + summary + start) and, when known, a key that also includes the source mail.
-
-    The calendar is part of the key so the same appointment inserted into two calendars (or
-    re-inserted after being deleted from one) is not mistaken for a duplicate of itself.
-    """
-    summary = _normalize_summary(event)
-    start = _start_token(event)
-    slot = _identity_hash(str(calendar_id), summary, start) if summary and start else ""
-    source = (
-        _identity_hash(str(calendar_id), str(source_id), summary, start)
-        if source_id and summary and start
-        else ""
-    )
-    return slot, source
-
-
-def _stamp_event_identity(event, source_id="", calendar_id=""):
-    slot, source = event_identity(event, source_id, calendar_id)
-    private = event.setdefault("extendedProperties", {}).setdefault("private", {})
-    if slot:
-        private["manageAgendaSlot"] = slot
-    if source:
-        private["manageAgendaSource"] = source
-    return slot, source
-
-
 def _calendar_items(response):
     if not isinstance(response, dict):
         return []
@@ -605,85 +563,54 @@ def _calendar_items(response):
     return items if isinstance(items, list) else []
 
 
-def _start_window(event):
-    start = event.get("start") or {}
-    if start.get("date") and not start.get("dateTime"):
-        day = datetime.date.fromisoformat(start["date"])
-        opening = datetime.datetime.combine(day, datetime.time.min, tzinfo=datetime.timezone.utc)
-        return opening, opening + datetime.timedelta(days=1)
-    raw = start.get("dateTime") or ""
-    if not raw:
-        return None
-    try:
-        moment = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=datetime.timezone.utc)
-    moment = moment.astimezone(datetime.timezone.utc)
-    return moment - datetime.timedelta(minutes=1), moment + datetime.timedelta(minutes=1)
+def deterministic_event_id(identity, generation, event_index):
+    """A Calendar event id derived from (identity, generation, event_index) - the same inputs
+    always produce the same id, so re-publishing the same event is idempotent by construction
+    instead of relying on Calendar to detect a duplicate insert (it does not guarantee that;
+    see docs/investigation-limite1.md, correction 1).
 
+    `identity` is the source message's stable identity (mail_identity() for email, or a
+    provider post id for web/txt sources, which have no ledger/generation concept and always
+    pass generation=0). `generation` increments each time this identity's tracked events are
+    requeued after a manual deletion, so a requeued re-publish never collides with the id of
+    the event that was just deleted (see correction 1: id reuse after deletion is not
+    guaranteed to be safe, so this design never attempts it).
 
-def _same_slot(existing, event):
-    return _normalize_summary(existing) == _normalize_summary(event) and _start_token(
-        existing
-    ) == _start_token(event)
-
-
-def find_existing_event(api_dst, event, calendar_id, source_id=""):
-    """Return an existing calendar event that is the same appointment, if one is known.
-
-    Always asks Calendar (by extendedProperty, then by time window) rather than trusting a
-    local cache: a cache that outlives a manually deleted event would make recreating that
-    event look like a no-op duplicate instead of actually recreating it.
+    Google requires base32hex (lowercase a-v, 0-9), length 5-1024, unique per calendar (not
+    globally) - a sha256 digest, base32hex-encoded, is comfortably within that and does not
+    need to be scoped by calendar_id itself.
     """
-    slot, source = event_identity(event, source_id, calendar_id)
+    raw = f"{identity}|{generation}|{event_index}".encode()
+    digest = hashlib.sha256(raw).digest()
+    return base64.b32hexencode(digest).decode("ascii").lower().rstrip("=")
 
-    client = api_dst.getClient()
-    for name, value in (("manageAgendaSlot", slot), ("manageAgendaSource", source)):
-        if not value:
-            continue
-        try:
-            response = (
-                client.events()
-                .list(
-                    calendarId=calendar_id,
-                    privateExtendedProperty=f"{name}={value}",
-                    maxResults=1,
-                    singleEvents=True,
-                )
-                .execute()
-            )
-        except Exception as error:
-            logging.warning(f"Could not look up {name}: {error}")
-            continue
-        items = _calendar_items(response)
-        if items:
-            return items[0]
 
-    window = _start_window(event)
-    if not window:
-        return None
-    time_min, time_max = window
+def _stamp_reconstructible_properties(event, identity, generation, event_index):
+    """Properties that let the ledger be rebuilt from Calendar alone (a live event only -
+    extendedProperties is not guaranteed to survive on a deleted one, see correction 2), via
+    events.list(privateExtendedProperty="origin=manage-agenda").
+    """
+    private = event.setdefault("extendedProperties", {}).setdefault("private", {})
+    private["origin"] = "manage-agenda"
+    if identity:
+        private["sourceMailId"] = str(identity)
+    private["generation"] = str(generation)
+    private["eventIndex"] = str(event_index)
+
+
+def _get_event_if_present(client, calendar_id, event_id):
+    """The Event (live or cancelled) at this id, or None if Calendar confirms it does not
+    exist (404/410). Any other error is re-raised: proceeding to insert without a confirmed
+    "does not exist" answer could silently create a duplicate the tool would never reconcile
+    with the deterministic id it expected.
+    """
     try:
-        response = (
-            client.events()
-            .list(
-                calendarId=calendar_id,
-                timeMin=time_min.isoformat().replace("+00:00", "Z"),
-                timeMax=time_max.isoformat().replace("+00:00", "Z"),
-                singleEvents=True,
-                maxResults=20,
-            )
-            .execute()
-        )
-    except Exception as error:
-        logging.warning(f"Could not list events around the start time: {error}")
-        return None
-    for item in _calendar_items(response):
-        if _same_slot(item, event):
-            return item
-    return None
+        return client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+    except googleapiclient.errors.HttpError as error:
+        status = getattr(getattr(error, "resp", None), "status", None)
+        if status in (404, 410):
+            return None
+        raise
 
 
 def calendar_sync_state_file():
@@ -956,28 +883,68 @@ def _calendar_busy(api_dst, calendar_ids, constraints):
     return busy
 
 
-def _publish_event_to_calendar(api_dst, event, selected_calendar, source_id=""):
-    """Publish an event, skipping one that is already on the calendar."""
+def _publish_event_to_calendar(
+    api_dst, event, selected_calendar, source_id="", generation=0, event_index=0
+):
+    """Publish an event under a deterministic id, skipping one that is already on the
+    calendar and refusing to insert over a colliding (even cancelled) id.
+
+    `source_id` is the identity generation/event_index are scoped to - mail_identity() for
+    email (ledger-tracked, generation bumped on requeue), or a plain per-run source id for
+    web/txt sources (which have no ledger/requeue concept and always pass generation=0).
+    """
     from manage_agenda.events import _ensure_valid_event_timezones
 
-    _stamp_event_identity(event, source_id, selected_calendar)
-    existing = find_existing_event(api_dst, event, selected_calendar, source_id)
-    if existing:
-        link = existing.get("htmlLink", "") if isinstance(existing, dict) else ""
-        event_id = existing.get("id", "") if isinstance(existing, dict) else ""
-        return True, {
-            "success": True,
-            "duplicate": True,
-            "post_url": link,
-            "calendar_id": selected_calendar,
-            "event_id": event_id,
-        }
+    event_id = deterministic_event_id(source_id, generation, event_index) if source_id else ""
+    # Stamped even without a source_id (no deterministic id to check/insert under): origin
+    # alone still marks the event as manage-agenda's for events.list(privateExtendedProperty=
+    # "origin=manage-agenda") to find, even though there is no sourceMailId to key it by.
+    _stamp_reconstructible_properties(event, source_id, generation, event_index)
+    if event_id:
+        event["id"] = event_id
+
+        client = api_dst.getClient()
+        try:
+            existing = _get_event_if_present(client, selected_calendar, event_id)
+        except Exception as error:
+            logging.warning(f"Could not check for an existing event at id {event_id}: {error}")
+            return False, {
+                "success": False,
+                "error_message": str(error),
+                "calendar_id": selected_calendar,
+                "event_id": event_id,
+            }
+
+        if existing is not None:
+            if isinstance(existing, dict) and existing.get("status") == "cancelled":
+                logging.warning(
+                    f"Deterministic id {event_id} collides with a cancelled event on "
+                    f"{selected_calendar} - not inserting. This should be rare (a fresh "
+                    "requeue always changes the generation); if it recurs, the identity or "
+                    "generation bookkeeping likely drifted."
+                )
+                return False, {
+                    "success": False,
+                    "error_message": "id_collision_with_cancelled_event",
+                    "calendar_id": selected_calendar,
+                    "event_id": event_id,
+                }
+            link = existing.get("htmlLink", "") if isinstance(existing, dict) else ""
+            return True, {
+                "success": True,
+                "duplicate": True,
+                "post_url": link,
+                "calendar_id": selected_calendar,
+                "event_id": event_id,
+            }
 
     def _insert(body):
         result = api_dst.publishPost(post={"event": body, "idCal": selected_calendar}, api=api_dst)
         if isinstance(result, dict) and result.get("success"):
             result.setdefault("calendar_id", selected_calendar)
-            result.setdefault("event_id", (result.get("raw_response") or {}).get("id", ""))
+            result.setdefault(
+                "event_id", event_id or (result.get("raw_response") or {}).get("id", "")
+            )
         return True, result
 
     try:

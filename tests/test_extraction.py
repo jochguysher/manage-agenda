@@ -2,17 +2,37 @@ import datetime
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import googleapiclient.errors
 
 from manage_agenda.extraction import (
     add_message_to_event_description,
     create_event_dict,
+    deterministic_event_id,
     extract_json,
     get_event_from_llm_with_retry,
 )
 from manage_agenda.sources import Args
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "llm_responses"
+
+
+def _not_found_error():
+    return googleapiclient.errors.HttpError(SimpleNamespace(status=404, reason=""), b"{}")
+
+
+def _mock_api_dst_with_no_existing_events():
+    """A publishPost-mocking api_dst whose pre-insert events().get() existence check always
+    reports "not found", so the deterministic-id collision check in
+    _publish_event_to_calendar lets every insert through (matching these tests' intent of
+    exercising the insert path itself, not the dedup path)."""
+    api_dst = MagicMock()
+    api_dst.getClient.return_value.events.return_value.get.return_value.execute.side_effect = (
+        _not_found_error()
+    )
+    return api_dst
 
 
 class TestExtraction(unittest.TestCase):
@@ -153,7 +173,7 @@ more text"""
 
         mock_get_event_from_llm.return_value = ((event1, event2), (event1, event2), 1.0)
 
-        mock_api_dst = MagicMock()
+        mock_api_dst = _mock_api_dst_with_no_existing_events()
         mock_select_api.return_value = mock_api_dst
         mock_select_calendars.return_value = ["calendar_id"]
         mock_interactive_confirmation.side_effect = lambda args, ev: ev
@@ -206,7 +226,7 @@ more text"""
         }
         mock_get_event_from_llm.return_value = ((event,), (event,), 1.0)
 
-        mock_api_dst = MagicMock()
+        mock_api_dst = _mock_api_dst_with_no_existing_events()
         mock_select_api.return_value = mock_api_dst
         mock_select_calendars.return_value = ["cal-1", "cal-2"]
         mock_interactive_confirmation.side_effect = lambda args, ev: ev
@@ -228,7 +248,11 @@ more text"""
         self.assertEqual(mock_api_dst.publishPost.call_count, 2)
         self.assertEqual(len(results), 2)
         self.assertEqual({r["calendar_id"] for r in results}, {"cal-1", "cal-2"})
-        self.assertEqual({r["event_id"] for r in results}, {"e1", "e2"})
+        # The deterministic id is derived from post_identifier/generation/event_index, not
+        # calendar-scoped (Google's uniqueness constraint is per-calendar, verified in Phase
+        # 1) - so both calendars get the SAME event_id here, distinguished by calendar_id.
+        expected_event_id = deterministic_event_id("post_123", 0, 1)
+        self.assertEqual({r["event_id"] for r in results}, {expected_event_id})
 
     @patch("manage_agenda.extraction.get_event_from_llm")
     @patch("manage_agenda.extraction.select_api")
@@ -245,7 +269,9 @@ more text"""
     ):
         """If the first calendar succeeds but the second fails, the message must stay pending
         (CalendarError) rather than being marked handled with only a partial write - retrying
-        it is safe, since the already-created event is recognized as a duplicate next time."""
+        it is safe because the same identity/generation/event_index recompute the same
+        deterministic id, so the event already created on the first calendar is found by the
+        pre-insert events().get() check and reported as a duplicate rather than re-inserted."""
         from manage_agenda.exceptions import CalendarError
         from manage_agenda.extraction import _process_event_with_llm_and_calendar
 
@@ -260,7 +286,7 @@ more text"""
         }
         mock_get_event_from_llm.return_value = ((event,), (event,), 1.0)
 
-        mock_api_dst = MagicMock()
+        mock_api_dst = _mock_api_dst_with_no_existing_events()
         mock_select_api.return_value = mock_api_dst
         mock_select_calendars.return_value = ["cal-1", "cal-2"]
         mock_interactive_confirmation.side_effect = lambda args, ev: ev

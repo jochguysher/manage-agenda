@@ -129,10 +129,15 @@ def handled_mail_file():
 def _load_state(path):
     """Read the handled-mail ledger, migrating the old id-only format in memory.
 
-    New entries look like: {"events": [{"calendar_id": ..., "event_id": ...}], "status": "created"}.
+    New entries look like:
+    {"events": [{"calendar_id": ..., "event_id": ...}], "status": "created", "generation": 0}.
     A message with no recorded event ("status": "no_event", e.g. too old or empty content) or one
     read from the legacy {"ids": [...]} format ("status": "legacy") is always kept as handled: there
     is nothing to check against Calendar, so behavior for those stays exactly as before.
+
+    `generation` (default 0) feeds the deterministic Calendar event id - it is bumped only by
+    the requeue resolution step, never here, so an entry with no `generation` key (written
+    before that field existed) is simply generation 0, identical to a freshly created entry.
     """
     if not path.is_file():
         return {}
@@ -146,13 +151,17 @@ def _load_state(path):
             if isinstance(entry, dict):
                 events = [ev for ev in (entry.get("events") or []) if isinstance(ev, dict)]
                 status = entry.get("status") or ("created" if events else "no_event")
+                try:
+                    generation = int(entry.get("generation") or 0)
+                except (TypeError, ValueError):
+                    generation = 0
             else:
-                events, status = [], "no_event"
-            state[str(identity)] = {"events": events, "status": status}
+                events, status, generation = [], "no_event", 0
+            state[str(identity)] = {"events": events, "status": status, "generation": generation}
         return state
     ids = data.get("ids") if isinstance(data, dict) else None
     if isinstance(ids, list):
-        return {str(item): {"events": [], "status": "legacy"} for item in ids}
+        return {str(item): {"events": [], "status": "legacy", "generation": 0} for item in ids}
     return {}
 
 
@@ -203,7 +212,7 @@ def remember_handled_mail(identity, path=None, events=None):
         return
     path = Path(path) if path else handled_mail_file()
     state = _load_state(path)
-    entry = state.get(identity, {"events": [], "status": "no_event"})
+    entry = state.get(identity, {"events": [], "status": "no_event", "generation": 0})
     if events:
         merged = list(entry.get("events") or [])
         # Dedup by (calendar_id, event_id), not whole-dict equality: two refs for the same
@@ -707,7 +716,11 @@ def _process_common_flow(
     """
     Common flow for processing items (emails, web pages).
 
-    metadata_extractor: func(item, index) -> (post_id, post_title, post_date)
+    metadata_extractor: func(item, index) -> (post_id, post_title, post_date, dedup_identity,
+        generation). dedup_identity/generation feed the deterministic Calendar event id (see
+        extraction.deterministic_event_id()); a source with no ledger/requeue concept (web,
+        txt) returns (None, 0), which falls back to post_id inside
+        _process_event_with_llm_and_calendar.
     content_extractor: func(item, index, post_date_time, post_title) -> content_text
     item_cleaner: func(item, index, post_id) -> void
     on_item_done: func(item, index, calendar_result) -> void, called once the item has been
@@ -723,7 +736,7 @@ def _process_common_flow(
         calendar_result = None
         try:
             # 1. Metadata
-            post_id, post_title, post_date = metadata_extractor(item, i)
+            post_id, post_title, post_date, dedup_identity, generation = metadata_extractor(item, i)
 
             print(t("sources.processing_title", post_title=post_title), flush=True)
 
@@ -747,7 +760,15 @@ def _process_common_flow(
             # 5. Process with LLM
             try:
                 processed_event, calendar_result = _process_event_with_llm_and_calendar(
-                    args, model, content_text, post_date_time, post_id, post_title, rules=rules
+                    args,
+                    model,
+                    content_text,
+                    post_date_time,
+                    post_id,
+                    post_title,
+                    rules=rules,
+                    dedup_identity=dedup_identity,
+                    generation=generation,
                 )
             except (LLMError, CalendarError) as error:
                 print(error)
@@ -821,7 +842,7 @@ def process_txt_cli(args, model, source_name=None, rules=None):
             else:
                 title = lines_txt[0]
             logging.info(f"Extracted info. PostId: {post_id} Title: {title} Date: {date}")
-            return post_id, title, date
+            return post_id, title, date, None, 0
 
         def content_extractor(post, i, post_date_time, post_title):
             lines_txt = post[1].split("\n")
@@ -864,6 +885,9 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         return False
 
     handled = reconcile_handled_events(args)
+    # Loaded once, after reconcile (which may have dropped entries) - metadata_extractor
+    # below does one dict lookup per message instead of re-reading the ledger file each time.
+    handled_state = load_handled_mail_state()
 
     posts = _get_emails_from_folder(args, api_src, source_details=source_details, handled=handled)
     if posts:
@@ -879,7 +903,9 @@ def process_email_cli(args, model, selected_source=None, rules=None):
                 post_id = api_src.getPostIdM(post)
             else:
                 post_id = api_src.getPostId(post)
-            return post_id, api_src.getPostTitle(post), api_src.getPostDate(post)
+            identity = mail_identity(post)
+            generation = handled_state.get(identity, {}).get("generation", 0) if identity else 0
+            return post_id, api_src.getPostTitle(post), api_src.getPostDate(post), identity, generation
 
         def content_extractor(post, i, post_date_time, post_title):
             full_email_content = api_src.getPostBody(post)
@@ -1029,7 +1055,10 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
             # Replace unsafe characters with underscores
             safe_id = re.sub(r"[^a-zA-Z0-9.-]", "_", processed_url)
 
-            hash_value = hash(urls[i])
+            # A stable hash, not Python's built-in hash() (randomized per process since 3.3):
+            # this id also seeds the deterministic Calendar event id below, which needs to be
+            # the same across separate runs to be idempotent at all.
+            hash_value = hashlib.sha256(urls[i].encode("utf-8")).hexdigest()[:16]
 
             # Truncate to a safe length (e.g., 150 chars) to avoid "File name
             # too long" errors
@@ -1037,7 +1066,7 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
                 safe_id = safe_id[:130]
             safe_id = f"{safe_id}_{hash_value}"
 
-            return safe_id, title, datetime.datetime.now()
+            return safe_id, title, datetime.datetime.now(), None, 0
 
         def content_extractor(post, i, post_date_time, post_title):
             web_content_reduced = reduce_html(urls[i], post, force_refresh=force_refresh)

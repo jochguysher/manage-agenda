@@ -10,7 +10,6 @@ import googleapiclient.errors
 from manage_agenda.extraction import (
     _is_within_bootstrap_window,
     _load_sync_tokens,
-    event_identity,
     sync_calendar_changes,
 )
 from manage_agenda.sources import (
@@ -262,19 +261,6 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-old")
 
 
-class TestEventIdentityIsCalendarScoped(unittest.TestCase):
-    EVENT = {
-        "summary": "Dentiste",
-        "start": {"dateTime": "2026-09-22T15:00:00-04:00", "timeZone": "America/Toronto"},
-        "end": {"dateTime": "2026-09-22T16:00:00-04:00", "timeZone": "America/Toronto"},
-    }
-
-    def test_same_event_on_two_calendars_gets_different_keys(self):
-        slot_a, _ = event_identity(self.EVENT, "msg-1", calendar_id="cal-a")
-        slot_b, _ = event_identity(self.EVENT, "msg-1", calendar_id="cal-b")
-        self.assertNotEqual(slot_a, slot_b)
-
-
 class TestExtractEventRefs(unittest.TestCase):
     def test_pulls_calendar_and_event_id_from_publish_results(self):
         calendar_result = [
@@ -330,7 +316,7 @@ class TestHandledMailStateMigration(unittest.TestCase):
 
         state = load_handled_mail_state(self.path)
 
-        self.assertEqual(state["old-1"], {"events": [], "status": "legacy"})
+        self.assertEqual(state["old-1"], {"events": [], "status": "legacy", "generation": 0})
         self.assertEqual(load_handled_mail_ids(self.path), {"old-1", "old-2"})
 
     def test_legacy_entries_are_still_skipped_by_unseen_messages(self):
@@ -348,7 +334,7 @@ class TestHandledMailStateMigration(unittest.TestCase):
     def test_remember_handled_mail_without_events_is_legacy_equivalent(self):
         remember_handled_mail("msg-1", path=self.path)
         state = load_handled_mail_state(self.path)
-        self.assertEqual(state["msg-1"], {"events": [], "status": "no_event"})
+        self.assertEqual(state["msg-1"], {"events": [], "status": "no_event", "generation": 0})
 
     def test_remember_handled_mail_with_events_records_them(self):
         remember_handled_mail(
@@ -357,8 +343,31 @@ class TestHandledMailStateMigration(unittest.TestCase):
         state = load_handled_mail_state(self.path)
         self.assertEqual(
             state["msg-1"],
-            {"events": [{"calendar_id": "primary", "event_id": "e1"}], "status": "created"},
+            {
+                "events": [{"calendar_id": "primary", "event_id": "e1"}],
+                "status": "created",
+                "generation": 0,
+            },
         )
+
+    def test_remember_handled_mail_preserves_an_existing_generation(self):
+        """A non-zero generation (bumped by the requeue resolution step) must survive being
+        re-recorded - otherwise the next publish would recompute a deterministic id from
+        generation 0 instead of the ledger's actual generation, drifting from the event that
+        was really created under the bumped generation."""
+        self.path.write_text(
+            json.dumps(
+                {"messages": {"msg-1": {"events": [], "status": "no_event", "generation": 2}}}
+            ),
+            encoding="utf-8",
+        )
+
+        remember_handled_mail(
+            "msg-1", path=self.path, events=[{"calendar_id": "primary", "event_id": "e1"}]
+        )
+
+        state = load_handled_mail_state(self.path)
+        self.assertEqual(state["msg-1"]["generation"], 2)
 
     def test_recording_the_same_ref_twice_with_different_timestamps_does_not_duplicate_it(self):
         """recorded_at differs between calls (it is "when recorded"), so dedup must key on
