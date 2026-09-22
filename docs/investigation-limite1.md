@@ -163,22 +163,42 @@ this is exactly what probes (a)/(b) exist to test empirically.
 | c | Which fields survive on a cancelled sync-delta item | Partially doc-confirmed (only `id`+`status` guaranteed); exact real-world set untested | `probe_c_sync_delta_cancelled_fields.py` |
 | d | Target IMAP server accepts a custom keyword | Server-dependent, untested | `probe_d_imap_custom_keyword.py` |
 | e | A new event can reuse a deleted event's id (load-bearing for `requeue`) | Undocumented, untested | `probe_e_deleted_id_reuse.py` |
+| f | IMAP CAPABILITY (UIDPLUS/MOVE/SPECIAL-USE), keyword persistence, hierarchy separator, `\All`, COPYUID — server- and account-specific, never assumed from provider identity | Server-dependent, untested | `probe_f_imap_keyword_and_uidplus.py` |
 | — | Does `modifyLabels(id, old, None)` (`addLabelIds: [null]`) work as manage-agenda currently calls it | Unresolvable by reading code | not scripted (existing behavior, not a new probe target — flagging only) |
 
 None of the probe scripts have been run. They require a test calendar (and, for probes d
 and f, a test IMAP account/folder) that only you can safely provide.
 
-## 5. IMAP marker design (addendum)
+## 5. IMAP marker design (addendum, corrected — see below)
+
+**Correction applied**: the IMAP backend must be quasi-universal — it must work against a
+bare IMAP4rev1 server with **zero Gmail-specific code** (no `X-GM-LABELS`, `X-GM-MSGID`,
+`X-GM-RAW`, no assumed `OBJECTID`). Gmail specifics stay confined to the separate Gmail API
+backend; Gmail reached over plain IMAP is treated exactly like any other IMAP4rev1 server —
+nothing about it may be assumed. An earlier draft of this section proposed
+`X-GM-LABELS`-over-IMAP as a per-provider special case; that proposal is withdrawn.
 
 `imap_processed_marker` config, one of:
-- `keyword:<name>` — e.g. `keyword:$AgendaDone`.
+- `keyword:<name>` — e.g. `keyword:$AgendaDone`. Generic IMAP keyword STORE, nothing
+  provider-specific.
 - `flag:\Seen` — kept for `mark: seen` backward compatibility (see §6 migration).
 - `folder:<path>` — a dedicated folder (created if absent), never Trash.
 
 **Default marker per account**, chosen from probe (f)'s result for that specific account:
 `keyword` if `PERMANENTFLAGS` advertises `\*` **and** a STORE/FETCH round trip confirms the
 keyword actually persists; `folder` otherwise. This is per-account, not global — different
-configured accounts can land on different defaults.
+configured accounts (including two different Gmail-over-IMAP accounts with different server
+configurations) can land on different defaults; probe (f) must be run against each account
+actually used, never assumed from a provider name.
+
+### Capabilities detection — centralized, once per connection, logged
+
+A single `ImapCapabilities.detect(client)` call (see probe (f)) reads `CAPABILITY` once per
+connection and records: `has_uidplus` (RFC 4315), `has_move` (RFC 6851), `has_special_use`
+(RFC 6154). Every subsequent decision below is gated on this object, not on server identity —
+the same account can gain or lose a capability across a server upgrade, and the code must
+react to that, not to a hardcoded assumption. The detection result is logged once per
+connection for diagnosability.
 
 **Python's stdlib `imaplib` has no built-in support for MOVE (RFC 6851) or UIDPLUS/COPYUID
 (RFC 4315).** Confirmed by reading `imaplib.py`: `'MOVE' in imaplib.Commands` is `True` (state
@@ -190,26 +210,67 @@ manage-agenda has to regex-parse `[COPYUID ...]` out of that string itself — n
 change needed (same "already reachable via getClient()" pattern as every other capability
 found in this investigation), but no library does the parsing for us either. Probe (f) tests
 this on the real client and reports whether `MOVE` is accepted at all and whether a `COPYUID`
-code is present in the response.
+code is present in the response — gated on `has_move`/`has_uidplus`, never assumed.
+
+### Safe deletion without UIDPLUS — critical rule
+
+**Without UIDPLUS, the design NEVER issues a bare `EXPUNGE`.** A bare `EXPUNGE` purges every
+message flagged `\Deleted` in the currently selected folder, including messages a human user
+deleted through their own mail client and expects to remain merely flagged until *their*
+client expunges them — manage-agenda has no way to distinguish "its own" `\Deleted` message
+from the user's. Consequences by capability:
+- **With UIDPLUS**: `UID EXPUNGE <uid>` (RFC 4315) is scoped to exactly the given UID(s) and
+  is safe regardless of what else in the folder is flagged `\Deleted`. Used after a COPY (or
+  as part of a MOVE, if the server implements MOVE via an internal UIDPLUS-safe expunge).
+- **Without UIDPLUS**: leave the original message flagged `\Deleted` and exclude it from
+  future scans via a `SEARCH ... NOT DELETED` criterion (or equivalently, `UNDELETED`) added
+  to the scan query. No expunge of any kind is performed by manage-agenda on this path — actual
+  purging is left entirely to the user's own mail client or server-side policy.
+
+### Hierarchy separator and `\All` — read, never assumed
+
+- **Hierarchy separator**: always read via `LIST "" ""`, never hardcoded (`/` vs `.` is
+  server-configuration-dependent, not provider-dependent — assuming one is a latent bug on
+  any server configured differently, including two Dovecot instances with different configs).
+- **`\All` special-use attribute (RFC 6154)**: when `has_special_use` is true, `LIST "" <folder>`
+  is checked for the `\All` attribute before scanning that folder; **a folder carrying `\All`
+  is refused** (it aliases the entire mailbox — scanning it would mean seeing every message
+  regardless of which real folder it lives in, breaking the per-folder exclusion logic
+  entirely). When `has_special_use` is false, `\All` is treated as absent (safe default — there
+  is no signal to detect it by, and false-negatives here are the safe failure mode).
 
 ### Per-marker behavior
 
-- **keyword** (and Gmail-over-IMAP specifically: `X-GM-LABELS` instead of a generic keyword,
-  same mechanism as the Gmail API mode): mark on success = `UID STORE +FLAGS`; scan exclusion
-  = search criteria including `UNKEYWORD <name>`; requeue = `UID STORE -FLAGS`. **No locator
+- **keyword**: mark on success = `UID STORE +FLAGS`; scan exclusion = search criteria
+  including `UNKEYWORD <name>`; requeue = `UID STORE -FLAGS`. Purely generic IMAP keyword
+  STORE — identical code path regardless of provider, including Gmail-over-IMAP. **No locator
   needed in the ledger** - the message never moves, so there's nothing to lose track of.
-- **folder**: mark on success = `UID MOVE` to the dedicated folder (created via `createFolder`
-  if absent - confirmed to exist in §2). If the response carries a `COPYUID` code, store
-  `(uidvalidity, uid)` in the ledger entry as the locator. Requeue: if the locator is present
-  **and** the folder's current `UIDVALIDITY` still matches the stored one, `UID MOVE` straight
-  back using the stored uid - no search needed. If `UIDVALIDITY` has changed, or no locator was
-  ever recorded (server lacked UIDPLUS), fall back to `UID SEARCH HEADER Message-ID "<...>"`
-  scoped to that one folder and bounded by `SINCE` (never an unbounded search); compare the
-  found message's `Message-ID` header for an exact match before acting on it. **Zero or
-  multiple matches both resolve to `source_lost`, journaled** - never an arbitrary pick among
-  several candidates.
+- **folder**: mark on success = `UID MOVE` (if `has_move`) or `UID COPY` + safe deletion of
+  the original per the rule above (if not) to the dedicated folder (created via `createFolder`
+  if absent - confirmed to exist in §2). If the response carries a `COPYUID` code (requires
+  `has_uidplus`), store `(uidvalidity, uid)` in the ledger entry as the locator. Requeue: if
+  the locator is present **and** the folder's current `UIDVALIDITY` still matches the stored
+  one, move/copy straight back using the stored uid - no search needed. If `UIDVALIDITY` has
+  changed, or no locator was ever recorded (server lacked UIDPLUS), fall back to `UID SEARCH
+  HEADER Message-ID "<...>"` scoped to that one folder and bounded by `SINCE` (never an
+  unbounded search); compare the found message's `Message-ID` header for an exact match before
+  acting on it. **Zero or multiple matches both resolve to `source_lost`, journaled** - never
+  an arbitrary pick among several candidates.
 - **flag:\Seen**: unchanged from today's `mark: seen` behavior - the message is never moved
   or otherwise touched; exclusion is by the `\Seen` flag already read via `SEARCH`.
+
+### Test coverage (expanded capability matrix)
+
+Beyond the per-marker unit tests already planned, a capability-matrix test suite exercises
+every `(has_uidplus, has_move, has_special_use)` combination against a mocked `imaplib`
+client, asserting in particular: no `EXPUNGE`/`UID EXPUNGE` call is ever made when
+`has_uidplus` is false (the never-bare-EXPUNGE rule), the hierarchy separator is always taken
+from a `LIST` response rather than a literal, and a folder whose `LIST` response carries `\All`
+is never selected for scanning when `has_special_use` is true.
+
+Probe (f) must be run against **at least** a plain Dovecot server and a Gmail account reached
+over plain IMAP (not the Gmail API), without assuming anything about either beyond what
+`CAPABILITY`/`LIST` actually report for that specific connection.
 
 ## 6. Migration — no reprocessing of already-handled messages
 
