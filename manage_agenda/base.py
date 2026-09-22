@@ -149,27 +149,33 @@ _PURGE_MARKER_NAME = ".purge_enabled_since"
 
 
 def purge_expired_log_files(retention_days, today=None):
-    """Delete every file under msg_txt_dir()/log/ older than `retention_days`, then remove
-    any subdirectory left empty by that. Only meaningful while --debug-log-extractions is on
-    (write_file() writes nothing there otherwise, so there is nothing to purge) - the caller
-    decides when to run this (see add_events_cli's debug_log_extractions branch), not this
-    function, which is a plain sweep once past its first call (see below).
+    """Delete every file under msg_txt_dir()/log/ older than `retention_days` AND more recent
+    than the purge's first activation (see below), then remove any subdirectory left empty by
+    that. Only meaningful while --debug-log-extractions is on (write_file() writes nothing
+    there otherwise, so there is nothing to purge) - the caller decides when to run this (see
+    add_events_cli's debug_log_extractions branch), not this function.
 
-    Applies to log/ uniformly, with no per-filename exception - safe because `-o file` mode's
+    Applies to log/ uniformly, with no per-filename exception (other than the marker itself,
+    see below) - safe because `-o file` mode's
     actual output no longer lives under log/ at all (it moved to config.output_dir(), see
     write_file()'s docstring), so nothing purgeable here can be a user's requested result.
 
-    First call ever for a given log/ (no marker file yet): stamps a marker and purges
-    NOTHING, regardless of how old anything already there is. This matters because `-o file`
-    mode used to write log/{model}/{post}_{idx}_times.json (before it moved to
-    output_dir()) - a real user, prior to this change, may already have such output sitting
-    under log/. The very first time --debug-log-extractions is ever turned on must not sweep
-    those away as a side effect of enabling an unrelated debug flag; every call after that
-    one purges normally, same as the ledger's own one-time grace pass for an entry with no
-    age signal (see purge_expired_ledger_entries) - a file's age only starts counting against
-    it from the marker's timestamp onward, never retroactively for what predates it. If you
-    have `-o file` output already under MSG_TXT_DIR/log/ that you want to keep indefinitely,
-    move it out before enabling --debug-log-extractions a second time.
+    PERMANENT protection of everything that predates the first activation: the first call
+    ever for a given log/ (no marker file yet) stamps a marker holding that moment's
+    timestamp and purges nothing. Every later call only ever considers files whose mtime is
+    strictly AFTER that timestamp - a file older than the marker is never deleted, however
+    many times the purge runs afterwards. This matters because `-o file` mode used to write
+    log/{model}/{post}_{idx}_times.json (before it moved to output_dir()) - a real user,
+    prior to this change, may already have such output sitting under log/, and enabling an
+    unrelated debug flag must never sweep it away, neither on the first run nor on any later
+    one. The marker is written once and never rewritten, so the boundary does not move.
+
+    If the marker exists but its timestamp can't be read, nothing is purged (a warning is
+    logged, saying how to fix it) - with the protection boundary unknown, deleting anything
+    could hit a protected file. Deleting the marker re-arms the protection: the next call
+    re-stamps it, and every file present at that moment becomes permanently protected.
+
+    The marker itself is excluded by name, whatever its mtime.
 
     Returns the number of files deleted.
     """
@@ -180,15 +186,31 @@ def purge_expired_log_files(retention_days, today=None):
         try:
             log_root.mkdir(parents=True, exist_ok=True)
             marker.write_text(today.isoformat(), encoding="utf-8")
+            os.chmod(marker, 0o600)
         except OSError as error:
             logging.warning(f"Could not stamp debug log purge marker under {log_root}: {error}")
         return 0
-    if not log_root.is_dir():
+    try:
+        enabled_since = datetime.datetime.fromisoformat(
+            marker.read_text(encoding="utf-8").strip()
+        )
+        if enabled_since.tzinfo is None:
+            enabled_since = enabled_since.replace(tzinfo=datetime.timezone.utc)
+    except (OSError, ValueError) as error:
+        logging.warning(
+            f"Unreadable debug log purge marker {marker}, purging nothing: {error}. To fix it, "
+            f"delete {marker}: the next purge re-stamps it with the current time, which makes "
+            f"every file present under {log_root} at that moment permanently protected (never "
+            f"purged); only files written after that are purged once past retention."
+        )
         return 0
     cutoff = today - datetime.timedelta(days=retention_days)
     deleted = 0
     for root, _dirs, files in os.walk(log_root, topdown=False):
         for name in files:
+            # Excluded by name, never by age: the marker's own mtime can be later than the
+            # timestamp it holds (e.g. copied or touched), which would otherwise make it
+            # purgeable - and deleting it would re-arm the first-activation stamp.
             if name == _PURGE_MARKER_NAME:
                 continue
             file_path = Path(root) / name
@@ -198,7 +220,7 @@ def purge_expired_log_files(retention_days, today=None):
                 )
             except OSError:
                 continue
-            if mtime < cutoff:
+            if enabled_since < mtime < cutoff:
                 try:
                     file_path.unlink()
                     deleted += 1
