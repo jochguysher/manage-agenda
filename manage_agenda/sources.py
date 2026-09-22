@@ -203,9 +203,15 @@ def remember_handled_mail(identity, path=None, events=None):
     entry = state.get(identity, {"events": [], "status": "no_event"})
     if events:
         merged = list(entry.get("events") or [])
+        # Dedup by (calendar_id, event_id), not whole-dict equality: two refs for the same
+        # event recorded at different moments carry different `recorded_at` timestamps and
+        # would never compare equal, so the same ref would pile up on every re-run.
+        seen_keys = {(ref.get("calendar_id"), ref.get("event_id")) for ref in merged}
         for ref in events:
-            if ref not in merged:
+            key = (ref.get("calendar_id"), ref.get("event_id"))
+            if key not in seen_keys:
                 merged.append(ref)
+                seen_keys.add(key)
         if merged == entry.get("events") and entry.get("status") == "created" and identity in state:
             return
         entry["events"] = merged

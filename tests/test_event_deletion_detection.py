@@ -346,6 +346,22 @@ class TestHandledMailStateMigration(unittest.TestCase):
             {"events": [{"calendar_id": "primary", "event_id": "e1"}], "status": "created"},
         )
 
+    def test_recording_the_same_ref_twice_with_different_timestamps_does_not_duplicate_it(self):
+        """recorded_at differs between calls (it is "when recorded"), so dedup must key on
+        (calendar_id, event_id), not on whole-dict equality."""
+        remember_handled_mail(
+            "msg-1",
+            path=self.path,
+            events=[{"calendar_id": "primary", "event_id": "e1", "recorded_at": old_iso()}],
+        )
+        remember_handled_mail(
+            "msg-1",
+            path=self.path,
+            events=[{"calendar_id": "primary", "event_id": "e1", "recorded_at": recent_iso()}],
+        )
+        state = load_handled_mail_state(self.path)
+        self.assertEqual(len(state["msg-1"]["events"]), 1)
+
 
 class TestReconcileHandledEvents(unittest.TestCase):
     def setUp(self):
