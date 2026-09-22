@@ -117,30 +117,52 @@ _IMAP_HEADER = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)])"
 
 
 def handled_mail_file():
-    """Message identities already sent through extraction."""
+    """Message identities already sent through extraction, with the Calendar events they created."""
     from manage_agenda.config import DATA_DIR
 
     return Path(DATA_DIR) / "handled_mail_ids.json"
 
 
-def _read_id_set(path):
+def _load_state(path):
+    """Read the handled-mail ledger, migrating the old id-only format in memory.
+
+    New entries look like: {"events": [{"calendar_id": ..., "event_id": ...}], "status": "created"}.
+    A message with no recorded event ("status": "no_event", e.g. too old or empty content) or one
+    read from the legacy {"ids": [...]} format ("status": "legacy") is always kept as handled: there
+    is nothing to check against Calendar, so behavior for those stays exactly as before.
+    """
     if not path.is_file():
-        return set()
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return set()
+        return {}
+    if isinstance(data, dict) and isinstance(data.get("messages"), dict):
+        state = {}
+        for identity, entry in data["messages"].items():
+            if isinstance(entry, dict):
+                events = [ev for ev in (entry.get("events") or []) if isinstance(ev, dict)]
+                status = entry.get("status") or ("created" if events else "no_event")
+            else:
+                events, status = [], "no_event"
+            state[str(identity)] = {"events": events, "status": status}
+        return state
     ids = data.get("ids") if isinstance(data, dict) else None
-    if not isinstance(ids, list):
-        return set()
-    return {str(item) for item in ids}
+    if isinstance(ids, list):
+        return {str(item): {"events": [], "status": "legacy"} for item in ids}
+    return {}
 
 
-def _write_id_set(path, ids):
+def _save_state(path, state):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"ids": sorted(ids)}, indent=2), encoding="utf-8")
+    temporary.write_text(json.dumps({"messages": state}, indent=2, sort_keys=True), encoding="utf-8")
     temporary.replace(path)
+
+
+def load_handled_mail_state(path=None):
+    """The full handled-mail ledger: identity -> {"events": [...], "status": "..."}."""
+    return _load_state(Path(path) if path else handled_mail_file())
 
 
 def mail_identity(post):
@@ -159,17 +181,103 @@ def mail_identity(post):
 
 
 def load_handled_mail_ids(path=None):
-    return _read_id_set(Path(path) if path else handled_mail_file())
+    """Every identity on record, regardless of whether its Calendar event still exists.
+
+    Use reconcile_handled_events() instead when a Calendar connection is available: it drops
+    identities whose recorded events have all been deleted, so those messages are offered again.
+    """
+    return set(load_handled_mail_state(path).keys())
 
 
-def remember_handled_mail(identity, path=None):
+def remember_handled_mail(identity, path=None, events=None):
+    """Record that a message identity was handled, with the Calendar events it created, if any.
+
+    `events` is a list of {"calendar_id": ..., "event_id": ...}. Without it, the message is
+    recorded as handled with no known event (its identity is skipped, but never un-skipped,
+    since there is nothing to check against Calendar).
+    """
     if not identity:
         return
     path = Path(path) if path else handled_mail_file()
-    known = _read_id_set(path)
-    if identity in known:
+    state = _load_state(path)
+    entry = state.get(identity, {"events": [], "status": "no_event"})
+    if events:
+        merged = list(entry.get("events") or [])
+        for ref in events:
+            if ref not in merged:
+                merged.append(ref)
+        if merged == entry.get("events") and entry.get("status") == "created" and identity in state:
+            return
+        entry["events"] = merged
+        entry["status"] = "created"
+    elif identity in state:
         return
-    _write_id_set(path, known | {identity})
+    state[identity] = entry
+    _save_state(path, state)
+
+
+def _extract_event_refs(calendar_result):
+    """Pull {calendar_id, event_id} pairs out of the per-event results of calendar publishing."""
+    refs = []
+    for result in calendar_result or []:
+        if not isinstance(result, dict):
+            continue
+        calendar_id = result.get("calendar_id")
+        event_id = result.get("event_id") or (result.get("raw_response") or {}).get("id")
+        if calendar_id and event_id:
+            refs.append({"calendar_id": calendar_id, "event_id": str(event_id)})
+    return refs
+
+
+def reconcile_handled_events(args, path=None):
+    """Drop messages whose recorded Calendar events have all been deleted, so they get reprocessed.
+
+    Messages with no recorded event (too old, empty content, output=file, or migrated from the
+    legacy ledger format) are left untouched: there is nothing to check, so they stay skipped.
+    Uses one grouped (batched) Calendar lookup for every event on record, instead of one API
+    call per message, to limit API traffic.
+    """
+    path = Path(path) if path else handled_mail_file()
+    state = _load_state(path)
+    api_dst = getattr(args, "calendar_api", None)
+    client = api_dst.getClient() if api_dst is not None else None
+    if client is None:
+        return set(state.keys())
+
+    from manage_agenda.extraction import _check_events_exist
+
+    triples = [
+        (identity, ev.get("calendar_id"), ev.get("event_id"))
+        for identity, entry in state.items()
+        for ev in entry.get("events") or []
+        if ev.get("calendar_id") and ev.get("event_id")
+    ]
+    exists = _check_events_exist(api_dst, triples)
+
+    still_handled = set()
+    changed = False
+    for identity in list(state.keys()):
+        entry = state[identity]
+        events = entry.get("events") or []
+        if not events:
+            still_handled.add(identity)
+            continue
+        remaining = [
+            ev for ev in events if exists.get((identity, ev.get("calendar_id"), ev.get("event_id")), True)
+        ]
+        if remaining:
+            still_handled.add(identity)
+            if len(remaining) != len(events):
+                entry["events"] = remaining
+                changed = True
+        else:
+            del state[identity]
+            changed = True
+
+    if changed:
+        _save_state(path, state)
+
+    return still_handled
 
 
 def unseen_messages(posts, handled=None, path=None):
@@ -377,7 +485,7 @@ def _fetch_imap_matches(api_src, folder, criteria, handled=None):
     return posts or None
 
 
-def _get_emails_from_folder(args, api_src, folder=None, source_details=None):
+def _get_emails_from_folder(args, api_src, folder=None, source_details=None, handled=None):
     """Helper function to get emails from a specific folder."""
     "FIXME: maybe a folder argument?"
 
@@ -394,7 +502,7 @@ def _get_emails_from_folder(args, api_src, folder=None, source_details=None):
         from manage_agenda.scheduling import combine_imap_search, imap_age_criteria
 
         criteria = combine_imap_search(criteria, imap_age_criteria(source_details))
-        return _fetch_imap_matches(api_src, folder, criteria)
+        return _fetch_imap_matches(api_src, folder, criteria, handled=handled)
 
     if not folder:
         tag = config.DEFAULT_EMAIL_TAG or "zAgenda"
@@ -575,13 +683,17 @@ def _process_common_flow(
     metadata_extractor: func(item, index) -> (post_id, post_title, post_date)
     content_extractor: func(item, index, post_date_time, post_title) -> content_text
     item_cleaner: func(item, index, post_id) -> void
-    on_item_done: func(item, index) -> void, called once the item has been considered
+    on_item_done: func(item, index, calendar_result) -> void, called once the item has been
+        considered. calendar_result is the list of per-event results from
+        _process_event_with_llm_and_calendar (None when the item was skipped before reaching
+        that step, e.g. too old or empty content).
     """
     from manage_agenda.exceptions import CalendarError, LLMError
 
     processed_any_event = False
     for i, item in enumerate(items):
         finished = False
+        calendar_result = None
         try:
             # 1. Metadata
             post_id, post_title, post_date = metadata_extractor(item, i)
@@ -623,7 +735,7 @@ def _process_common_flow(
                     item_cleaner(item, i, post_id)
         finally:
             if finished and on_item_done:
-                on_item_done(item, i)
+                on_item_done(item, i, calendar_result)
 
     return processed_any_event
 
@@ -724,9 +836,11 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         print("No message was read. Fix the calendar connection, then run the scan again.")
         return False
 
-    posts = _get_emails_from_folder(args, api_src, source_details=source_details)
+    handled = reconcile_handled_events(args)
+
+    posts = _get_emails_from_folder(args, api_src, source_details=source_details, handled=handled)
     if posts:
-        posts, skipped = unseen_messages(posts)
+        posts, skipped = unseen_messages(posts, handled=handled)
         if skipped:
             print(f"Skipped {skipped} message(s) already handled")
 
@@ -765,8 +879,8 @@ def process_email_cli(args, model, selected_source=None, rules=None):
                 post_pos = post_id
             _delete_email(args, api_src, post_pos, selected_source, rules=rules)
 
-        def on_item_done(post, i):
-            remember_handled_mail(mail_identity(post))
+        def on_item_done(post, i, calendar_result):
+            remember_handled_mail(mail_identity(post), events=_extract_event_refs(calendar_result))
             if "imap" in (getattr(api_src, "service", "") or "").lower() and source_details.get(
                 "mark"
             ) == "seen":

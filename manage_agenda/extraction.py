@@ -564,17 +564,25 @@ def _identity_hash(*parts):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def event_identity(event, source_id=""):
-    """Slot key (summary + start) and, when known, a key that also includes the source mail."""
+def event_identity(event, source_id="", calendar_id=""):
+    """Slot key (calendar + summary + start) and, when known, a key that also includes the source mail.
+
+    The calendar is part of the key so the same appointment inserted into two calendars (or
+    re-inserted after being deleted from one) is not mistaken for a duplicate of itself.
+    """
     summary = _normalize_summary(event)
     start = _start_token(event)
-    slot = _identity_hash(summary, start) if summary and start else ""
-    source = _identity_hash(str(source_id), summary, start) if source_id and summary and start else ""
+    slot = _identity_hash(str(calendar_id), summary, start) if summary and start else ""
+    source = (
+        _identity_hash(str(calendar_id), str(source_id), summary, start)
+        if source_id and summary and start
+        else ""
+    )
     return slot, source
 
 
-def _stamp_event_identity(event, source_id=""):
-    slot, source = event_identity(event, source_id)
+def _stamp_event_identity(event, source_id="", calendar_id=""):
+    slot, source = event_identity(event, source_id, calendar_id)
     private = event.setdefault("extendedProperties", {}).setdefault("private", {})
     if slot:
         private["manageAgendaSlot"] = slot
@@ -583,8 +591,8 @@ def _stamp_event_identity(event, source_id=""):
     return slot, source
 
 
-def _remember_event_keys(event, source_id="", path=None):
-    slot, source = event_identity(event, source_id)
+def _remember_event_keys(event, source_id="", path=None, calendar_id=""):
+    slot, source = event_identity(event, source_id, calendar_id)
     keys = {key for key in (slot, source) if key}
     if not keys:
         return
@@ -629,7 +637,7 @@ def _same_slot(existing, event):
 
 def find_existing_event(api_dst, event, calendar_id, source_id="", key_file=None):
     """Return an existing calendar event that is the same appointment, if one is known."""
-    slot, source = event_identity(event, source_id)
+    slot, source = event_identity(event, source_id, calendar_id)
     known = _read_id_set(Path(key_file) if key_file else event_key_file())
     if (slot and slot in known) or (source and source in known):
         return {"duplicate": True, "htmlLink": ""}
@@ -679,6 +687,84 @@ def find_existing_event(api_dst, event, calendar_id, source_id="", key_file=None
         if _same_slot(item, event):
             return item
     return None
+
+
+_EVENT_EXISTENCE_BATCH_SIZE = 50
+
+
+def _chunked(items, size):
+    items = list(items)
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _event_missing_status(error):
+    """Google's not-found statuses for a deleted or never-existing event."""
+    status = getattr(getattr(error, "resp", None), "status", None)
+    return status in (404, 410)
+
+
+def _check_events_exist(api_dst, triples):
+    """Check whether each (identity, calendar_id, event_id) is still on its calendar.
+
+    Uses one batched HTTP request per chunk of up to 50 events, instead of one call per
+    event, to limit API traffic. An event is "missing" only when Calendar answers 404/410
+    or reports it as cancelled; any other error is treated as "still there" so a transient
+    API problem cannot cause a message to be silently reprocessed.
+
+    Returns {(identity, calendar_id, event_id): bool}.
+    """
+    results = {}
+    if not triples:
+        return results
+    client = api_dst.getClient()
+    for chunk in _chunked(triples, _EVENT_EXISTENCE_BATCH_SIZE):
+        _check_events_exist_chunk(client, chunk, results)
+    return results
+
+
+def _check_events_exist_chunk(client, chunk, results):
+    def _make_callback(triple):
+        def _callback(request_id, response, exception):
+            if exception is not None:
+                results[triple] = not _event_missing_status(exception)
+                return
+            results[triple] = (response or {}).get("status") != "cancelled"
+
+        return _callback
+
+    try:
+        batch = client.new_batch_http_request()
+    except Exception:
+        batch = None
+
+    if batch is None:
+        for triple in chunk:
+            _, calendar_id, event_id = triple
+            results[triple] = _event_exists_single(client, calendar_id, event_id)
+        return
+
+    for triple in chunk:
+        _, calendar_id, event_id = triple
+        batch.add(
+            client.events().get(calendarId=calendar_id, eventId=event_id),
+            callback=_make_callback(triple),
+        )
+
+    try:
+        batch.execute()
+    except Exception as error:
+        logging.warning(f"Batch event existence check failed: {error}")
+        for triple in chunk:
+            results.setdefault(triple, True)
+
+
+def _event_exists_single(client, calendar_id, event_id):
+    try:
+        response = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        return (response or {}).get("status") != "cancelled"
+    except Exception as error:
+        return not _event_missing_status(error)
 
 
 def _selected_calendar(args, rules, title):
@@ -743,17 +829,26 @@ def _publish_event_to_calendar(api_dst, event, selected_calendar, source_id=""):
     """Publish an event, skipping one that is already on the calendar."""
     from manage_agenda.events import _ensure_valid_event_timezones
 
-    _stamp_event_identity(event, source_id)
+    _stamp_event_identity(event, source_id, selected_calendar)
     existing = find_existing_event(api_dst, event, selected_calendar, source_id)
     if existing:
-        _remember_event_keys(event, source_id)
+        _remember_event_keys(event, source_id, calendar_id=selected_calendar)
         link = existing.get("htmlLink", "") if isinstance(existing, dict) else ""
-        return True, {"success": True, "duplicate": True, "post_url": link}
+        event_id = existing.get("id", "") if isinstance(existing, dict) else ""
+        return True, {
+            "success": True,
+            "duplicate": True,
+            "post_url": link,
+            "calendar_id": selected_calendar,
+            "event_id": event_id,
+        }
 
     def _insert(body):
         result = api_dst.publishPost(post={"event": body, "idCal": selected_calendar}, api=api_dst)
         if isinstance(result, dict) and result.get("success"):
-            _remember_event_keys(body, source_id)
+            _remember_event_keys(body, source_id, calendar_id=selected_calendar)
+            result.setdefault("calendar_id", selected_calendar)
+            result.setdefault("event_id", (result.get("raw_response") or {}).get("id", ""))
         return True, result
 
     try:

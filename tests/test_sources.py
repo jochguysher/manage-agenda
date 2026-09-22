@@ -582,7 +582,7 @@ class TestApiFailureLeavesMessagePending(unittest.TestCase):
                 ["mail-1", "mail-2"],
                 metadata,
                 content,
-                on_item_done=lambda item, index: remembered.append(item),
+                on_item_done=lambda item, index, calendar_result: remembered.append(item),
             )
         return result, remembered
 
