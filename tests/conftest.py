@@ -44,6 +44,38 @@ for _key, _value in _KNOWN_TEST_CONFIG_ENV.items():
 os.environ.pop("GEMINI_API_KEY", None)
 os.environ.pop("MISTRAL_API_KEY", None)
 
+
+def strip_socialmodules_root_log_handlers():
+    """Remove (and close) every FileHandler socialModules attached to the ROOT logger.
+
+    socialModules.configMod installs, at import time - before any fixture can run - a
+    FileHandler on ~/usr/var/log/rssSocial.log (the REAL home: the import happens at
+    collection, before isolated_paths redirects HOME) and a stdout StreamHandler. With
+    propagation on, every record any test emits through the manage_agenda loggers was
+    being appended to that real file (see docs/investigation-limite1.md §12, "The log file
+    was never written"). Only the disk-writing handler is removed: the stdout one writes
+    nothing durable and stays. Idempotent, so it is called at import and before every test
+    (the module can be imported lazily by a test file collected later)."""
+    import logging
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.FileHandler):
+            root.removeHandler(handler)
+            handler.close()
+
+
+try:
+    import socialModules.configMod  # noqa: F401 - the import is what installs the handlers
+except Exception:  # pragma: no cover - socialModules absent or unimportable: nothing to strip
+    pass
+strip_socialmodules_root_log_handlers()
+
+
+@pytest.fixture(autouse=True)
+def no_root_file_log_handlers():
+    strip_socialmodules_root_log_handlers()
+
 # Computed once, at collection time, independent of any per-test monkeypatching below - the
 # real, unredirected locations the test suite must never write to. See
 # docs/investigation-limite1.md §9/§10: real user data was found polluted by this suite (a

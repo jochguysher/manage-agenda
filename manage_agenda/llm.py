@@ -3,6 +3,8 @@ import logging
 import os
 import types
 
+logger = logging.getLogger(__name__)
+
 try:
     from google import genai
 except Exception:
@@ -53,7 +55,7 @@ def load_config(config_file):
     if os.path.exists(config_file):
         config.read(config_file)
     else:
-        logging.error(f"Configuration file not found: {config_file}")
+        logger.error(f"Configuration file not found: {config_file}")
         raise FileNotFoundError(f"Config file not found: {config_file}")
     return config
 
@@ -130,9 +132,9 @@ class OllamaClient(LLMClient):
             # curl http://localhost:11434/api/generate -d '{"model": "llama3.2", "keep_alive": 0}'
             return response.message.content
         except Exception as e:
-            logging.error(f"Error generating text with Ollama: {e}")
+            logger.error(f"Error generating text with Ollama: {e}")
             if "model requires more system memory" in str(e) or "out of memory" in str(e).lower():
-                logging.error(f"Ollama model {self.model_name} requires more memory than available: {e}")
+                logger.error(f"Ollama model {self.model_name} requires more memory than available: {e}")
                 return "Memory"
             raise LLMError(str(e)) from e
 
@@ -175,7 +177,7 @@ class GeminiClient(LLMClient):
                     )
             return response.text
         except Exception as e:
-            logging.error(f"Error generating text with Gemini: {e}")
+            logger.error(f"Error generating text with Gemini: {e}")
             raise LLMError(str(e)) from e
 
     #@staticmethod
@@ -208,7 +210,7 @@ class MistralClient(LLMClient):
             )
             return response.choices[0].message.content
         except Exception as e:
-            logging.error(f"Error generating text with Mistral: {e}")
+            logger.error(f"Error generating text with Mistral: {e}")
             raise LLMError(str(e)) from e
 
     @staticmethod
@@ -281,7 +283,7 @@ def select_llm(args, config_path=None):
         else:
             model = MistralClient(model_name or DEFAULT_MODEL_BY_PROVIDER["mistral"])
     else:
-        logging.error(f"Invalid LLM source: {ai}")
+        logger.error(f"Invalid LLM source: {ai}")
         return None
 
     if prompted and not explicit_provider and not explicit_model:

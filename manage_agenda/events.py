@@ -12,6 +12,8 @@ from manage_agenda.config import config
 from manage_agenda.connections import select_calendar
 from manage_agenda.i18n import t
 
+logger = logging.getLogger(__name__)
+
 # Constants for date confirmation and interactive date/time modification.
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -38,7 +40,7 @@ def _default_naive_timezone():
     try:
         return pytz.timezone(config.DEFAULT_TIMEZONE)
     except pytz.exceptions.UnknownTimeZoneError:
-        logging.error(f"Invalid timezone '{config.DEFAULT_TIMEZONE}' in config. Falling back to UTC.")
+        logger.error(f"Invalid timezone '{config.DEFAULT_TIMEZONE}' in config. Falling back to UTC.")
         return pytz.utc
 
 
@@ -109,7 +111,7 @@ def _parse_datetime_to_utc(dt_str, tz_name=None):
         try:
             dt_obj = datetime.datetime.strptime(normalized_str, DATETIME_FORMAT)
         except ValueError as parse_err:
-            logging.error(f"Invalid datetime format: '{dt_str}'. Error: {parse_err}")
+            logger.error(f"Invalid datetime format: '{dt_str}'. Error: {parse_err}")
             return None
 
     if dt_obj.tzinfo is None:
@@ -118,7 +120,7 @@ def _parse_datetime_to_utc(dt_str, tz_name=None):
                 local_tz = pytz.timezone(tz_name)
                 dt_obj = local_tz.localize(dt_obj)
             except pytz.exceptions.UnknownTimeZoneError:
-                logging.warning(
+                logger.warning(
                     f"Unknown timezone '{tz_name}'. "
                     f"Using default timezone: {config.DEFAULT_TIMEZONE}"
                 )
@@ -200,7 +202,7 @@ def _ensure_valid_event_timezones(event, fallback_tz="UTC"):
         try:
             pytz.timezone(tz_name)
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"Invalid timezone '{tz_name}' for event {when}; using fallback '{fallback_tz}'."
             )
             field["timeZone"] = fallback_tz

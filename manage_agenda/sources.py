@@ -32,6 +32,8 @@ from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 from manage_agenda.web import reduce_html
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Args:
@@ -597,7 +599,7 @@ def reconcile_handled_events(
             if len(remaining) != len(events):
                 partially_cancelled = len(events) - len(remaining)
                 prefix = "DRY RUN " if dry_run else ""
-                logging.info(
+                logger.info(
                     f"{prefix}reconcile: {identity}: {partially_cancelled} of {len(events)} "
                     "tracked event(s) cancelled, keeping the identity handled for the rest."
                 )
@@ -625,7 +627,7 @@ def reconcile_handled_events(
             entry["events"] = []
             entry["status"] = "unknown_event"
             still_handled.add(identity)
-            logging.warning(
+            logger.warning(
                 f"{prefix}{identity}: {len(unknown_refs)} of {len(events)} tracked event(s) "
                 "return 404/410 (never confirmed to have existed) - journaling as "
                 "unknown_event, no on_user_delete action, no mailbox action."
@@ -638,7 +640,7 @@ def reconcile_handled_events(
             entry["events"] = []
             entry["status"] = "pending_requeue"
             entry["generation"] = int(entry.get("generation") or 0) + 1
-            logging.info(f"{prefix}{identity}: event deleted, requeueing (generation bumped).")
+            logger.info(f"{prefix}{identity}: event deleted, requeueing (generation bumped).")
             # Deliberately not added to still_handled - the caller is expected to un-mark the
             # source message so the next scan can pick it up again.
         else:
@@ -650,7 +652,7 @@ def reconcile_handled_events(
             entry["events"] = []
             entry["status"] = "no_event"
             still_handled.add(identity)
-            logging.info(f"{prefix}{identity}: event deleted, ignoring per on_user_delete=ignore.")
+            logger.info(f"{prefix}{identity}: event deleted, ignoring per on_user_delete=ignore.")
 
     if changed and not dry_run:
         _save_state(path, state)
@@ -735,7 +737,7 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
     if not dry_run and path.is_file():
         backup_path = path.with_suffix(path.suffix + ".bak")
         backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-        logging.info(f"migrate: backed up {path} to {backup_path} before a real pass.")
+        logger.info(f"migrate: backed up {path} to {backup_path} before a real pass.")
 
     migrated_count = 0
     changed = False
@@ -744,7 +746,7 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
             for ref in list(entry.get("events") or []) + list(entry.get("cancelled_events") or []):
                 if ref.get("calendar_id") == "primary" and not ref.get("calendar_account"):
                     report["attached"] += 1
-                    logging.info(
+                    logger.info(
                         f"{prefix}migrate: {identity} primary/{ref.get('event_id')}: legacy ref "
                         f"attached to {scope.account_key} (the only configured calendar account)."
                     )
@@ -770,7 +772,7 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
             is_owned, reason = scope.owner_of(ref)
             if not is_owned:
                 report["skipped"] += 1
-                logging.info(
+                logger.info(
                     f"{prefix}migrate: {identity} {calendar_id}/{event_id} skipped - {reason}. "
                     "Not marked migrated; retried on a later run."
                 )
@@ -799,7 +801,7 @@ def migrate_legacy_ledger_entries(args, path=None, dry_run=False, report=None):
                 # already_migrated, gone) is logged (see migrate_one_legacy_event and this
                 # function's own logging) but not persisted, including the "migrated" flag
                 # itself: a later real run must still process every one of these refs.
-                logging.info(f"DRY RUN migrate: {identity} {calendar_id}/{event_id}: {status}")
+                logger.info(f"DRY RUN migrate: {identity} {calendar_id}/{event_id}: {status}")
                 continue
             ref["migrated"] = True
             if event_end and not ref.get("event_end"):
@@ -897,13 +899,13 @@ def purge_expired_ledger_entries(
             if dry_run:
                 # `remaining` is never saved under dry_run (see below) - not adding this
                 # identity to it here is just to avoid implying otherwise.
-                logging.info(f"DRY RUN purge: {identity} would be purged (past {purge_after}).")
+                logger.info(f"DRY RUN purge: {identity} would be purged (past {purge_after}).")
             continue
         if purge_after is None:
             # No event_end and no recorded_at at all - give it exactly one grace pass rather
             # than leaving it permanently unpurgeable.
             if dry_run:
-                logging.info(f"DRY RUN purge: {identity} would be stamped with a grace-pass recorded_at.")
+                logger.info(f"DRY RUN purge: {identity} would be stamped with a grace-pass recorded_at.")
             else:
                 entry["recorded_at"] = today_iso
                 stamped = True
@@ -990,7 +992,7 @@ def owned_calendar_ids(client):
             if not isinstance(page_token, str) or not page_token:
                 return ids
     except Exception as error:
-        logging.warning(f"Could not read the calendar list for this account: {error}")
+        logger.warning(f"Could not read the calendar list for this account: {error}")
         return None
 
 
@@ -1000,7 +1002,7 @@ def configured_calendar_account_keys(rules):
     try:
         sources = rules.selectRule(["gcalendar"], "")
     except Exception as error:
-        logging.warning(f"Could not list the configured calendar accounts: {error}")
+        logger.warning(f"Could not list the configured calendar accounts: {error}")
         return None
     return [key for key in (calendar_account_key(src) for src in sources or []) if key]
 
@@ -1191,7 +1193,7 @@ def migrate_ledger_cli(args, rules=None, path=None, marker_path=None):
         print(t("sources.migrate_ledger_dry_run_done", **details))
         return 0
     record_ledger_migration(account_key, path=marker_path)
-    logging.info(
+    logger.info(
         f"migrate-ledger: {count} ref(s) migrated for {account_key}, {details['skipped']} "
         f"skipped, {details['attached']} legacy 'primary' ref(s) attached; marker stamped."
     )
@@ -1231,7 +1233,7 @@ def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
         return code
     account_key = ledger_migration_account_key(args)
     if not ledger_migrated_for(account_key):
-        logging.warning(
+        logger.warning(
             f"Ledger not migrated yet for calendar account {account_key}: reconcile skipped. Run "
             "'manage-agenda migrate-ledger --dry-run-ledger', then 'manage-agenda migrate-ledger'."
         )
@@ -1250,7 +1252,7 @@ def reconcile_ledger_cli(args, rules=None, path=None, sync_state_path=None):
         "purged": purged_count,
         "log_file": log_file_path(),
     }
-    logging.info(
+    logger.info(
         f"{'DRY RUN ' if dry_run else ''}reconcile: {migrated_count} ref(s) migrated, "
         f"{purged_count} ledger entry(ies) purged for {account_key}."
     )
@@ -1294,13 +1296,13 @@ def _attempt_restore_one_event(client, calendar_id, event_id):
         # all end up "not restored" the same way) - but logged with the exception type so a
         # 401/403/connectivity failure is distinguishable, in the log, from Calendar actually
         # refusing the patch.
-        logging.warning(f"restore: patch failed for {calendar_id}/{event_id}: {type(error).__name__}: {error}")
+        logger.warning(f"restore: patch failed for {calendar_id}/{event_id}: {type(error).__name__}: {error}")
         return False
 
     try:
         refreshed = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
     except Exception as error:
-        logging.warning(
+        logger.warning(
             f"restore: could not verify {calendar_id}/{event_id} after patch: "
             f"{type(error).__name__}: {error}"
         )
@@ -1538,7 +1540,7 @@ def _imap_capabilities_once(api_src):
     if client is None:
         return None
     capabilities = ImapCapabilities.detect(client)
-    logging.info(f"IMAP capabilities for this connection: {capabilities}")
+    logger.info(f"IMAP capabilities for this connection: {capabilities}")
     return capabilities
 
 
@@ -1578,7 +1580,7 @@ def _imap_marker_mode(source_details):
         return None, None
 
     if not _uses_imap_search_criteria(source_details):
-        logging.warning(
+        logger.warning(
             f"processed_marker {raw!r} is configured but this account has no folder/channel/"
             "from criteria, so it never uses the search-criteria scan path - marking would "
             "have no server-side scan exclusion and would grow the scanned set with every "
@@ -1831,7 +1833,7 @@ def _imap_search_one_uid_by_message_id(client, folder, identity, recorded_at):
         return None
     uids = data[0].split()
     if len(uids) != 1:
-        logging.warning(
+        logger.warning(
             f"{identity}: {len(uids)} candidate messages found by Message-ID in {folder!r} "
             "while requeueing - leaving pending rather than guessing which one to un-mark."
         )
@@ -2099,9 +2101,9 @@ def _get_post_datetime_and_diff(post_date):
         now_aware = datetime.datetime.now(madrid_tz)
 
         time_difference = now_aware - post_date_time
-        logging.debug(f"Date: {post_date_time} Diff: {time_difference.days}")
+        logger.debug(f"Date: {post_date_time} Diff: {time_difference.days}")
     except Exception as e:
-        logging.error(f"Error processing post date: {e}")
+        logger.error(f"Error processing post date: {e}")
         time_difference = datetime.timedelta(0)
 
     return post_date_time, time_difference
@@ -2126,34 +2128,34 @@ def _delete_email(args, api_src, post_id, source_name, rules=None):
                 res = ""
                 if "imap" not in api_src.service.lower():
                     print(t("sources.label_debug", label=api_src.getChannel()))
-                    logging.info(f"label: {api_src.getChannel()}")
+                    logger.info(f"label: {api_src.getChannel()}")
                     folder = api_src.getChannel()
                     label = api_src.getLabels(folder)
-                    logging.info(f"label: {label}")
+                    logger.info(f"label: {label}")
                     res = api_src.modifyLabels(post_id, label[0], None)
-                    logging.info(f"Label removed from email {post_id}.")
+                    logger.info(f"Label removed from email {post_id}.")
                 else:
                     label = api_src.getChannel()
                     api_src.getClient().select(label)
                     res = api_src.deletePostId(post_id)
-                    logging.info(f"State: {api_src.getClient().state}")
-                logging.info(f"Res: {res}")
+                    logger.info(f"State: {api_src.getClient().state}")
+                logger.info(f"Res: {res}")
                 if "Fail!" not in res:
-                    logging.info(f"Email {post_id} processed successfully.")
+                    logger.info(f"Email {post_id} processed successfully.")
                     return  # Success
             except Exception as e:
-                logging.warning(f"Attempt {attempt + 1} of {max_retries + 1} failed: {e}")
+                logger.warning(f"Attempt {attempt + 1} of {max_retries + 1} failed: {e}")
                 if attempt < max_retries:
-                    logging.info("Retrying to connect to the email server...")
+                    logger.info("Retrying to connect to the email server...")
 
                     rules = rules or moduleRules.from_config()
-                    logging.info(f"Source: {source_name}")
+                    logger.info(f"Source: {source_name}")
                     source_details = rules.more.get(source_name, {})
                     api_src = rules.readConfigSrc("", source_name, source_details)
                     if label:
                         api_src.setChannel(label)
                 else:
-                    logging.error(
+                    logger.error(
                         f"Could not delete email {post_id} after {max_retries + 1} attempts: {e}"
                     )
                     return  # Exit after last attempt failure
@@ -2314,7 +2316,7 @@ def process_txt_cli(args, model, source_name=None, rules=None):
                 title = next((i for i, s in enumerate(lines_txt) if "Subject: " in s), -1)
             else:
                 title = lines_txt[0]
-            logging.info(f"Extracted info. PostId: {post_id} Title: {title} Date: {date}")
+            logger.info(f"Extracted info. PostId: {post_id} Title: {title} Date: {date}")
             return post_id, title, date, None, 0
 
         def content_extractor(post, i, post_date_time, post_title):
@@ -2384,9 +2386,9 @@ def process_email_cli(args, model, selected_source=None, rules=None):
     else:
         handled = load_handled_mail_ids()
         if calendar_account is None:
-            logging.info("No calendar connection: ledger reconcile/migrate/purge skipped.")
+            logger.info("No calendar connection: ledger reconcile/migrate/purge skipped.")
         else:
-            logging.warning(
+            logger.warning(
                 f"Ledger not migrated yet for calendar account {calendar_account}: reconcile/"
                 "migrate/purge skipped. Run 'manage-agenda migrate-ledger --dry-run-ledger', "
                 "then 'manage-agenda migrate-ledger'."
@@ -2556,7 +2558,7 @@ def _get_links_from_notes():
 
         notes_dir = os.path.expanduser("~/notes")
         if not os.path.exists(notes_dir):
-            logging.warning(f"Notes directory {notes_dir} does not exist.")
+            logger.warning(f"Notes directory {notes_dir} does not exist.")
             return {}
 
         manager = NoteManager(storage_dir=notes_dir)
@@ -2574,10 +2576,10 @@ def _get_links_from_notes():
                     url_to_notes[url].append(title)
         return url_to_notes
     except ImportError:
-        logging.warning("note_app not found. Cannot extract links from notes.")
+        logger.warning("note_app not found. Cannot extract links from notes.")
         return {}
     except Exception as e:
-        logging.error(f"Error extracting links from notes: {e}")
+        logger.error(f"Error extracting links from notes: {e}")
         return {}
 
 
@@ -2680,7 +2682,7 @@ def add_events_cli(args, rules=None):
 
         purged = purge_expired_log_files(args.debug_log_retention_days)
         if purged:
-            logging.info(f"Purged {purged} expired debug log file(s) under MSG_TXT_DIR/log/.")
+            logger.info(f"Purged {purged} expired debug log file(s) under MSG_TXT_DIR/log/.")
 
     model = select_llm(args)
 
@@ -2689,8 +2691,8 @@ def add_events_cli(args, rules=None):
     sources, more_options = get_add_sources(rules=rules)
     if args.verbose:
         print(t("sources.source_debug", source=args.source))
-        logging.debug(f"Sources: {sources}")
-        logging.debug(f"More options: {more_options}")
+        logger.debug(f"Sources: {sources}")
+        logger.debug(f"More options: {more_options}")
     matches = []
     if args.source:
         matches = [item for item in sources if args.source in item]

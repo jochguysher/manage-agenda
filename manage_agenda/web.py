@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 
 from manage_agenda.i18n import t
 
+logger = logging.getLogger(__name__)
+
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "manage_agenda")
 
 
@@ -120,7 +122,7 @@ def reduce_html(url, post, force_refresh=False):
         force_refresh: If True, bypass cache comparison and return full content
     """
     if not post or not post.strip():
-        logging.warning(f"Empty content received for {url}")
+        logger.warning(f"Empty content received for {url}")
         return None
 
     if not os.path.exists(CACHE_DIR):
@@ -132,20 +134,20 @@ def reduce_html(url, post, force_refresh=False):
     cached_file_path = os.path.join(CACHE_DIR, safe_filename)
 
     new_html = post
-    logging.debug(f"Post: {post}")
+    logger.debug(f"Post: {post}")
 
     soup = BeautifulSoup(new_html, "html.parser")
 
     # Detect error pages
     if is_error_content(soup):
-        logging.warning(f"Error page detected for {url}")
+        logger.warning(f"Error page detected for {url}")
         return None
 
     # Extract relevant script content before they are decomposed
     # extra_script_data = extract_relevant_script_content(soup)
 
     if force_refresh:
-        logging.info("Force refresh enabled. Returning full content after cleaning...")
+        logger.info("Force refresh enabled. Returning full content after cleaning...")
         # Save the new HTML to the cache
         with open(cached_file_path, "w", encoding="utf-8") as f:
             f.write(new_html)
@@ -157,7 +159,7 @@ def reduce_html(url, post, force_refresh=False):
             meta.decompose()
         result = soup.get_text(separator="\n", strip=True)
     elif os.path.exists(cached_file_path):
-        logging.info("URL found in cache. Comparing...")
+        logger.info("URL found in cache. Comparing...")
         with open(cached_file_path, encoding="utf-8") as f:
             old_html = f.read()
 
@@ -236,7 +238,7 @@ def reduce_html(url, post, force_refresh=False):
             f.write(new_html)
 
     else:
-        logging.info("URL not found in cache. Downloading and storing it...")
+        logger.info("URL not found in cache. Downloading and storing it...")
         # Save the new HTML to the cache
         with open(cached_file_path, "w", encoding="utf-8") as f:
             f.write(new_html)

@@ -13,6 +13,8 @@ the process; a later change to the saved config only takes effect on the next ru
 import logging
 import os
 
+logger = logging.getLogger(__name__)
+
 SUPPORTED_LANGUAGES = ("en", "fr")
 DEFAULT_LANGUAGE = "en"
 
@@ -49,7 +51,7 @@ def _resolve_language(config_path=None):
 
         forced = load_user_config(config_path).get("language")
     except Exception as error:
-        logging.debug(f"Could not read saved language: {error}")
+        logger.debug(f"Could not read saved language: {error}")
         forced = None
     if forced:
         return str(forced).strip().lower()
@@ -91,7 +93,7 @@ def t(key, **kwargs):
 
     catalog = TRANSLATIONS.get(key)
     if catalog is None:
-        logging.debug(f"No translation catalog for key: {key}")
+        logger.debug(f"No translation catalog for key: {key}")
         text = key
     else:
         language = get_language()
@@ -100,6 +102,6 @@ def t(key, **kwargs):
         try:
             return text.format(**kwargs)
         except (KeyError, IndexError) as error:
-            logging.warning(f"Translation formatting failed for {key!r}: {error}")
+            logger.warning(f"Translation formatting failed for {key!r}: {error}")
             return text
     return text

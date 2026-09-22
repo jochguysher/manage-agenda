@@ -11,6 +11,8 @@ from manage_agenda.exceptions import CalendarAccountChoiceRequired, CalendarErro
 from manage_agenda.i18n import t
 from manage_agenda.interactive import select_many, select_one
 
+logger = logging.getLogger(__name__)
+
 
 def authorize(args, rules=None):
     """Authorize and return a configured service connection."""
@@ -28,11 +30,11 @@ def authorize(args, rules=None):
 
     rules_all = rules.selectRule("", "")
     if not rules_all:
-        logging.warning("No services configured.")
+        logger.warning("No services configured.")
         return None
     source_name = rules_all[0]
     source_details = rules.more.get(source_name, {})
-    logging.info(f"Source: {source_name} - {source_details}")
+    logger.info(f"Source: {source_name} - {source_details}")
     return rules.readConfigSrc("", source_name, source_details)
 
 
@@ -90,7 +92,7 @@ def select_calendar_account(args, rules=None, config_path=None):
         if account_name:
             api = rules.readConfigSrc("", account_name, rules.more.get(account_name, {}))
         else:
-            logging.warning("No gcalendar sources configured.")
+            logger.warning("No gcalendar sources configured.")
             api = None
     if api is None or api.getClient() is None:
         print(missing_calendar_message(api))
@@ -181,11 +183,11 @@ def select_api(args, api_type, rules=None, title=""):
 
     sources = rules.selectRule(service, "")
     if not sources:
-        logging.warning(f"No {api_type} sources configured.")
+        logger.warning(f"No {api_type} sources configured.")
         return None
     selected_source = sources[0]
     source_details = rules.more.get(selected_source, {})
-    logging.info(f"Source: {selected_source} - {source_details}")
+    logger.info(f"Source: {selected_source} - {source_details}")
     return rules.readConfigSrc("", selected_source, source_details)
 
 
@@ -330,7 +332,7 @@ def select_calendar(calendar_api, title="", args=None):
             raise CalendarError(t("connections.no_calendar_selected"))
 
         calendar_id = chosen["id"]
-        logging.info(f"Selected calendar: {safe_get(chosen, ['summary'])} (ID: {calendar_id})")
+        logger.info(f"Selected calendar: {safe_get(chosen, ['summary'])} (ID: {calendar_id})")
         return calendar_id
     except (KeyError, IndexError, TypeError) as error:
         raise CalendarError(t("connections.failed_to_select_calendar", error=error)) from error
@@ -353,7 +355,7 @@ def select_calendars(calendar_api, title="", args=None):
             raise CalendarError(t("connections.no_calendar_selected"))
 
         calendar_ids = [item["id"] for item in chosen]
-        logging.info(f"Selected calendars: {[safe_get(item, ['summary']) for item in chosen]} (IDs: {calendar_ids})")
+        logger.info(f"Selected calendars: {[safe_get(item, ['summary']) for item in chosen]} (IDs: {calendar_ids})")
         return calendar_ids
     except (KeyError, IndexError, TypeError) as error:
         raise CalendarError(t("connections.failed_to_select_calendar", error=error)) from error

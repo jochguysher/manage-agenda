@@ -16,6 +16,8 @@ from socialModules.configMod import select_from_list
 
 from manage_agenda.i18n import t
 
+logger = logging.getLogger(__name__)
+
 try:
     import questionary
 except Exception:
@@ -46,7 +48,7 @@ def select_one(options, title="", identifier=None, default=None):
         try:
             answer = questionary.select(title or "Select one", choices=labels, default=default).ask()
         except Exception as error:
-            logging.debug(f"questionary selection failed, falling back: {error}")
+            logger.debug(f"questionary selection failed, falling back: {error}")
             answer = None
         if answer is not None:
             return options[labels.index(answer)]
@@ -78,7 +80,7 @@ def select_many(options, title="", identifier=None):
         try:
             answer = questionary.checkbox(title or "Select one or more", choices=labels).ask()
         except Exception as error:
-            logging.debug(f"questionary multi-select failed, falling back: {error}")
+            logger.debug(f"questionary multi-select failed, falling back: {error}")
             answer = None
         if answer is not None:
             return [options[labels.index(item)] for item in answer]

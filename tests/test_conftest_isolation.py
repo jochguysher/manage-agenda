@@ -129,3 +129,43 @@ def test_config_does_not_leak_the_real_env_files_values():
         "this check can no longer detect a leak for this key; pick a different mismatched key"
     )
     assert Config.DEFAULT_TIMEZONE == "Europe/Berlin"
+
+
+def test_no_root_file_log_handler_survives_conftest():
+    """socialModules attaches a FileHandler on the REAL ~/usr/var/log/rssSocial.log to the
+    root logger at import time; with propagation on, every test's log records were being
+    appended to that real file. conftest.py strips it at import and before every test."""
+    import logging
+
+    import socialModules.configMod  # noqa: F401 - would (re)install the handler if it could
+
+    root = logging.getLogger()
+    assert not [h for h in root.handlers if isinstance(h, logging.FileHandler)], [
+        getattr(h, "baseFilename", h) for h in root.handlers
+    ]
+
+
+def test_manage_agenda_records_reach_log_file_without_touching_root(tmp_path, monkeypatch):
+    """The fix for the log file that was never written (§12): setup_logging() attaches its
+    handler to the "manage_agenda" logger, so records arrive in LOG_FILE even though the
+    root logger already had socialModules' handlers when logging.basicConfig() was a no-op."""
+    import logging
+
+    from manage_agenda.base import PACKAGE_LOGGER_NAME, setup_logging
+
+    log_file = tmp_path / "manage_agenda.log"
+    monkeypatch.setenv("LOG_FILE", str(log_file))
+    root_before = list(logging.getLogger().handlers)
+    package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
+    try:
+        setup_logging()
+        logging.getLogger("manage_agenda.sources").info("hello from a module logger")
+        for handler in package_logger.handlers:
+            handler.flush()
+        assert "hello from a module logger" in log_file.read_text(encoding="utf-8")
+        assert logging.getLogger().handlers == root_before
+    finally:
+        for handler in list(package_logger.handlers):
+            if getattr(handler, "manage_agenda_handler", False):
+                package_logger.removeHandler(handler)
+                handler.close()

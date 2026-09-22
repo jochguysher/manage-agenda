@@ -19,6 +19,8 @@ from manage_agenda.connections import calendar_account_key, select_api, select_c
 from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 
+logger = logging.getLogger(__name__)
+
 
 def create_event_dict():
     """Create the template dictionary used for extracted calendar events."""
@@ -131,14 +133,14 @@ def get_event_from_llm(model, prompt, post_id, verbose=False, debug_log_extracti
             event = vcal_json
             json_error_occurred = False
         except json.JSONDecodeError as error:
-            logging.error(f"Invalid JSON in vCal data: {vcal_json}")
-            logging.error(f"Error: {error}")
+            logger.error(f"Invalid JSON in vCal data: {vcal_json}")
+            logger.error(f"Error: {error}")
         except SyntaxError as error:
-            logging.error(f"Syntax error: {vcal_json}")
-            logging.error(f"Error: {error}")
+            logger.error(f"Syntax error: {vcal_json}")
+            logger.error(f"Error: {error}")
         except ValueError as error:
-            logging.error(f"Value error: {vcal_json}")
-            logging.error(f"Error: {error}")
+            logger.error(f"Value error: {vcal_json}")
+            logger.error(f"Error: {error}")
 
     if memory_error_occurred or json_error_occurred:
         event = None
@@ -681,12 +683,12 @@ def migrate_one_legacy_event(
     except googleapiclient.errors.HttpError as error:
         status_code = getattr(getattr(error, "resp", None), "status", None)
         if status_code in (404, 410):
-            logging.info(f"migrate: {calendar_id}/{event_id} is gone - nothing to patch.")
+            logger.info(f"migrate: {calendar_id}/{event_id} is gone - nothing to patch.")
             return "gone", None
-        logging.warning(f"migrate: could not fetch {calendar_id}/{event_id}: {error}")
+        logger.warning(f"migrate: could not fetch {calendar_id}/{event_id}: {error}")
         return "retry", None
     except Exception as error:
-        logging.warning(f"migrate: could not fetch {calendar_id}/{event_id}: {error}")
+        logger.warning(f"migrate: could not fetch {calendar_id}/{event_id}: {error}")
         return "retry", None
 
     if not isinstance(existing, dict):
@@ -694,7 +696,7 @@ def migrate_one_legacy_event(
 
     event_end = _event_end_iso(existing)
     if existing.get("status") == "cancelled":
-        logging.info(f"migrate: {calendar_id}/{event_id} is cancelled - not patched, left to reconcile.")
+        logger.info(f"migrate: {calendar_id}/{event_id} is cancelled - not patched, left to reconcile.")
         return "cancelled", event_end
 
     private = dict((existing.get("extendedProperties") or {}).get("private") or {})
@@ -704,7 +706,7 @@ def migrate_one_legacy_event(
     body = {"extendedProperties": {"private": private}}
     _stamp_reconstructible_properties(body, identity, generation, event_index)
     if dry_run:
-        logging.info(
+        logger.info(
             f"DRY RUN migrate: would patch {calendar_id}/{event_id} with "
             f"extendedProperties.private={body['extendedProperties']['private']}"
         )
@@ -712,7 +714,7 @@ def migrate_one_legacy_event(
     try:
         client.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
     except Exception as error:
-        logging.warning(f"migrate: could not patch {calendar_id}/{event_id}: {error}")
+        logger.warning(f"migrate: could not patch {calendar_id}/{event_id}: {error}")
         return "retry", None
     return "migrated", event_end
 
@@ -973,7 +975,7 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None, 
     legacy_tokens = _legacy_sync_tokens(path)
     if legacy_tokens and not (dry_run and str(path) in _dry_run_legacy_warned):
         prefix = "DRY RUN: would abandon" if dry_run else "Abandoning"
-        logging.warning(
+        logger.warning(
             f"{prefix} {len(legacy_tokens)} Calendar sync token(s) keyed by calendar id alone "
             f"({', '.join(sorted(legacy_tokens))}) in {path}: a token can't be attributed to a "
             "calendar account after the fact, so none is reused. The next sync of each calendar "
@@ -985,7 +987,7 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None, 
             _save_sync_tokens(path, tokens)
     account_key = calendar_account_key(getattr(api_dst, "src", None))
     if account_key is None:
-        logging.info(
+        logger.info(
             f"No calendar account key for this connection: no sync token read or stored for "
             f"{calendar_id}, bootstrapping."
         )
@@ -1006,12 +1008,12 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None, 
                 client, calendar_id, time_min=_bootstrap_time_min()
             )
         except Exception as error:
-            logging.warning(f"Could not seed a Calendar sync token for {calendar_id}: {error}")
+            logger.warning(f"Could not seed a Calendar sync token for {calendar_id}: {error}")
             return set(), set()
         if fresh_token:
             _store(fresh_token)
         else:
-            logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
+            logger.warning(f"Calendar did not return a sync token for {calendar_id}.")
         listed_ids = {item.get("id") for item in items if item.get("id")}
         cancelled_ids = {
             item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")
@@ -1040,19 +1042,19 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None, 
         items, fresh_token = _list_all_pages(client, calendar_id, sync_token=token)
     except googleapiclient.errors.HttpError as error:
         if getattr(getattr(error, "resp", None), "status", None) == 410:
-            logging.info(f"Calendar sync token expired for {calendar_id}, reseeding.")
+            logger.info(f"Calendar sync token expired for {calendar_id}, reseeding.")
             account_tokens.pop(calendar_id, None)
             return _bootstrap()
-        logging.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
+        logger.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
         return set(), set()
     except Exception as error:
-        logging.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
+        logger.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
         return set(), set()
 
     if fresh_token:
         _store(fresh_token)
     else:
-        logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
+        logger.warning(f"Calendar did not return a sync token for {calendar_id}.")
 
     cancelled_ids = {
         item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")
@@ -1120,7 +1122,7 @@ def _calendar_busy(api_dst, calendar_ids, constraints):
                 .execute()
             )
         except Exception as error:
-            logging.warning(f"Could not read the calendar while choosing a visit: {error}")
+            logger.warning(f"Could not read the calendar while choosing a visit: {error}")
             continue
         busy.extend(busy_intervals(response))
     return busy
@@ -1168,7 +1170,7 @@ def _publish_event_to_calendar(
         try:
             existing = _get_event_if_present(client, selected_calendar, event_id)
         except Exception as error:
-            logging.warning(f"Could not check for an existing event at id {event_id}: {error}")
+            logger.warning(f"Could not check for an existing event at id {event_id}: {error}")
             return False, {
                 "success": False,
                 "error_message": str(error),
@@ -1178,7 +1180,7 @@ def _publish_event_to_calendar(
 
         if existing is not None:
             if isinstance(existing, dict) and existing.get("status") == "cancelled":
-                logging.warning(
+                logger.warning(
                     f"Deterministic id {event_id} collides with a cancelled event on "
                     f"{selected_calendar} - not inserting. This should be rare (a fresh "
                     "requeue always changes the generation); if it recurs, the identity or "
@@ -1214,16 +1216,16 @@ def _publish_event_to_calendar(
     try:
         return _insert(event)
     except googleapiclient.errors.HttpError as error:
-        logging.error(f"Error creating calendar event: {error}")
+        logger.error(f"Error creating calendar event: {error}")
         if "Invalid time zone definition for end time'" in str(error):
-            logging.info(
+            logger.info(
                 "Detected invalid timezone definition for end time. Correcting event timezones and retrying."
             )
             event = _ensure_valid_event_timezones(event, fallback_tz="UTC")
             try:
                 return _insert(event)
             except Exception as retry_error:
-                logging.error(f"Retry after timezone correction failed: {retry_error}")
+                logger.error(f"Retry after timezone correction failed: {retry_error}")
     return False, None
 
 

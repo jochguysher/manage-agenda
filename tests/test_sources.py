@@ -582,7 +582,7 @@ class TestSourceUtilities(unittest.TestCase):
 
         with (
             patch("manage_agenda.sources.moduleRules") as mock_module_rules,
-            patch("manage_agenda.sources.logging.error") as mock_logging_error,
+            patch("manage_agenda.sources.logger.error") as mock_logging_error,
         ):
             mock_rules = MagicMock()
             mock_rules.more.get.return_value = {}

@@ -878,6 +878,28 @@ only arrives untagged yields the locator and consumes the entry; a stale entry w
 that sends none yields no locator; the untagged form is read for COPY too. The probe reads
 the same place, so its "no COPYUID" verdict from that run is superseded, not re-run.
 
+**The log file was never written.** Every "Details: `LOG_FILE`" message pointed at a file
+that did not exist. `socialModules.configMod` configures the *root* logger at import time (a
+FileHandler on `~/usr/var/log/rssSocial.log` and a stdout handler), and
+`logging.basicConfig(filename=LOG_FILE)` in `base.setup_logging` is a silent no-op once the
+root logger has any handler - so every `logging.info(...)` in this package landed in
+`rssSocial.log`, the test suite's records included. Not fixed with `force=True`, which would
+have taken socialModules' own logging away from it. Instead each module logs through
+`logger = logging.getLogger(__name__)`, a child of the `manage_agenda` logger, and
+`setup_logging()` attaches the `LOG_FILE` FileHandler (and, with `-v`, the stdout copy) to that
+logger only, tagging its handlers so a second call in the same process replaces them instead
+of stacking a duplicate. The root logger is not touched. Propagation stays on, so
+`assertLogs()`/`caplog` keep working and socialModules' file still receives a copy of these
+records; strict separation would mean `propagate = False` and rewriting those tests.
+`tests/conftest.py` removes, at import and before every test, any FileHandler socialModules
+attached to the root logger, so the suite no longer appends to the real `rssSocial.log` (its
+size is unchanged across a run; the stdout handler is left alone). Tests
+(`tests/test_base.py`, `tests/test_conftest_isolation.py`): a record from
+`manage_agenda.sources` arrives in `LOG_FILE` with the root handlers unchanged, `-v` means
+DEBUG plus a console handler, `LOGDIR` overrides the location, a second `setup_logging()`
+leaves one file handler and writes each record once, and no root FileHandler survives the
+conftest.
+
 **Sync tokens are per (calendar account, calendar id).** `calendar_sync_tokens.json` is now
 `{"accounts": {account_key: {calendar_id: token}}}`. The account is read from the connection
 that makes the call (`api_dst.src`, through `connections.calendar_account_key()`, the same

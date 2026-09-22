@@ -17,6 +17,8 @@ import yaml
 
 from manage_agenda.config import config_dir
 
+logger = logging.getLogger(__name__)
+
 
 def user_config_file():
     """Where the saved configuration lives. Resolved fresh on each call, not cached at import -
@@ -35,7 +37,7 @@ def load_user_config(path=None):
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as error:
-        logging.warning(f"Could not read {path}: {error}")
+        logger.warning(f"Could not read {path}: {error}")
         return {}
     return data if isinstance(data, dict) else {}
 

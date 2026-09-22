@@ -11,6 +11,8 @@ from pathlib import Path
 from manage_agenda.config import config, log_file_path, msg_txt_dir
 from manage_agenda.i18n import t
 
+logger = logging.getLogger(__name__)
+
 LOGDIR = ""
 
 
@@ -66,7 +68,7 @@ def write_file(filename, content, enabled=False, base_dir=None):
         # if it contains '..' components that could traverse up the directory
         # tree
         if os.path.isabs(normalized_filename) or '..' in normalized_filename.split(os.sep):
-            logging.error(f"Invalid filename: {filename} - contains path traversal attempts")
+            logger.error(f"Invalid filename: {filename} - contains path traversal attempts")
             return False
 
         # Construct the full path using os.path.join for safety
@@ -81,12 +83,12 @@ def write_file(filename, content, enabled=False, base_dir=None):
             # Ensure the resolved file path is within the resolved default
             # directory
             if not full_path_real.startswith(default_dir_real + os.sep) and full_path_real != default_dir_real:
-                logging.error(f"Invalid filename: {filename} - resolves outside allowed directory")
+                logger.error(f"Invalid filename: {filename} - resolves outside allowed directory")
                 return False
         except OSError:
             # If realpath fails (e.g., path doesn't exist), we can't do the security check,
             # but we can still proceed with the original path check if we're careful
-            logging.warning(f"Could not resolve real paths for security check: {filename}")
+            logger.warning(f"Could not resolve real paths for security check: {filename}")
             # We'll continue anyway, but this is less secure
 
         # Ensure the directory exists
@@ -102,7 +104,7 @@ def write_file(filename, content, enabled=False, base_dir=None):
         except OSError as dir_error:
             # If directory creation fails, we log it but continue to try opening the file
             # This allows tests with fake directories to work while still providing security
-            logging.warning(f"Could not create directory for {filename}: {dir_error}")
+            logger.warning(f"Could not create directory for {filename}: {dir_error}")
 
         with open(full_path, "w") as file:
             file.write(content)
@@ -111,11 +113,11 @@ def write_file(filename, content, enabled=False, base_dir=None):
         except OSError as chmod_error:
             # Same "log but continue" reasoning as the mkdir above - e.g. `open` mocked out
             # in a test with no real file underneath full_path to chmod.
-            logging.warning(f"Could not chmod {full_path} to 0600: {chmod_error}")
-        logging.info(f"File written: {filename}")
+            logger.warning(f"Could not chmod {full_path} to 0600: {chmod_error}")
+        logger.info(f"File written: {filename}")
         return True
     except Exception as e:
-        logging.error(f"Error writing file {filename}: {e}")
+        logger.error(f"Error writing file {filename}: {e}")
         return False
 
 
@@ -147,7 +149,7 @@ def _chmod_private_tree(root, dir_path):
         # os.makedirs above only partially succeeded, leaving a directory in this chain
         # missing. Must not escape as an uncaught exception: write_file()'s outer
         # `except Exception` would turn that into a failed write, not a permissions warning.
-        logging.warning(f"Could not chmod private directory under {root}: {chmod_error}")
+        logger.warning(f"Could not chmod private directory under {root}: {chmod_error}")
 
 
 _warned_loose_directories = set()
@@ -181,7 +183,7 @@ def _makedirs_private(root, dir_path):
         mode = os.stat(directory).st_mode & 0o777
         if mode & 0o077 and directory not in _warned_loose_directories:
             _warned_loose_directories.add(directory)
-            logging.warning(
+            logger.warning(
                 f"Existing output directory {directory} has permissions {oct(mode)}, looser "
                 f"than 0700 - left unchanged. Files written into it are still 0600; run "
                 f"`chmod 700 {directory}` if it should be private."
@@ -231,7 +233,7 @@ def purge_expired_log_files(retention_days, today=None):
             marker.write_text(today.isoformat(), encoding="utf-8")
             os.chmod(marker, 0o600)
         except OSError as error:
-            logging.warning(f"Could not stamp debug log purge marker under {log_root}: {error}")
+            logger.warning(f"Could not stamp debug log purge marker under {log_root}: {error}")
         return 0
     try:
         enabled_since = datetime.datetime.fromisoformat(
@@ -240,7 +242,7 @@ def purge_expired_log_files(retention_days, today=None):
         if enabled_since.tzinfo is None:
             enabled_since = enabled_since.replace(tzinfo=datetime.timezone.utc)
     except (OSError, ValueError) as error:
-        logging.warning(
+        logger.warning(
             f"Unreadable debug log purge marker {marker}, purging nothing: {error}. To fix it, "
             f"delete {marker}: the next purge re-stamps it with the current time, which makes "
             f"every file present under {log_root} at that moment permanently protected (never "
@@ -268,7 +270,7 @@ def purge_expired_log_files(retention_days, today=None):
                     file_path.unlink()
                     deleted += 1
                 except OSError as error:
-                    logging.warning(f"Could not purge expired log file {file_path}: {error}")
+                    logger.warning(f"Could not purge expired log file {file_path}: {error}")
         # Bottom-up (topdown=False), so a directory only just emptied by this same pass is
         # already empty by the time we get here - safe to try removing every directory and
         # let rmdir fail harmlessly on any that still has content.
@@ -279,11 +281,29 @@ def purge_expired_log_files(retention_days, today=None):
     return deleted
 
 
-def setup_logging(verbose: bool = False) -> None:
-    """Configure logging for the application.
+# The logger every manage_agenda module logs through (each has `logger =
+# logging.getLogger(__name__)`, a child of this one). setup_logging() attaches the LOG_FILE
+# handler HERE, never to the root logger: socialModules configures the root logger at import
+# time (a FileHandler on ~/usr/var/log/rssSocial.log plus a stdout handler), and
+# logging.basicConfig() is a silent no-op once the root logger has any handler - which is
+# exactly how LOG_FILE went unwritten for as long as the calls went through the root logger.
+# Attaching to the package logger leaves socialModules' handlers alone; propagation stays on,
+# so the root handlers (and tests' assertLogs()/caplog) still see these records too.
+PACKAGE_LOGGER_NAME = "manage_agenda"
 
-    Args:
-        verbose: Enable verbose (DEBUG level) logging.
+
+def _is_manage_agenda_handler(handler):
+    return getattr(handler, "manage_agenda_handler", False)
+
+
+def setup_logging(verbose: bool = False) -> None:
+    """Send manage-agenda's own log records to LOG_FILE (log_file_path()), at LOG_LEVEL - or
+    DEBUG, with a copy of INFO and above on stdout, when `verbose`.
+
+    Only the "manage_agenda" logger is configured (see PACKAGE_LOGGER_NAME): the root logger
+    and whatever other libraries attached to it are not touched. Calling this again (a
+    second command in the same process, tests) replaces the handlers a previous call added
+    rather than stacking a second copy of each - so every record is written once.
     """
     print(t("base.setting_logging"))
 
@@ -303,30 +323,33 @@ def setup_logging(verbose: bool = False) -> None:
     else:
         log_level = getattr(logging, getattr(config, "LOG_LEVEL", "INFO").upper(), logging.INFO)
 
-    # Configure logging format
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(log_format, date_format)
 
-    # Configure root logger
-    logging.basicConfig(
-        filename=str(log_file),
-        level=log_level,
-        format=log_format,
-        datefmt=date_format,
-    )
+    package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
+    package_logger.setLevel(log_level)
+    for handler in list(package_logger.handlers):
+        if _is_manage_agenda_handler(handler):
+            package_logger.removeHandler(handler)
+            handler.close()
 
-    # Also add console handler if verbose
+    file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler.manage_agenda_handler = True
+    package_logger.addHandler(file_handler)
+
     if verbose:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(logging.Formatter(log_format, date_format))
-        logging.getLogger().addHandler(console_handler)
+        console_handler.setFormatter(formatter)
+        console_handler.manage_agenda_handler = True
+        package_logger.addHandler(console_handler)
 
     # Set specific log levels for noisy libraries
     logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-    logger = logging.getLogger(__name__)
     logger.info(f"Logging initialized. Level: {logging.getLevelName(log_level)}, File: {log_file}")
 
 

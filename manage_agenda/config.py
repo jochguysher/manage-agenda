@@ -7,6 +7,8 @@ import logging
 import os
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # Base directories
 BASE_DIR = Path(__file__).parent.parent
 RUN_START_TIME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -159,7 +161,7 @@ class Config:
 
         if issues:
             for issue in issues:
-                logging.warning(f"Configuration issue: {issue}")
+                logger.warning(f"Configuration issue: {issue}")
             return False
 
         return True
@@ -174,7 +176,7 @@ class Config:
 
         key = key_map.get(service.lower())
         if not key:
-            logging.warning(f"No API key configured for {service}")
+            logger.warning(f"No API key configured for {service}")
         return key
 
 
