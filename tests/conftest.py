@@ -91,6 +91,9 @@ def isolated_paths(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(fake_home / ".local" / "share"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
     monkeypatch.setenv("MSG_TXT_DIR", str(fake_home / "Documents" / "txt"))
+    # Same reasoning as MSG_TXT_DIR: a real OUTPUT_DIR exported in the shell or added to .env
+    # later would otherwise send `-o file` output from tests to the real location.
+    monkeypatch.setenv("OUTPUT_DIR", str(fake_home / "Documents" / "txt" / "output"))
     monkeypatch.setenv("LOG_FILE", str(tmp_path / "test_manage_agenda.log"))
 
 
