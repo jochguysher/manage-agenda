@@ -22,12 +22,12 @@ from manage_agenda.connections import (
     select_api,
     select_calendar_account,
 )
+from manage_agenda.exceptions import CalendarAccountChoiceRequired
 from manage_agenda.extraction import (
     LEDGER_EVENT_END_MARGIN_DAYS,
     _parse_iso_datetime,
     _process_event_with_llm_and_calendar,
 )
-from manage_agenda.exceptions import CalendarAccountChoiceRequired
 from manage_agenda.i18n import t
 from manage_agenda.llm import select_llm
 from manage_agenda.web import reduce_html

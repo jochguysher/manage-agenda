@@ -3,8 +3,16 @@ import logging
 import os
 import types
 
+from socialModules.configMod import CONFIGDIR, select_from_list
+
+from manage_agenda.exceptions import LLMError
+from manage_agenda.i18n import t
+from manage_agenda.interactive import select_one
+
 logger = logging.getLogger(__name__)
 
+# Optional providers: each import below falls back to a stub when the SDK isn't installed,
+# so they sit after the unconditional imports (E402 applies to plain imports only).
 try:
     from google import genai
 except Exception:
@@ -33,12 +41,6 @@ except Exception:
     class Mistral:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("mistralai is not installed")
-
-from socialModules.configMod import CONFIGDIR, select_from_list
-
-from manage_agenda.exceptions import LLMError
-from manage_agenda.i18n import t
-from manage_agenda.interactive import select_one
 
 
 # This shouln't go here?

@@ -6,6 +6,20 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install ruff
+      # Same version as uv.lock, so CI and `ruff check` locally agree on the rule set.
+      run: pip install ruff==0.16.8
+    - name: ruff check
+      run: ruff check --output-format=github .
+
   test:
     runs-on: ubuntu-latest
     strategy:
