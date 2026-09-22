@@ -274,7 +274,7 @@ Open the desktop window (needs the `gui` extra, see [Desktop window](#desktop-wi
 
 Notes:
 
-- One job runs at a time. **Cancel** stops it at its next question, or right away if it is waiting on one; a call in progress (a model request, a mailbox fetch, the browser consent) finishes on its own. A run cancelled during the event review leaves no ledger entry and marks nothing in the mailbox; one cancelled at the "remove the label?" question still records the event that was already created.
+- One job runs at a time. **Cancel** stops it at its next question, or right away if it is waiting on one; a call in progress (a model request, a mailbox fetch, the browser consent) finishes on its own, and the window refuses to close until it has. A run cancelled during the event review leaves no ledger entry and marks nothing in the mailbox; one cancelled at the "remove the label?" question still records the event that was already created.
 - The event review dialog shows and edits times in local time and writes them back in UTC, as the terminal's date corrections end up after normalisation.
 - The language follows the same `language` key of `config.yaml` (or the system locale) and applies at the next start.
 - The ledger and `config.yaml` are not locked: do not run the window's `add` and a scheduled (cron) `add` at the same time on the same account.

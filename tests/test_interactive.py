@@ -137,3 +137,29 @@ class TestSelectMany(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQuestionaryChoicesAgainstTheRealLibrary(unittest.TestCase):
+    """Every other test here mocks questionary. Building a real select with the Choice
+    objects select_one passes, and with the index default it computes, runs questionary's
+    own default validation (a default that is neither a choice nor a value raises) without
+    needing a terminal - .ask() is never called."""
+
+    def test_index_valued_choices_accept_an_index_default_and_none(self):
+        import questionary
+
+        from manage_agenda.interactive import _choices, _resolve
+
+        labels = ["a", "b", "b"]
+        choices = _choices(labels)
+        self.assertEqual([choice.value for choice in choices], [0, 1, 2])
+        self.assertEqual([choice.title for choice in choices], labels)
+        questionary.select("t", choices=_choices(labels), default=1)
+        questionary.select("t", choices=_choices(labels), default=None)
+        questionary.checkbox("t", choices=_choices(labels))
+        with self.assertRaises(ValueError):
+            questionary.select("t", choices=_choices(labels), default="b")
+        # Duplicate labels: the index tells them apart.
+        self.assertIs(_resolve(["x", "y", "z"], labels, 2), "z")
+        self.assertEqual(_resolve(["x", "y", "z"], labels, "b"), "y")
+        self.assertIsNone(_resolve(["x"], ["a"], 5))

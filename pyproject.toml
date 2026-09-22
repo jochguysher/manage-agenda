@@ -49,10 +49,10 @@ test = ["pytest", "pytest-cov", "pytest-mock"]
 # The desktop window (`manage-agenda gui`). PySide6 is LGPL; it is only imported by
 # manage_agenda.gui, so every other command works without it.
 gui = ["PySide6>=6.8"]
-dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit", "PySide6>=6.8", "pytest-qt"]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit", "PySide6>=6.8", "pytest-qt"]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
 
 [tool.ruff]
 line-length = 100

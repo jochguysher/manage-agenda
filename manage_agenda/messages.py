@@ -1368,8 +1368,8 @@ TRANSLATIONS = {
         "fr": "Un job est encore en cours. Fermer quand même ? Il s'arrête à sa prochaine question ; un appel en cours se termine seul.",
     },
     'gui.close_job_still_running': {
-        "en": 'The job did not stop in time; closing anyway.',
-        "fr": "Le job ne s'est pas arrêté à temps ; fermeture quand même.",
+        "en": 'The job is still inside a call that cannot be interrupted; close again once it returns.',
+        "fr": "Le job est encore dans un appel qu'on ne peut pas interrompre ; refermez une fois qu'il aura rendu la main.",
     },
     'gui.port_called_outside_job': {
         "en": 'A prompt was requested on the GUI thread: core code must run through the job runner.',

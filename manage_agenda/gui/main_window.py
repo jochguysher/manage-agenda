@@ -172,5 +172,12 @@ class MainWindow(QMainWindow):
                 return
             self.cancel_job()
             if not self.runner.wait(CLOSE_WAIT_MS):
+                # The worker is inside a call that cannot be interrupted (a model request,
+                # a mailbox fetch, the browser consent). Destroying the window would destroy
+                # the live QThread, which Qt treats as fatal - so the window stays open;
+                # closing again once the call has returned works.
+                self.status_label.setText(t("gui.close_job_still_running"))
                 self.log_panel.append_line(t("gui.close_job_still_running"))
+                event.ignore()
+                return
         event.accept()

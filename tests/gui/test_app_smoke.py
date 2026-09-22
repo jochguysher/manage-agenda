@@ -81,3 +81,34 @@ def test_a_failing_job_reports_in_the_status_bar_and_log(qapp, pump):
         if widget is not window:
             widget.close()
     window.close()
+
+
+def test_closing_while_a_job_is_stuck_in_a_call_is_refused(qapp, pump):
+    """Destroying the window would destroy a live QThread (fatal in Qt): the close is
+    refused until the call returns, then works."""
+    import threading
+
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    from manage_agenda.gui import main_window
+
+    window = MainWindow()
+    release = threading.Event()
+    assert window.runner.submit("stuck", release.wait, 30)
+    assert pump(window.runner.is_busy, 1)
+
+    event = QCloseEvent()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        mp.setattr(main_window, "CLOSE_WAIT_MS", 50)
+        window.closeEvent(event)
+    assert not event.isAccepted()
+    assert window.status_label.text()
+    assert window.runner.is_busy()
+
+    release.set()
+    assert pump(lambda: not window.runner.is_busy())
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted()

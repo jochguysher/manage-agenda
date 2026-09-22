@@ -135,8 +135,14 @@ class SettingsScreen(Screen):
 
     def save(self):
         current = load_user_config()
+        previous_account = current.get("calendar_account")
         for key in ("provider", "model", "calendar_account", "calendar", "language"):
             current.pop(key, None)
-        current.update(self.values())
+        values = self.values()
+        if "calendar_account" not in values and previous_account and not self.account.keys:
+            # The accounts could not be listed (configuration unreadable): an empty picker
+            # says nothing about the saved account, so it is kept rather than dropped.
+            values["calendar_account"] = previous_account
+        current.update(values)
         save_user_config(current)
         self.message.setText(t("gui.settings.saved"))

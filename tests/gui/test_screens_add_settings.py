@@ -154,3 +154,17 @@ def test_settings_picker_fills_the_ids_field(qapp, pump):
         assert pump(lambda: not runner.is_busy())
     screen.calendars.item(1).setCheckState(screen.calendars.item(1).checkState().Checked)
     assert screen.calendar_ids.text() == "c2"
+
+
+def test_settings_save_keeps_the_saved_account_when_accounts_cannot_be_listed(qapp):
+    runner = JobRunner(Bridge())
+    screen = settings.SettingsScreen(runner)
+    save_user_config({"calendar_account": list(CAL), "calendar": ["c1"], "provider": "ollama"})
+    with patch.object(settings, "load_rules", side_effect=OSError("no .rssBlogs")):
+        screen.refresh()
+    assert screen.account.keys == []
+    screen.model.setText("m2")
+    screen.save()
+    saved = load_user_config()
+    assert saved["calendar_account"] == list(CAL)
+    assert saved["model"] == "m2" and saved["calendar"] == ["c1"]
