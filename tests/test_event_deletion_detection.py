@@ -14,9 +14,11 @@ from manage_agenda.extraction import (
 )
 from manage_agenda.sources import (
     Args,
+    _entry_purge_after,
     _extract_event_refs,
     load_handled_mail_ids,
     load_handled_mail_state,
+    purge_expired_ledger_entries,
     reconcile_handled_events,
     remember_handled_mail,
     unseen_messages,
@@ -334,15 +336,19 @@ class TestHandledMailStateMigration(unittest.TestCase):
     def test_remember_handled_mail_without_events_is_legacy_equivalent(self):
         remember_handled_mail("msg-1", path=self.path)
         state = load_handled_mail_state(self.path)
-        self.assertEqual(state["msg-1"], {"events": [], "status": "no_event", "generation": 0})
+        entry = state["msg-1"]
+        self.assertIsInstance(entry.pop("recorded_at"), str)
+        self.assertEqual(entry, {"events": [], "status": "no_event", "generation": 0})
 
     def test_remember_handled_mail_with_events_records_them(self):
         remember_handled_mail(
             "msg-1", path=self.path, events=[{"calendar_id": "primary", "event_id": "e1"}]
         )
         state = load_handled_mail_state(self.path)
+        entry = state["msg-1"]
+        self.assertIsInstance(entry.pop("recorded_at"), str)
         self.assertEqual(
-            state["msg-1"],
+            entry,
             {
                 "events": [{"calendar_id": "primary", "event_id": "e1"}],
                 "status": "created",
@@ -441,6 +447,44 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertNotIn("msg-gone", remaining_state)
         self.assertIn("msg-present", remaining_state)
         self.assertIn("msg-legacy", remaining_state)
+
+    def test_an_entry_both_cancelled_and_past_its_purge_margin_goes_through_reconcile_first(self):
+        """Pins the call order in process_email_cli: reconcile_handled_events() must run
+        before purge_expired_ledger_entries(), never the other way around. An entry whose
+        event is cancelled in the sync delta AND already past its purge margin must be
+        resolved by reconcile (releasing the identity for reprocessing via on_user_delete's
+        ignore/requeue chain) - if purge ran first it would drop the entry before reconcile
+        ever saw the cancellation, silently turning "the event was deleted" into "this
+        message was never seen"."""
+        long_ago = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
+        self._write_state(
+            {
+                "msg-gone-and-old": {
+                    "events": [
+                        {
+                            "calendar_id": "cal-1",
+                            "event_id": "ev-gone",
+                            "event_end": f"{long_ago}T10:00:00Z",
+                        }
+                    ],
+                    "status": "created",
+                    "recorded_at": f"{long_ago}T00:00:00Z",
+                },
+            }
+        )
+        self._seed_sync_token("cal-1", "tok-old")
+        api, _client = _api(
+            [{"items": [{"id": "ev-gone", "status": "cancelled"}], "nextSyncToken": "tok-new"}]
+        )
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+        purged = purge_expired_ledger_entries(path=self.path)
+
+        self.assertEqual(still_handled, set())
+        self.assertEqual(purged, 0, "already gone via reconcile - nothing left for purge to do")
+        self.assertNotIn("msg-gone-and-old", load_handled_mail_state(self.path))
 
     def test_one_sync_call_per_calendar_regardless_of_event_count(self):
         self._write_state(
@@ -559,6 +603,194 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
         self.assertEqual(still_handled, {"msg-1"})
         self.assertEqual(client.get_calls, [])
+
+
+class TestEntryPurgeAfter(unittest.TestCase):
+    """Unit tests for the purge-date computation itself - see amendment 2:
+    docs/investigation-limite1.md, "purge rules must cover no_event and source_lost entries
+    too, plus multi-event max(end date)"."""
+
+    def test_purges_on_event_end_not_recorded_at(self):
+        entry = {
+            "events": [
+                {
+                    "calendar_id": "primary",
+                    "event_id": "e1",
+                    "event_end": "2026-01-01T10:00:00Z",
+                    "recorded_at": "2020-01-01T00:00:00Z",
+                }
+            ],
+            "status": "created",
+            "recorded_at": "2020-01-01T00:00:00Z",
+        }
+        purge_after = _entry_purge_after(entry, event_margin_days=30, no_event_margin_days=7)
+        self.assertEqual(
+            purge_after,
+            datetime.datetime(2026, 1, 31, 10, tzinfo=datetime.timezone.utc),
+        )
+
+    def test_multi_event_purges_on_the_latest_end_date(self):
+        entry = {
+            "events": [
+                {"calendar_id": "primary", "event_id": "e1", "event_end": "2026-01-01T10:00:00Z"},
+                {"calendar_id": "primary", "event_id": "e2", "event_end": "2026-06-01T10:00:00Z"},
+            ],
+            "status": "created",
+        }
+        purge_after = _entry_purge_after(entry, event_margin_days=10, no_event_margin_days=7)
+        self.assertEqual(
+            purge_after,
+            datetime.datetime(2026, 6, 11, 10, tzinfo=datetime.timezone.utc),
+        )
+
+    def test_no_event_entry_falls_back_to_recorded_at(self):
+        entry = {"events": [], "status": "no_event", "recorded_at": "2026-01-01T00:00:00Z"}
+        purge_after = _entry_purge_after(entry, event_margin_days=30, no_event_margin_days=7)
+        self.assertEqual(
+            purge_after,
+            datetime.datetime(2026, 1, 8, tzinfo=datetime.timezone.utc),
+        )
+
+    def test_source_lost_with_no_event_end_falls_back_to_recorded_at(self):
+        """source_lost (a resolution-chain outcome, not yet produced by any code path) has no
+        live event to read an end date from - same log-date fallback as no_event."""
+        entry = {"events": [], "status": "source_lost", "recorded_at": "2026-01-01T00:00:00Z"}
+        purge_after = _entry_purge_after(entry, event_margin_days=30, no_event_margin_days=7)
+        self.assertEqual(
+            purge_after,
+            datetime.datetime(2026, 1, 8, tzinfo=datetime.timezone.utc),
+        )
+
+    def test_legacy_entry_with_no_age_signal_is_never_purged(self):
+        entry = {"events": [], "status": "legacy"}
+        self.assertIsNone(_entry_purge_after(entry, event_margin_days=30, no_event_margin_days=7))
+
+    def test_date_only_event_end_is_accepted(self):
+        entry = {
+            "events": [{"calendar_id": "primary", "event_id": "e1", "event_end": "2026-01-01"}],
+            "status": "created",
+        }
+        purge_after = _entry_purge_after(entry, event_margin_days=1, no_event_margin_days=7)
+        self.assertEqual(purge_after, datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc))
+
+
+class TestPurgeExpiredLedgerEntries(unittest.TestCase):
+    def setUp(self):
+        self.path = Path("/tmp") / (self.id().replace(".", "_") + ".json")
+        self.path.unlink(missing_ok=True)
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+        self.addCleanup(lambda: Path(str(self.path) + ".tmp").unlink(missing_ok=True))
+
+    def _write_state(self, messages):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"messages": messages}), encoding="utf-8")
+
+    def test_expired_entries_are_dropped_and_fresh_ones_kept(self):
+        self._write_state(
+            {
+                "old": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "event_end": "2020-01-01T00:00:00Z"}
+                    ],
+                    "status": "created",
+                },
+                "fresh": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e2", "event_end": "2099-01-01T00:00:00Z"}
+                    ],
+                    "status": "created",
+                },
+            }
+        )
+        today = datetime.datetime(2026, 9, 22, tzinfo=datetime.timezone.utc)
+
+        purged = purge_expired_ledger_entries(path=self.path, today=today)
+
+        self.assertEqual(purged, 1)
+        state = load_handled_mail_state(self.path)
+        self.assertEqual(set(state.keys()), {"fresh"})
+
+    def test_no_event_entry_expires_on_its_own_short_margin(self):
+        self._write_state(
+            {"old-no-event": {"events": [], "status": "no_event", "recorded_at": "2020-01-01T00:00:00Z"}}
+        )
+        today = datetime.datetime(2026, 9, 22, tzinfo=datetime.timezone.utc)
+
+        purged = purge_expired_ledger_entries(path=self.path, today=today)
+
+        self.assertEqual(purged, 1)
+        self.assertEqual(load_handled_mail_state(self.path), {})
+
+    def test_legacy_entry_with_no_recorded_at_is_never_purged(self):
+        self.path.write_text(json.dumps({"ids": ["old-legacy"]}), encoding="utf-8")
+        today = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
+
+        purged = purge_expired_ledger_entries(path=self.path, today=today)
+
+        self.assertEqual(purged, 0)
+        self.assertEqual(set(load_handled_mail_state(self.path).keys()), {"old-legacy"})
+
+    def test_nothing_to_purge_does_not_rewrite_the_file(self):
+        self._write_state(
+            {
+                "fresh": {
+                    "events": [
+                        {"calendar_id": "primary", "event_id": "e1", "event_end": "2099-01-01T00:00:00Z"}
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        before = self.path.stat().st_mtime_ns
+
+        purged = purge_expired_ledger_entries(
+            path=self.path, today=datetime.datetime(2026, 9, 22, tzinfo=datetime.timezone.utc)
+        )
+
+        self.assertEqual(purged, 0)
+        self.assertEqual(self.path.stat().st_mtime_ns, before)
+
+    def test_state_size_stays_bounded_across_years_of_activity(self):
+        """The hard constraint behind the whole redesign: local state size must track current
+        activity, not the tool's whole history. Simulates 5 years of daily messages (each with
+        an event ending the same day, plus a scattering of no_event entries) and asserts that
+        after a purge, only the recent tail remains - not a set that grows with N."""
+        start = datetime.date(2021, 1, 1)
+        days = 5 * 365
+        messages = {}
+        for offset in range(days):
+            day = start + datetime.timedelta(days=offset)
+            iso_day = day.isoformat()
+            if offset % 30 == 0:
+                messages[f"no-event-{offset}"] = {
+                    "events": [],
+                    "status": "no_event",
+                    "recorded_at": f"{iso_day}T00:00:00Z",
+                }
+            else:
+                messages[f"msg-{offset}"] = {
+                    "events": [
+                        {
+                            "calendar_id": "primary",
+                            "event_id": f"e{offset}",
+                            "event_end": f"{iso_day}T10:00:00Z",
+                        }
+                    ],
+                    "status": "created",
+                }
+        self._write_state(messages)
+        today = datetime.datetime(
+            start.year + 5, start.month, start.day, tzinfo=datetime.timezone.utc
+        )
+
+        purge_expired_ledger_entries(
+            path=self.path, today=today, event_margin_days=30, no_event_margin_days=7
+        )
+
+        remaining = load_handled_mail_state(self.path)
+        # Only entries within their respective margins of `today` can possibly remain.
+        self.assertLess(len(remaining), 40)
+        self.assertTrue(all(not identity.startswith("no-event-") for identity in remaining))
 
 
 if __name__ == "__main__":

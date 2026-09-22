@@ -883,6 +883,24 @@ def _calendar_busy(api_dst, calendar_ids, constraints):
     return busy
 
 
+def _event_end_iso(event):
+    """The event's own end date/time, for the ledger to purge entries by - see
+    docs/investigation-limite1.md amendment 2: local state expires on event end date +
+    margin, never on recorded_at.
+
+    Callers pass whichever `end` they have authority over for that path: Calendar's own
+    `existing["end"]` for a duplicate (the id already existed - Calendar's value is
+    authoritative), or the locally-built body actually sent to `_insert` for a fresh insert
+    (post-timezone-correction retry, if any - the exact value manage-agenda asked Calendar to
+    create). The two can disagree by timezone offset on a retried insert; both are within the
+    same wall-clock day, which is well inside the purge margin either way.
+    """
+    end = event.get("end") if isinstance(event, dict) else None
+    if not isinstance(end, dict):
+        return None
+    return end.get("dateTime") or end.get("date") or None
+
+
 def _publish_event_to_calendar(
     api_dst, event, selected_calendar, source_id="", generation=0, event_index=0
 ):
@@ -930,12 +948,14 @@ def _publish_event_to_calendar(
                     "event_id": event_id,
                 }
             link = existing.get("htmlLink", "") if isinstance(existing, dict) else ""
+            existing_end = existing.get("end") if isinstance(existing, dict) else None
             return True, {
                 "success": True,
                 "duplicate": True,
                 "post_url": link,
                 "calendar_id": selected_calendar,
                 "event_id": event_id,
+                "event_end": _event_end_iso({"end": existing_end}) or _event_end_iso(event),
             }
 
     def _insert(body):
@@ -945,6 +965,7 @@ def _publish_event_to_calendar(
             result.setdefault(
                 "event_id", event_id or (result.get("raw_response") or {}).get("id", "")
             )
+            result.setdefault("event_end", _event_end_iso(body))
         return True, result
 
     try:

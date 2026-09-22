@@ -130,7 +130,8 @@ def _load_state(path):
     """Read the handled-mail ledger, migrating the old id-only format in memory.
 
     New entries look like:
-    {"events": [{"calendar_id": ..., "event_id": ...}], "status": "created", "generation": 0}.
+    {"events": [{"calendar_id": ..., "event_id": ..., "event_end": ...}], "status": "created",
+    "generation": 0, "recorded_at": "..."}.
     A message with no recorded event ("status": "no_event", e.g. too old or empty content) or one
     read from the legacy {"ids": [...]} format ("status": "legacy") is always kept as handled: there
     is nothing to check against Calendar, so behavior for those stays exactly as before.
@@ -138,6 +139,13 @@ def _load_state(path):
     `generation` (default 0) feeds the deterministic Calendar event id - it is bumped only by
     the requeue resolution step, never here, so an entry with no `generation` key (written
     before that field existed) is simply generation 0, identical to a freshly created entry.
+
+    `recorded_at` (entry-level, set once when the identity was first recorded, never updated) is
+    the purge fallback for entries with no event end date to purge by - "no_event" entries, or a
+    "created"/"source_lost" entry whose refs predate the `event_end` field. Absent on entries
+    read from the legacy {"ids": [...]} format or an older ledger file written before this field
+    existed - see purge_expired_ledger_entries(), which never purges an entry it has no age
+    signal for at all.
     """
     if not path.is_file():
         return {}
@@ -155,9 +163,13 @@ def _load_state(path):
                     generation = int(entry.get("generation") or 0)
                 except (TypeError, ValueError):
                     generation = 0
+                recorded_at = entry.get("recorded_at")
             else:
-                events, status, generation = [], "no_event", 0
-            state[str(identity)] = {"events": events, "status": status, "generation": generation}
+                events, status, generation, recorded_at = [], "no_event", 0, None
+            parsed = {"events": events, "status": status, "generation": generation}
+            if isinstance(recorded_at, str) and recorded_at:
+                parsed["recorded_at"] = recorded_at
+            state[str(identity)] = parsed
         return state
     ids = data.get("ids") if isinstance(data, dict) else None
     if isinstance(ids, list):
@@ -204,15 +216,23 @@ def load_handled_mail_ids(path=None):
 def remember_handled_mail(identity, path=None, events=None):
     """Record that a message identity was handled, with the Calendar events it created, if any.
 
-    `events` is a list of {"calendar_id": ..., "event_id": ...}. Without it, the message is
-    recorded as handled with no known event (its identity is skipped, but never un-skipped,
-    since there is nothing to check against Calendar).
+    `events` is a list of {"calendar_id": ..., "event_id": ..., "event_end": ...}. Without it,
+    the message is recorded as handled with no known event (its identity is skipped, but never
+    un-skipped, since there is nothing to check against Calendar).
+
+    `recorded_at` is stamped once, the first time this identity is recorded, and never touched
+    again on later calls (e.g. adding more events to an already-known identity) - it is the
+    purge fallback for entries with no event end date to purge by, see
+    purge_expired_ledger_entries().
     """
     if not identity:
         return
     path = Path(path) if path else handled_mail_file()
     state = _load_state(path)
-    entry = state.get(identity, {"events": [], "status": "no_event", "generation": 0})
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    entry = state.get(
+        identity, {"events": [], "status": "no_event", "generation": 0, "recorded_at": now}
+    )
     if events:
         merged = list(entry.get("events") or [])
         # Dedup by (calendar_id, event_id), not whole-dict equality: two refs for the same
@@ -235,13 +255,19 @@ def remember_handled_mail(identity, path=None, events=None):
 
 
 def _extract_event_refs(calendar_result):
-    """Pull {calendar_id, event_id, recorded_at} out of the per-event calendar publishing results.
+    """Pull {calendar_id, event_id, recorded_at, event_end} out of the per-event calendar
+    publishing results.
 
     recorded_at (when this tool created/confirmed the ref, not the event's own start time) lets
     reconciliation later tell "old enough that a bootstrap listing wouldn't cover it anyway" apart
     from "recent and worth a targeted check" - without it, that distinction is impossible and a
     reseed's confirmation cost would grow with the whole ledger's history instead of its recent
     activity.
+
+    event_end (the event's own end date/time, not recorded_at) is what the ledger purges
+    entries by - see docs/investigation-limite1.md amendment 2. Absent when the publishing
+    result didn't carry one (e.g. an older ref format, or a source that predates this field) -
+    the purge step falls back to recorded_at for those, with a short margin.
     """
     refs = []
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -251,7 +277,11 @@ def _extract_event_refs(calendar_result):
         calendar_id = result.get("calendar_id")
         event_id = result.get("event_id") or (result.get("raw_response") or {}).get("id")
         if calendar_id and event_id:
-            refs.append({"calendar_id": calendar_id, "event_id": str(event_id), "recorded_at": now})
+            ref = {"calendar_id": calendar_id, "event_id": str(event_id), "recorded_at": now}
+            event_end = result.get("event_end")
+            if event_end:
+                ref["event_end"] = event_end
+            refs.append(ref)
     return refs
 
 
@@ -314,6 +344,90 @@ def reconcile_handled_events(args, path=None, sync_state_path=None):
         _save_state(path, state)
 
     return still_handled
+
+
+LEDGER_EVENT_END_MARGIN_DAYS = 30
+LEDGER_NO_EVENT_MARGIN_DAYS = 7
+
+
+def _parse_iso_datetime(value):
+    """A tz-aware datetime from an ISO date or datetime string, or None if unparseable."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.datetime.fromisoformat(text + "T00:00:00+00:00")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def _entry_purge_after(entry, event_margin_days, no_event_margin_days):
+    """The datetime after which this entry may be purged, or None if there is no age signal to
+    purge by at all (a pre-migration legacy entry, or one written before `recorded_at` existed) -
+    such entries are left untouched, exactly as before purging existed for them.
+
+    Purges on the *event's own end date* (+ margin), never on `recorded_at`, whenever at least
+    one event ref carries an `event_end` - taking the max across all of an entry's events
+    (a multi-event message expires only once every one of its events has ended, per amendment
+    2). Falls back to the entry's own `recorded_at` (+ a shorter margin) for "no_event"/
+    "source_lost"/"legacy" entries and for refs recorded before `event_end` was tracked - the
+    "log-date" fallback from amendment 2's own wording. manage-agenda never creates recurring
+    events (confirmed in Phase 1 by reading the event-building code), so there is no separate
+    recurrence-based purge rule to apply here.
+    """
+    ends = [
+        parsed
+        for parsed in (_parse_iso_datetime(ev.get("event_end")) for ev in entry.get("events") or [])
+        if parsed is not None
+    ]
+    if ends:
+        return max(ends) + datetime.timedelta(days=event_margin_days)
+    recorded_at = _parse_iso_datetime(entry.get("recorded_at"))
+    if recorded_at is not None:
+        return recorded_at + datetime.timedelta(days=no_event_margin_days)
+    return None
+
+
+def purge_expired_ledger_entries(
+    path=None,
+    today=None,
+    event_margin_days=LEDGER_EVENT_END_MARGIN_DAYS,
+    no_event_margin_days=LEDGER_NO_EVENT_MARGIN_DAYS,
+):
+    """Drop ledger entries past their purge date, so local state stays bounded by current/
+    future activity instead of growing with the tool's whole history - the hard constraint
+    behind this whole redesign (see docs/investigation-limite1.md).
+
+    Applies uniformly to every status ("created", "no_event", "source_lost", "legacy"): what
+    differs between them is only which age signal `_entry_purge_after` finds available.
+    Returns the number of entries purged.
+    """
+    path = Path(path) if path else handled_mail_file()
+    state = _load_state(path)
+    today = today or datetime.datetime.now(datetime.timezone.utc)
+    if today.tzinfo is None:
+        today = today.replace(tzinfo=datetime.timezone.utc)
+
+    remaining = {}
+    purged = 0
+    for identity, entry in state.items():
+        purge_after = _entry_purge_after(entry, event_margin_days, no_event_margin_days)
+        if purge_after is not None and purge_after <= today:
+            purged += 1
+            continue
+        remaining[identity] = entry
+
+    if purged:
+        _save_state(path, remaining)
+    return purged
 
 
 def unseen_messages(posts, handled=None, path=None):
@@ -884,9 +998,15 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         print(t("sources.no_message_read_fix_calendar"))
         return False
 
+    # Reconcile BEFORE purge, always: reconcile is what notices a deleted event and releases
+    # the identity for reprocessing (feeding on_user_delete's ignore/requeue resolution) -
+    # purging an entry first would drop it before reconcile ever sees it, silently turning
+    # "the event was deleted" into "this message was never seen", defeating on_user_delete
+    # entirely for anything that happens to also be past its purge margin.
     handled = reconcile_handled_events(args)
-    # Loaded once, after reconcile (which may have dropped entries) - metadata_extractor
-    # below does one dict lookup per message instead of re-reading the ledger file each time.
+    purge_expired_ledger_entries()
+    # Loaded once, after reconcile and purge - metadata_extractor below does one dict lookup
+    # per message instead of re-reading the ledger file each time.
     handled_state = load_handled_mail_state()
 
     posts = _get_emails_from_folder(args, api_src, source_details=source_details, handled=handled)
