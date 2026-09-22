@@ -50,7 +50,10 @@ class TestUserConfigFile(unittest.TestCase):
         self.assertEqual(load_user_config(self.path), {})
 
     def test_user_config_file_is_under_config_dir(self):
-        with patch("manage_agenda.user_config.CONFIG_DIR", Path("/tmp/xdg-test/manage-agenda")):
+        with patch(
+            "manage_agenda.user_config.config_dir",
+            return_value=Path("/tmp/xdg-test/manage-agenda"),
+        ):
             self.assertEqual(
                 user_config_file(), Path("/tmp/xdg-test/manage-agenda/config.yaml")
             )

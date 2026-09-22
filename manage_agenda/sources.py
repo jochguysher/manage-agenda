@@ -15,7 +15,7 @@ from socialModules.moduleContent import display_posts
 from socialModules.moduleRules import moduleRules
 
 from manage_agenda.base import write_file
-from manage_agenda.config import config
+from manage_agenda.config import config, data_dir, msg_txt_dir
 from manage_agenda.connections import prepare_calendar, select_api
 from manage_agenda.extraction import _process_event_with_llm_and_calendar
 from manage_agenda.i18n import t
@@ -89,7 +89,7 @@ def _get_msgs_from_folder(args, source_name, rules=None):
     if source_name and isinstance(source_name, list):
         txt_files = source_name
     else:
-        target_dir = Path(config.MSG_TXT_DIR)
+        target_dir = Path(msg_txt_dir())
         txt_files = target_dir.glob("*.txt")
 
     posts = []
@@ -129,18 +129,14 @@ _IMAP_HEADER = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)])"
 
 def handled_mail_file():
     """Message identities already sent through extraction, with the Calendar events they created."""
-    from manage_agenda.config import DATA_DIR
-
-    return Path(DATA_DIR) / "handled_mail_ids.json"
+    return data_dir() / "handled_mail_ids.json"
 
 
 def _imap_marker_history_file():
     """Per-account (not per-message) record of the last IMAP marker mode used - bounded by
     the number of configured accounts, never by mail volume. See
     check_marker_mode_transition()."""
-    from manage_agenda.config import DATA_DIR
-
-    return Path(DATA_DIR) / "imap_marker_history.json"
+    return data_dir() / "imap_marker_history.json"
 
 
 def _load_marker_history(path=None):
@@ -1835,10 +1831,10 @@ def process_txt_cli(args, model, source_name=None, rules=None):
 
     if not source_name:
         source_name = input(
-            t("sources.enter_filenames", msg_txt_dir=config.MSG_TXT_DIR)
+            t("sources.enter_filenames", msg_txt_dir=msg_txt_dir())
         ).split()
         if not source_name:
-            print(t("sources.no_filenames_entered", msg_txt_dir=config.MSG_TXT_DIR))
+            print(t("sources.no_filenames_entered", msg_txt_dir=msg_txt_dir()))
 
     api_src, posts = _get_msgs_from_folder(args, source_name, rules=rules)
 

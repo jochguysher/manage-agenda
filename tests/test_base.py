@@ -18,8 +18,9 @@ class TestUtilsBase(unittest.TestCase):
         filename = "test.txt"
         content = "This is a test."
 
-        # We need to mock DEFAULT_DATA_DIR or the function will fail
-        with patch("manage_agenda.base.DEFAULT_DATA_DIR", "/fake/dir/"):
+        # msg_txt_dir() is resolved fresh on every call (see manage_agenda.config), so it's
+        # patched as the function base.py imported, not a module-level constant.
+        with patch("manage_agenda.base.msg_txt_dir", return_value="/fake/dir/"):
             write_file(filename, content)
 
         mock_open_file.assert_called_once_with("/fake/dir/test.txt", "w")
@@ -35,7 +36,7 @@ class TestUtilsBase(unittest.TestCase):
         filename = "test.txt"
         content = "This is a test."
 
-        with patch("manage_agenda.base.DEFAULT_DATA_DIR", "/fake/dir/"):
+        with patch("manage_agenda.base.msg_txt_dir", return_value="/fake/dir/"):
             write_file(filename, content)
 
         mock_open_file.assert_called_once_with("/fake/dir/test.txt", "w")
@@ -48,7 +49,7 @@ class TestUtilsBase(unittest.TestCase):
         """
         with (
             patch("manage_agenda.base.LOGDIR", ""),
-            patch("manage_agenda.base.config.LOG_FILE", "/tmp/manage_agenda.log"),
+            patch("manage_agenda.base.log_file_path", return_value="/tmp/manage_agenda.log"),
         ):
             setup_logging(verbose=True)
 

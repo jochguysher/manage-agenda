@@ -686,9 +686,9 @@ def migrate_one_legacy_event(
 
 def calendar_sync_state_file():
     """Per-calendar Calendar API sync tokens, used to detect deleted events incrementally."""
-    from manage_agenda.config import DATA_DIR
+    from manage_agenda.config import data_dir
 
-    return Path(DATA_DIR) / "calendar_sync_tokens.json"
+    return data_dir() / "calendar_sync_tokens.json"
 
 
 def _load_sync_tokens(path):

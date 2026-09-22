@@ -7,11 +7,10 @@ import os
 import sys
 from pathlib import Path
 
-from manage_agenda.config import config
+from manage_agenda.config import config, log_file_path, msg_txt_dir
 from manage_agenda.i18n import t
 
 LOGDIR = ""
-DEFAULT_DATA_DIR = config.MSG_TXT_DIR
 
 
 # --- File I/O ---
@@ -23,14 +22,18 @@ def write_file(filename, content):
         content (str): The content to write.
     """
     try:
+        # Resolved fresh on every call, not a module-level constant - see
+        # manage_agenda.config.data_dir()'s docstring for why.
+        default_data_dir = msg_txt_dir()
+
         # Sanitize the filename to prevent path traversal attacks
         # Normalize the path to resolve any '..' or '.' components
         normalized_filename = os.path.normpath(filename)
 
         # Ensure the filename doesn't contain path traversal sequences that would allow
-        # writing outside the DEFAULT_DATA_DIR
+        # writing outside default_data_dir
         # Check if the normalized filename is an absolute path (which would
-        # bypass DEFAULT_DATA_DIR) or
+        # bypass default_data_dir) or
         # if it contains '..' components that could traverse up the directory
         # tree
         if os.path.isabs(normalized_filename) or '..' in normalized_filename.split(os.sep):
@@ -38,13 +41,13 @@ def write_file(filename, content):
             return False
 
         # Construct the full path using os.path.join for safety
-        full_path = os.path.join(DEFAULT_DATA_DIR, normalized_filename)
+        full_path = os.path.join(default_data_dir, normalized_filename)
 
         # Double-check that the final path is within the expected directory
         # Resolve both paths to handle symbolic links properly
         try:
             full_path_real = os.path.realpath(full_path)
-            default_dir_real = os.path.realpath(DEFAULT_DATA_DIR)
+            default_dir_real = os.path.realpath(default_data_dir)
 
             # Ensure the resolved file path is within the resolved default
             # directory
@@ -84,11 +87,10 @@ def setup_logging(verbose: bool = False) -> None:
     """
     print(t("base.setting_logging"))
 
-    # Determine log file location
+    # Determine log file location - log_file_path() is resolved fresh on every call (see its
+    # docstring), so a test's LOG_FILE env var override, set at any time, is always picked up.
     if not LOGDIR:
-        log_file = (
-            Path(config.LOG_FILE) if hasattr(config, "LOG_FILE") else Path("/tmp/manage_agenda.log")
-        )
+        log_file = Path(log_file_path())
     else:
         log_file = Path(f"{LOGDIR}/manage_agenda.log")
 

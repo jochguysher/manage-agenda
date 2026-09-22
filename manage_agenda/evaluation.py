@@ -2,7 +2,7 @@
 
 import time
 
-from manage_agenda.config import config
+from manage_agenda.config import msg_txt_dir
 from manage_agenda.i18n import t
 from manage_agenda.llm import OllamaClient
 from manage_agenda.sources import process_email_cli, process_txt_cli, process_web_cli
@@ -27,7 +27,7 @@ def evaluate_models(args, prompt=None, eval_type=None):
             print(
                 t(
                     "evaluation.cli_txt_result",
-                    result=process_txt_cli(args, client, source_name=config.MSG_TXT_DIR),
+                    result=process_txt_cli(args, client, source_name=msg_txt_dir()),
                 )
             )
         elif prompt:

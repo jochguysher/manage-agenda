@@ -2,7 +2,7 @@
 
 Saved automatically after the first interactive selection and reused on later runs (see
 select_llm() in llm.py and prepare_calendar() in connections.py), instead of asking again
-every time. Location follows the XDG base directory spec, matching CONFIG_DIR.
+every time. Location follows the XDG base directory spec, matching config_dir().
 
 Every reader/writer here takes an optional `path` so callers - and tests - never have to touch
 the real file: binding the path once at import time would mean a test that sets XDG_CONFIG_HOME
@@ -15,12 +15,16 @@ from pathlib import Path
 
 import yaml
 
-from manage_agenda.config import CONFIG_DIR
+from manage_agenda.config import config_dir
 
 
 def user_config_file():
-    """Where the saved configuration lives. Resolved fresh on each call, not cached at import."""
-    return CONFIG_DIR / "config.yaml"
+    """Where the saved configuration lives. Resolved fresh on each call, not cached at import -
+    config_dir() itself reads $XDG_CONFIG_HOME/$HOME fresh on every call (see its docstring),
+    so this claim is now actually true rather than aspirational (an earlier version of this
+    function imported the CONFIG_DIR *value* at module level, which had exactly the staleness
+    problem this docstring warns against - see docs/investigation-limite1.md §10)."""
+    return config_dir() / "config.yaml"
 
 
 def load_user_config(path=None):

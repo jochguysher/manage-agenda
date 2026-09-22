@@ -9,13 +9,51 @@ from pathlib import Path
 
 # Base directories
 BASE_DIR = Path(__file__).parent.parent
-CONFIG_DIR = Path(os.getenv("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "manage-agenda"
-DATA_DIR = Path.home() / ".local" / "share" / "manage-agenda"
 RUN_START_TIME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-# Ensure directories exist
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def data_dir() -> Path:
+    """Where manage-agenda stores its own state (ledger, Calendar sync tokens, IMAP marker
+    history, log file) - resolved fresh on EVERY call from $XDG_DATA_HOME/$HOME, never cached
+    as a module-level constant. A pure path resolver - it does NOT create the directory:
+    every actual writer (_save_state, save_user_config, _save_sync_tokens, ...) already does
+    its own `path.parent.mkdir(parents=True, exist_ok=True)` right before writing, so doing
+    it here too would be redundant for them and a real side effect for a read-only caller
+    (e.g. scripts/diagnose_ledger.py, whose entire contract is zero writes - see
+    docs/investigation-limite1.md).
+
+    This function (and config_dir()/msg_txt_dir()/log_file_path() below) exists specifically
+    because a baked-at-import constant was a real, repeatedly-rediscovered bug class here: a
+    module-level `DATA_DIR = Path.home() / ...` (the previous design) freezes whatever HOME
+    was at the moment manage_agenda.config first got imported, so a later change to HOME or
+    XDG_DATA_HOME - a test's monkeypatch, or a real environment change - has no effect on any
+    code that already imported the old value. See docs/investigation-limite1.md §10: this is
+    exactly how real user data ended up mixed with test-injected entries for as long as it did
+    (each individual fix in §8/§9 patched one more baked constant, rather than removing the
+    pattern that keeps producing them).
+    """
+    base = os.getenv("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "manage-agenda"
+
+
+def config_dir() -> Path:
+    """Where manage-agenda's own persistent config (config.yaml) lives, and where OAuth
+    credentials are expected - resolved fresh on every call. Also a pure path resolver, for
+    the same reason as data_dir() above: every writer creates its own parent directory."""
+    base = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "manage-agenda"
+
+
+def msg_txt_dir() -> str:
+    """Where extracted-message logs and txt-source files live - resolved fresh on every call.
+    See data_dir()'s docstring for why this is a function, not a constant."""
+    return os.getenv("MSG_TXT_DIR", os.path.expanduser("~/Documents/txt/"))
+
+
+def log_file_path() -> str:
+    """Where the application log file is written - resolved fresh on every call. See
+    data_dir()'s docstring for why this is a function, not a constant."""
+    return os.getenv("LOG_FILE", str(data_dir() / "manage_agenda.log"))
 
 
 def _load_dotenv(path: Path) -> None:
@@ -48,7 +86,8 @@ class Config:
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    LOG_FILE: str = os.getenv("LOG_FILE", str(DATA_DIR / "manage_agenda.log"))
+    # LOG_FILE is intentionally NOT a class attribute here - use log_file_path() above,
+    # called fresh wherever the value is needed. See data_dir()'s docstring.
 
     # Email
     DEFAULT_EMAIL_TAG: str = os.getenv("DEFAULT_EMAIL_TAG", "zAgenda")
@@ -69,9 +108,11 @@ class Config:
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     OLLAMA_DEFAULT_MODEL: str = os.getenv("OLLAMA_DEFAULT_MODEL", "llama3.1")
 
-    # Paths
-    GOOGLE_CREDENTIALS_DIR: Path = CONFIG_DIR
-    MSG_TXT_DIR: str = os.getenv("MSG_TXT_DIR", os.path.expanduser("~/Documents/txt/"))
+    # GOOGLE_CREDENTIALS_DIR and MSG_TXT_DIR are intentionally NOT class attributes here -
+    # use config_dir()/msg_txt_dir() above, called fresh wherever the value is needed.
+    # (GOOGLE_CREDENTIALS_DIR was never actually read anywhere in this codebase besides its
+    # own declaration - confirmed by grep - so it is simply not replaced with an equivalent
+    # function; config_dir() already covers the same directory for config.yaml.)
 
     @classmethod
     def validate(cls) -> bool:
