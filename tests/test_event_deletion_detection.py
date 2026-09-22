@@ -95,9 +95,10 @@ class TestSyncCalendarChanges(unittest.TestCase):
     def test_first_call_seeds_a_token_and_reports_no_deletions(self):
         api, client = _api([{"items": [{"id": "e1", "status": "confirmed"}], "nextSyncToken": "tok-1"}])
 
-        result = sync_calendar_changes(api, "cal-1", path=self.path)
+        cancelled, unknown = sync_calendar_changes(api, "cal-1", path=self.path)
 
-        self.assertEqual(result, set())
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, set())
         self.assertEqual(_load_sync_tokens(self.path), {"cal-1": "tok-1"})
         self.assertNotIn("syncToken", client.calls[0])
 
@@ -124,21 +125,41 @@ class TestSyncCalendarChanges(unittest.TestCase):
 
         self.assertNotIn("pageToken", client.calls[0])
 
-    def test_bootstrap_confirms_a_missing_tracked_id_before_reporting_it_deleted(self):
+    def test_bootstrap_confirms_a_missing_tracked_id_as_unknown_not_cancelled(self):
+        """A 404 on the targeted confirmation is NOT proof of a user deletion - Calendar has
+        no tombstone for it at all, which is equally consistent with the event never having
+        existed. It must come back as `unknown`, never as `cancelled` (see
+        docs/investigation-limite1.md §8 / reconcile_handled_events' unknown_event branch)."""
         api, client = _api(
             [{"items": [{"id": "e-still-there", "status": "confirmed"}]}],
             get_responses={("cal-1", "e-gone"): http_error(404)},
         )
 
-        result = sync_calendar_changes(
+        cancelled, unknown = sync_calendar_changes(
             api,
             "cal-1",
             tracked_events={"e-still-there": recent_iso(), "e-gone": recent_iso()},
             path=self.path,
         )
 
-        self.assertEqual(result, {"e-gone"})
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, {"e-gone"})
         self.assertEqual(client.get_calls, [("cal-1", "e-gone")])
+
+    def test_bootstrap_confirms_a_missing_tracked_id_with_an_explicit_cancelled_status(self):
+        """The other confirmable outcome: get() succeeds and reports status="cancelled" - a
+        genuine Calendar tombstone, correctly `cancelled`, not `unknown`."""
+        api, client = _api(
+            [{"items": []}],
+            get_responses={("cal-1", "e-gone"): {"id": "e-gone", "status": "cancelled"}},
+        )
+
+        cancelled, unknown = sync_calendar_changes(
+            api, "cal-1", tracked_events={"e-gone": recent_iso()}, path=self.path
+        )
+
+        self.assertEqual(cancelled, {"e-gone"})
+        self.assertEqual(unknown, set())
 
     def test_id_missing_from_the_window_but_still_on_calendar_is_not_reported(self):
         """A tracked id can be absent from the bounded bootstrap listing just because its start
@@ -149,11 +170,12 @@ class TestSyncCalendarChanges(unittest.TestCase):
             get_responses={("cal-1", "e-far-future"): {"status": "confirmed"}},
         )
 
-        result = sync_calendar_changes(
+        cancelled, unknown = sync_calendar_changes(
             api, "cal-1", tracked_events={"e-far-future": recent_iso()}, path=self.path
         )
 
-        self.assertEqual(result, set())
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, set())
         self.assertEqual(client.get_calls, [("cal-1", "e-far-future")])
 
     def test_confirmation_call_is_not_made_for_ids_already_seen_in_the_listing(self):
@@ -165,21 +187,22 @@ class TestSyncCalendarChanges(unittest.TestCase):
 
         self.assertEqual(client.get_calls, [])
 
-    def test_reseed_after_expiry_also_confirms_missing_tracked_ids(self):
+    def test_reseed_after_expiry_also_confirms_missing_tracked_ids_as_unknown(self):
         self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
         api, _client = _api(
             [http_error(410), {"items": [{"id": "e-still-there", "status": "confirmed"}]}],
             get_responses={("cal-1", "e-gone"): http_error(410)},
         )
 
-        result = sync_calendar_changes(
+        cancelled, unknown = sync_calendar_changes(
             api,
             "cal-1",
             tracked_events={"e-still-there": recent_iso(), "e-gone": recent_iso()},
             path=self.path,
         )
 
-        self.assertEqual(result, {"e-gone"})
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, {"e-gone"})
 
     def test_ids_older_than_the_bootstrap_window_are_never_confirmed(self):
         """Discriminates the fix: without the recency filter, every tracked id missing from a
@@ -188,19 +211,23 @@ class TestSyncCalendarChanges(unittest.TestCase):
         api, client = _api([{"items": []}])
         tracked_events = {f"e-old-{i}": old_iso() for i in range(200)}
 
-        result = sync_calendar_changes(api, "cal-1", tracked_events=tracked_events, path=self.path)
+        cancelled, unknown = sync_calendar_changes(
+            api, "cal-1", tracked_events=tracked_events, path=self.path
+        )
 
-        self.assertEqual(result, set())
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, set())
         self.assertEqual(client.get_calls, [])
 
     def test_a_ref_with_no_recorded_at_is_treated_as_outside_the_window(self):
         api, client = _api([{"items": []}])
 
-        result = sync_calendar_changes(
+        cancelled, unknown = sync_calendar_changes(
             api, "cal-1", tracked_events={"e-unknown-age": None}, path=self.path
         )
 
-        self.assertEqual(result, set())
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, set())
         self.assertEqual(client.get_calls, [])
 
     def test_pagination_is_followed_until_the_last_page(self):
@@ -212,11 +239,12 @@ class TestSyncCalendarChanges(unittest.TestCase):
             ]
         )
 
-        result = sync_calendar_changes(api, "cal-1", path=self.path)
+        cancelled, unknown = sync_calendar_changes(api, "cal-1", path=self.path)
 
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(client.calls[1]["pageToken"], "page-2")
-        self.assertEqual(result, {"e2"})
+        self.assertEqual(cancelled, {"e2"})
+        self.assertEqual(unknown, set())
         self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-2")
 
     def test_existing_token_is_sent_and_cancelled_ids_are_reported(self):
@@ -233,11 +261,25 @@ class TestSyncCalendarChanges(unittest.TestCase):
             ]
         )
 
-        result = sync_calendar_changes(api, "cal-1", path=self.path)
+        cancelled, unknown = sync_calendar_changes(api, "cal-1", path=self.path)
 
         self.assertEqual(client.calls[0]["syncToken"], "tok-old")
-        self.assertEqual(result, {"e2"})
+        self.assertEqual(cancelled, {"e2"})
+        self.assertEqual(unknown, set())
         self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-new")
+
+    def test_a_syncToken_delta_never_reports_unknown_ids(self):
+        """A delta only ever reports items Calendar has an explicit status for - the unknown
+        (404/never-confirmed) case is only ever produced via the bootstrap path's targeted
+        confirmation of ids missing from a full listing, never from a plain delta."""
+        self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
+        api, _client = _api(
+            [{"items": [{"id": "e2", "status": "cancelled"}], "nextSyncToken": "tok-new"}]
+        )
+
+        _cancelled, unknown = sync_calendar_changes(api, "cal-1", path=self.path)
+
+        self.assertEqual(unknown, set())
 
     def test_expired_token_is_reseeded_without_reporting_deletions(self):
         self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
@@ -248,9 +290,10 @@ class TestSyncCalendarChanges(unittest.TestCase):
             ]
         )
 
-        result = sync_calendar_changes(api, "cal-1", path=self.path)
+        cancelled, unknown = sync_calendar_changes(api, "cal-1", path=self.path)
 
-        self.assertEqual(result, set())
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, set())
         self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-fresh")
         self.assertNotIn("syncToken", client.calls[1])
 
@@ -258,9 +301,10 @@ class TestSyncCalendarChanges(unittest.TestCase):
         self.path.write_text(json.dumps({"tokens": {"cal-1": "tok-old"}}), encoding="utf-8")
         api, _client = _api([http_error(500)])
 
-        result = sync_calendar_changes(api, "cal-1", path=self.path)
+        cancelled, unknown = sync_calendar_changes(api, "cal-1", path=self.path)
 
-        self.assertEqual(result, set())
+        self.assertEqual(cancelled, set())
+        self.assertEqual(unknown, set())
         self.assertEqual(_load_sync_tokens(self.path)["cal-1"], "tok-old")
 
 
@@ -527,6 +571,73 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertEqual(remaining_state["msg-gone"]["generation"], 1)
         self.assertEqual(remaining_state["msg-gone"]["events"], [])
 
+    def test_unknown_event_is_never_requeued_either(self):
+        """The unknown_event branch is checked before on_user_delete's own if/else, so it must
+        pre-empt "requeue" too, not just the default "ignore" - a 404 is never a signal to
+        recreate the event under a fresh id."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [{"calendar_id": "cal-1", "event_id": "ev-404", "recorded_at": recent_iso()}],
+                    "status": "created",
+                    "generation": 0,
+                }
+            }
+        )
+        # No token seeded - takes the bootstrap path, the only one that reaches the targeted
+        # confirmation (a syncToken delta never reports unknown ids, see
+        # TestSyncCalendarChanges).
+        api, _client = _api(
+            [{"items": [], "nextSyncToken": "tok-first"}],
+            get_responses={("cal-1", "ev-404"): http_error(404)},
+        )
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(
+            args, path=self.path, sync_state_path=self.sync_path, on_user_delete="requeue"
+        )
+
+        self.assertEqual(still_handled, {"msg-1"})
+        entry = load_handled_mail_state(self.path)["msg-1"]
+        self.assertEqual(entry["status"], "unknown_event")
+        self.assertEqual(entry["generation"], 0)  # never bumped
+
+    def test_a_mix_of_cancelled_and_unknown_refs_resolves_as_unknown_event(self):
+        """A multi-event identity where one ref is a genuine cancellation and another is a
+        404 - ambiguous, so the whole identity resolves as unknown_event rather than
+        partially applying on_user_delete to the cancelled one."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "cal-1", "event_id": "ev-cancelled", "recorded_at": recent_iso()},
+                        {"calendar_id": "cal-1", "event_id": "ev-404", "recorded_at": recent_iso()},
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        # A syncToken delta never reports unknown ids (see TestSyncCalendarChanges), so the
+        # mixed case has to go through the bootstrap path instead - the only one that can
+        # produce an unknown id via its targeted confirmation.
+        api, _client = _api(
+            [{"items": [], "nextSyncToken": "tok-first"}],
+            get_responses={
+                ("cal-1", "ev-cancelled"): {"id": "ev-cancelled", "status": "cancelled"},
+                ("cal-1", "ev-404"): http_error(404),
+            },
+        )
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        self.assertEqual(still_handled, {"msg-1"})
+        entry = load_handled_mail_state(self.path)["msg-1"]
+        self.assertEqual(entry["status"], "unknown_event")
+        self.assertNotIn("cancelled_events", entry)
+
     def test_an_entry_both_cancelled_and_past_its_purge_margin_goes_through_reconcile_first(self):
         """Pins the call order in process_email_cli: reconcile_handled_events() must run
         before purge_expired_ledger_entries(), never the other way around. An entry whose
@@ -647,10 +758,38 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertNotIn("syncToken", client.calls[0])
         self.assertEqual(_load_sync_tokens(self.sync_path)["cal-1"], "tok-first")
 
-    def test_first_ever_run_also_detects_a_deletion_via_the_bootstrap_diff(self):
-        """No prior sync token yet still catches a deletion: a tracked id absent from the
-        bootstrap listing is confirmed by a targeted lookup, not just "no baseline, report
-        nothing"."""
+    def test_first_ever_run_also_detects_a_genuine_deletion_via_the_bootstrap_diff(self):
+        """No prior sync token yet still catches a genuine deletion: a tracked id absent from
+        the bootstrap listing, confirmed by a targeted lookup that returns an explicit
+        status="cancelled" - not just "no baseline, report nothing"."""
+        self._write_state(
+            {
+                "msg-1": {
+                    "events": [
+                        {"calendar_id": "cal-1", "event_id": "ev-gone", "recorded_at": recent_iso()}
+                    ],
+                    "status": "created",
+                }
+            }
+        )
+        api, _client = _api(
+            [{"items": [], "nextSyncToken": "tok-first"}],
+            get_responses={("cal-1", "ev-gone"): {"id": "ev-gone", "status": "cancelled"}},
+        )
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+
+        # Default on_user_delete="ignore": the deletion is resolved (journaled to no_event),
+        # not released - the identity stays excluded.
+        self.assertEqual(still_handled, {"msg-1"})
+        self.assertEqual(load_handled_mail_state(self.path)["msg-1"]["status"], "no_event")
+
+    def test_first_ever_run_bootstrap_diff_404_is_unknown_not_a_deletion(self):
+        """The same "absent from the bootstrap listing" situation, but the targeted lookup
+        comes back 404 (no Calendar record at all, not a tombstone) - must resolve as
+        unknown_event, never as a deletion, regardless of on_user_delete."""
         self._write_state(
             {
                 "msg-1": {
@@ -670,10 +809,11 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
         still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
 
-        # Default on_user_delete="ignore": the deletion is resolved (journaled to no_event),
-        # not released - the identity stays excluded.
         self.assertEqual(still_handled, {"msg-1"})
-        self.assertEqual(load_handled_mail_state(self.path)["msg-1"]["status"], "no_event")
+        entry = load_handled_mail_state(self.path)["msg-1"]
+        self.assertEqual(entry["status"], "unknown_event")
+        self.assertEqual(entry["events"], [])
+        self.assertNotIn("cancelled_events", entry)
 
     def test_old_untraceable_events_never_trigger_a_confirmation_call_in_reconcile(self):
         """Ties the age-skip to the real entry point: an old-enough tracked event, missing from
@@ -873,6 +1013,27 @@ class TestPurgeExpiredLedgerEntries(unittest.TestCase):
         self.assertEqual(purged, 1)
         self.assertEqual(load_handled_mail_state(self.path), {})
 
+    def test_the_grace_period_is_a_full_margin_not_just_the_very_next_call(self):
+        """Discriminates the fix from a naive "immune for exactly one call regardless of
+        elapsed time" reading: a second call made at the SAME moment as the stamp (or before
+        the margin elapses) must still keep the entry - the grace period is
+        recorded_at + no_event_margin_days, not a call counter."""
+        self.path.write_text(json.dumps({"ids": ["old-legacy"]}), encoding="utf-8")
+        moment = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
+
+        purge_expired_ledger_entries(path=self.path, today=moment)
+        # Second call, same instant - the stamp from the first call must not have already
+        # expired.
+        purged = purge_expired_ledger_entries(path=self.path, today=moment)
+        self.assertEqual(purged, 0)
+        self.assertIn("old-legacy", load_handled_mail_state(self.path))
+
+        # A third call, one day before the margin elapses - still not purged.
+        almost = moment + datetime.timedelta(days=LEDGER_NO_EVENT_MARGIN_DAYS - 1)
+        purged = purge_expired_ledger_entries(path=self.path, today=almost)
+        self.assertEqual(purged, 0)
+        self.assertIn("old-legacy", load_handled_mail_state(self.path))
+
     def test_nothing_to_purge_does_not_rewrite_the_file(self):
         self._write_state(
             {
@@ -978,6 +1139,65 @@ class TestPurgeExpiredLedgerEntries(unittest.TestCase):
         # Only entries within their respective margins of `today` can possibly remain.
         self.assertLess(len(remaining), 40)
         self.assertTrue(all(not identity.startswith("no-event-") for identity in remaining))
+
+
+class TestReconcileMigrateAndPurge(unittest.TestCase):
+    """reconcile_migrate_and_purge() is where the reconcile -> migrate -> purge order is
+    guaranteed structurally, not left to a caller to get right - see
+    docs/investigation-limite1.md §9."""
+
+    def test_calls_all_three_in_order_and_forwards_dry_run(self):
+        from unittest.mock import patch
+
+        from manage_agenda.sources import reconcile_migrate_and_purge
+
+        order = []
+        args = Args(interactive=False)
+
+        with (
+            patch("manage_agenda.sources.reconcile_handled_events") as mock_reconcile,
+            patch("manage_agenda.sources.migrate_legacy_ledger_entries") as mock_migrate,
+            patch("manage_agenda.sources.purge_expired_ledger_entries") as mock_purge,
+        ):
+            mock_reconcile.side_effect = lambda *a, **k: order.append("reconcile") or {"msg-1"}
+            mock_migrate.side_effect = lambda *a, **k: order.append("migrate") or 2
+            mock_purge.side_effect = lambda *a, **k: order.append("purge") or 3
+
+            handled, migrated_count, purged_count = reconcile_migrate_and_purge(
+                args, dry_run=True
+            )
+
+        self.assertEqual(order, ["reconcile", "migrate", "purge"])
+        self.assertEqual(handled, {"msg-1"})
+        self.assertEqual(migrated_count, 2)
+        self.assertEqual(purged_count, 3)
+        self.assertTrue(mock_reconcile.call_args.kwargs["dry_run"])
+        self.assertTrue(mock_migrate.call_args.kwargs["dry_run"])
+        self.assertTrue(mock_purge.call_args.kwargs["dry_run"])
+
+    def test_forwards_path_sync_state_path_and_on_user_delete_to_reconcile(self):
+        from unittest.mock import patch
+
+        from manage_agenda.sources import reconcile_migrate_and_purge
+
+        args = Args(interactive=False)
+
+        with (
+            patch("manage_agenda.sources.reconcile_handled_events") as mock_reconcile,
+            patch("manage_agenda.sources.migrate_legacy_ledger_entries"),
+            patch("manage_agenda.sources.purge_expired_ledger_entries"),
+        ):
+            mock_reconcile.return_value = set()
+            reconcile_migrate_and_purge(
+                args,
+                path="/tmp/ledger.json",
+                sync_state_path="/tmp/sync.json",
+                on_user_delete="requeue",
+            )
+
+        self.assertEqual(mock_reconcile.call_args.kwargs["path"], "/tmp/ledger.json")
+        self.assertEqual(mock_reconcile.call_args.kwargs["sync_state_path"], "/tmp/sync.json")
+        self.assertEqual(mock_reconcile.call_args.kwargs["on_user_delete"], "requeue")
 
 
 if __name__ == "__main__":

@@ -781,27 +781,40 @@ def _list_all_pages(client, calendar_id, sync_token=None, time_min=None):
 
 
 def _confirm_missing_ids(client, calendar_id, missing_ids):
-    """Tell a genuine deletion apart from "just outside the bootstrap listing's time window".
+    """Tell a genuine deletion apart from "just outside the bootstrap listing's time window" -
+    and, among genuine confirmations, tell "Calendar knows this was cancelled" apart from
+    "Calendar has no record of this id at all" (see docs/investigation-limite1.md §8).
 
     One targeted get() per id - only for the ids a bounded bootstrap listing did not account
-    for at all, typically a handful, never the whole tracked set. An id is confirmed deleted on
-    404/410 or an explicit "cancelled" status; any other error is inconclusive and is left out,
-    the same conservative default used everywhere else here, so a transient API problem cannot
-    cause a message to be silently reprocessed.
+    for at all, typically a handful, never the whole tracked set.
+
+    Returns (cancelled_ids, unknown_ids):
+    - cancelled_ids: the id came back with an explicit status "cancelled" - Calendar has a
+      tombstone for it, a genuine confirmed deletion.
+    - unknown_ids: the id came back 404/410 - Calendar has no record of it at all. This is
+      NOT proof the user deleted it: it is equally consistent with the event never having
+      been created in the first place (a past bug, ledger corruption, a wrong/stale
+      event_id), and must never be treated as a user deletion by the caller - see
+      reconcile_handled_events()'s "unknown_event" resolution.
+
+    Any other error is inconclusive and the id is left out of both sets, the same
+    conservative default used everywhere else here, so a transient API problem cannot cause a
+    message to be silently reprocessed (or misclassified as unknown).
     """
-    confirmed = set()
+    cancelled = set()
+    unknown = set()
     for event_id in missing_ids:
         try:
             response = client.events().get(calendarId=calendar_id, eventId=event_id).execute()
         except googleapiclient.errors.HttpError as error:
             if getattr(getattr(error, "resp", None), "status", None) in (404, 410):
-                confirmed.add(event_id)
+                unknown.add(event_id)
             continue
         except Exception:
             continue
         if (response or {}).get("status") == "cancelled":
-            confirmed.add(event_id)
-    return confirmed
+            cancelled.add(event_id)
+    return cancelled, unknown
 
 
 def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
@@ -826,7 +839,10 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
     tool created/confirmed the ref (see _extract_event_refs), used only to decide which missing
     ids are worth confirming.
 
-    Returns the set of event ids to treat as deleted.
+    Returns (cancelled_ids, unknown_ids) - see _confirm_missing_ids for what distinguishes
+    them. A syncToken delta itself only ever reports items Calendar has an explicit status
+    for, so `unknown_ids` is only ever non-empty via the bootstrap path's targeted
+    confirmation of ids missing from a full listing.
     """
     path = Path(path) if path else calendar_sync_state_file()
     tokens = _load_sync_tokens(path)
@@ -841,7 +857,7 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
             )
         except Exception as error:
             logging.warning(f"Could not seed a Calendar sync token for {calendar_id}: {error}")
-            return set()
+            return set(), set()
         if fresh_token:
             tokens[calendar_id] = fresh_token
             _save_sync_tokens(path, tokens)
@@ -857,10 +873,13 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
             for event_id in missing_ids
             if _is_within_bootstrap_window(tracked_events.get(event_id))
         }
-        confirmed_missing = (
-            _confirm_missing_ids(client, calendar_id, confirmable_ids) if confirmable_ids else set()
-        )
-        return cancelled_ids | confirmed_missing
+        if confirmable_ids:
+            confirmed_cancelled, confirmed_unknown = _confirm_missing_ids(
+                client, calendar_id, confirmable_ids
+            )
+        else:
+            confirmed_cancelled, confirmed_unknown = set(), set()
+        return cancelled_ids | confirmed_cancelled, confirmed_unknown
 
     if not token:
         return _bootstrap()
@@ -873,10 +892,10 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
             tokens.pop(calendar_id, None)
             return _bootstrap()
         logging.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
-        return set()
+        return set(), set()
     except Exception as error:
         logging.warning(f"Could not fetch Calendar changes for {calendar_id}: {error}")
-        return set()
+        return set(), set()
 
     if fresh_token:
         tokens[calendar_id] = fresh_token
@@ -884,7 +903,10 @@ def sync_calendar_changes(api_dst, calendar_id, tracked_events=None, path=None):
     else:
         logging.warning(f"Calendar did not return a sync token for {calendar_id}.")
 
-    return {item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")}
+    cancelled_ids = {
+        item.get("id") for item in items if item.get("status") == "cancelled" and item.get("id")
+    }
+    return cancelled_ids, set()
 
 
 def _selected_calendar(args, rules, title):

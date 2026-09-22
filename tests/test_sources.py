@@ -285,12 +285,15 @@ class TestProcessEmailCli(unittest.TestCase):
     @patch("manage_agenda.sources.migrate_legacy_ledger_entries")
     @patch("manage_agenda.sources.reconcile_handled_events")
     @patch("manage_agenda.sources.moduleRules")
-    def test_process_email_cli_dry_run_reaches_all_three_ledger_writing_calls(
+    def test_process_email_cli_dry_run_reaches_all_three_ledger_writing_calls_via_the_orchestrator(
         self, mock_module_rules, mock_reconcile, mock_migrate, mock_purge
     ):
         """args.dry_run=True must reach purge too, not just reconcile/migrate - purge writes
         the same ledger file in the same sequence, so leaving it out would let --dry-run
-        permanently delete real entries."""
+        permanently delete real entries. Also covers that reconcile_migrate_and_purge() (the
+        new ordering-enforcing orchestrator) is what process_email_cli now calls, not the
+        three functions directly - patching them still works since the orchestrator looks
+        them up by module-level name at call time."""
         args = Args(
             interactive=False, delete=None, source="gemini", verbose=False, destination="",
             text="", dry_run=True,

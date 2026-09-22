@@ -490,6 +490,14 @@ def reconcile_handled_events(
       (process_email_cli, which already holds the account's api_src/source_details) can find
       it and un-mark the source message - reconcile itself never touches any mailbox.
 
+    A tracked event whose Calendar check comes back 404/410 (`unknown_ids` from
+    sync_calendar_changes) is a THIRD case, entirely outside `on_user_delete`: Calendar has no
+    record of it at all, which is not proof the user deleted it - it is equally consistent
+    with the event never having been created (a past bug, ledger corruption, a wrong/stale
+    event_id). Such an identity is journaled with status "unknown_event", stays excluded from
+    future scans, but gets neither the ignore nor the requeue treatment, and no mailbox action
+    is ever taken for it.
+
     Messages with no recorded event (too old, empty content, output=file, or migrated from the
     legacy ledger format) are left untouched: there is nothing to check, so they stay skipped.
 
@@ -514,12 +522,14 @@ def reconcile_handled_events(
             if calendar_id and event_id:
                 tracked_by_calendar.setdefault(calendar_id, {})[event_id] = ev.get("recorded_at")
 
-    cancelled_by_calendar = {
-        calendar_id: sync_calendar_changes(
+    cancelled_by_calendar = {}
+    unknown_by_calendar = {}
+    for calendar_id, tracked_events in tracked_by_calendar.items():
+        cancelled_ids, unknown_ids = sync_calendar_changes(
             api_dst, calendar_id, tracked_events=tracked_events, path=sync_state_path
         )
-        for calendar_id, tracked_events in tracked_by_calendar.items()
-    }
+        cancelled_by_calendar[calendar_id] = cancelled_ids
+        unknown_by_calendar[calendar_id] = unknown_ids
 
     still_handled = set()
     changed = False
@@ -533,6 +543,7 @@ def reconcile_handled_events(
             ev
             for ev in events
             if ev.get("event_id") not in cancelled_by_calendar.get(ev.get("calendar_id"), set())
+            and ev.get("event_id") not in unknown_by_calendar.get(ev.get("calendar_id"), set())
         ]
         if remaining:
             still_handled.add(identity)
@@ -547,9 +558,32 @@ def reconcile_handled_events(
                 changed = True
             continue
 
-        # Every tracked event for this identity was cancelled - a user deletion.
+        # Every tracked event for this identity is now gone (cancelled and/or unknown).
         changed = True
         prefix = "DRY RUN " if dry_run else ""
+        unknown_refs = [
+            ev
+            for ev in events
+            if ev.get("event_id") in unknown_by_calendar.get(ev.get("calendar_id"), set())
+        ]
+        if unknown_refs:
+            # A 404/410 is NOT proof of a user deletion - it is equally consistent with the
+            # event never having been created (a past bug, ledger corruption, a wrong/stale
+            # event_id). Never runs through on_user_delete (ignore/requeue), regardless of
+            # its configured value, and never touches any mailbox - see
+            # docs/investigation-limite1.md §8 and _confirm_missing_ids(). If this identity
+            # also has confirmed-cancelled refs, the whole resolution is still treated as
+            # unknown_event: a mix is itself a sign something is off, not something to
+            # partially resolve as if it were a normal deletion.
+            entry["events"] = []
+            entry["status"] = "unknown_event"
+            still_handled.add(identity)
+            logging.warning(
+                f"{prefix}{identity}: {len(unknown_refs)} of {len(events)} tracked event(s) "
+                "return 404/410 (never confirmed to have existed) - journaling as "
+                "unknown_event, no on_user_delete action, no mailbox action."
+            )
+            continue
         if on_user_delete == "requeue":
             # Deliberately abandons the old ids - a requeue always computes a fresh
             # deterministic id from the bumped generation, so there is nothing to keep them
@@ -709,7 +743,7 @@ def _entry_purge_after(entry, event_margin_days, no_event_margin_days):
     events, live or cancelled (a multi-event message expires only once every one of its events
     has ended, per amendment 2; an ignored deletion still earns this margin, since it did have
     a real event until reconcile resolved it). Falls back to the entry's own `recorded_at` (+ a
-    shorter margin) for "no_event"/"source_lost"/"legacy" entries and for refs recorded before
+    shorter margin) for "no_event"/"unknown_event"/"source_lost"/"legacy" entries and for refs recorded before
     `event_end` was tracked - the "log-date" fallback from amendment 2's own wording.
     manage-agenda never creates recurring events (confirmed in Phase 1 by reading the
     event-building code), so there is no separate recurrence-based purge rule to apply here.
@@ -739,16 +773,19 @@ def purge_expired_ledger_entries(
     future activity instead of growing with the tool's whole history - the hard constraint
     behind this whole redesign (see docs/investigation-limite1.md).
 
-    Applies uniformly to every status ("created", "no_event", "source_lost", "legacy"): what
+    Applies uniformly to every status ("created", "no_event", "unknown_event", "source_lost", "legacy"): what
     differs between them is only which age signal `_entry_purge_after` finds available.
 
     An entry with NO age signal at all (no event_end anywhere, and no `recorded_at` - only
     possible for a pre-migration entry that also predates the `recorded_at` field) is not left
-    to persist forever: `_entry_purge_after` returning None here gets exactly one grace pass,
-    stamping `recorded_at` to "now" (never overwriting an existing one - see
-    _entry_purge_after, this branch is only reached when there truly wasn't one), so it
-    purges via the normal no_event_margin_days on a later run. No entry can be exempt from
-    purging indefinitely just for lacking history it never had.
+    to persist forever: `_entry_purge_after` returning None here stamps `recorded_at` to "now"
+    (once - never overwriting an existing one, see _entry_purge_after, this branch is only
+    reached when there truly wasn't one). The grace period this buys is a FULL
+    `no_event_margin_days` from that moment, exactly like any other no_event entry - not "safe
+    until the next call regardless of elapsed time": a second call made at the same `today`
+    (or before the margin has elapsed) still finds `recorded_at` unexpired and keeps the entry;
+    only a call made `no_event_margin_days` or more after the stamp purges it. No entry can be
+    exempt from purging indefinitely just for lacking history it never had.
 
     `dry_run=True` computes exactly what a real call would (the returned count is accurate
     either way) but never calls `_save_state` - nothing is dropped and no entry is stamped
@@ -791,6 +828,39 @@ def purge_expired_ledger_entries(
     if (purged or stamped) and not dry_run:
         _save_state(path, remaining)
     return purged
+
+
+def reconcile_migrate_and_purge(
+    args,
+    path=None,
+    sync_state_path=None,
+    on_user_delete=None,
+    dry_run=False,
+):
+    """Run reconcile, migrate, and purge, in that fixed order, in one call - the one place
+    this ordering is enforced structurally rather than left to a caller to get right by
+    calling three separate functions in the right sequence.
+
+    The order is load-bearing, not stylistic:
+    - reconcile BEFORE purge: reconcile is what notices a deleted event and applies the
+      on_user_delete/unknown_event resolution - purging an entry first would drop it before
+      reconcile ever sees it, silently turning "the event was deleted" into "this message was
+      never seen", defeating on_user_delete (and the unknown_event distinction) entirely for
+      anything already past its purge margin.
+    - migrate BEFORE purge: migrate backfills `event_end` on legacy refs that predate that
+      field, which purge needs to give them their full margin instead of the shorter
+      no_event-style fallback it would otherwise fall back to.
+
+    `dry_run` is forwarded to all three - see each function's own docstring for exactly what
+    it skips. Returns (handled, migrated_count, purged_count) - `handled` is what callers
+    actually need to filter a scan by.
+    """
+    handled = reconcile_handled_events(
+        args, path=path, sync_state_path=sync_state_path, on_user_delete=on_user_delete, dry_run=dry_run
+    )
+    migrated_count = migrate_legacy_ledger_entries(args, path=path, dry_run=dry_run)
+    purged_count = purge_expired_ledger_entries(path=path, dry_run=dry_run)
+    return handled, migrated_count, purged_count
 
 
 def list_restorable_identities_cli(path=None):
@@ -1849,25 +1919,15 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         print(t("sources.no_message_read_fix_calendar"))
         return False
 
-    # --dry-run (args.dry_run) was requested scoped to reconcile and migrate specifically
-    # (the two decision/mutation points against real Calendar/ledger data), and the rest of
-    # this function (scanning/extraction/publishing) deliberately still runs normally under
-    # it. purge is included too, even though it wasn't named: it writes the exact same ledger
-    # file in the same three-call sequence, and skipping it here would let a "touch nothing"
-    # flag permanently delete real ledger entries.
+    # --dry-run (args.dry_run) is scoped to reconcile/migrate/purge only - the ledger-writing
+    # calls below - never Calendar publish, mailbox marking, or remember_handled_mail;
+    # scanning/extraction/publishing still run normally under it.
     dry_run = bool(getattr(args, "dry_run", False))
 
-    # Reconcile BEFORE purge, always: reconcile is what notices a deleted event and applies
-    # the on_user_delete resolution (ignore keeps the identity excluded; requeue bumps its
-    # generation and marks it pending_requeue) - purging an entry first would drop it before
-    # reconcile ever sees it, silently turning "the event was deleted" into "this message was
-    # never seen", defeating on_user_delete entirely for anything past its purge margin too.
-    handled = reconcile_handled_events(args, dry_run=dry_run)
-    # Migrate BEFORE purge too: it backfills event_end on legacy refs that predate that field,
-    # which purge_expired_ledger_entries() needs to give them their full margin instead of the
-    # shorter no_event-style fallback it would otherwise fall back to.
-    migrate_legacy_ledger_entries(args, dry_run=dry_run)
-    purge_expired_ledger_entries(dry_run=dry_run)
+    # reconcile_migrate_and_purge() enforces reconcile -> migrate -> purge in that fixed
+    # order structurally (see its own docstring for why the order matters) - not left to this
+    # call site to get right by calling three separate functions in sequence.
+    handled, _migrated_count, _purged_count = reconcile_migrate_and_purge(args, dry_run=dry_run)
     # Loaded once, after reconcile/migrate/purge - metadata_extractor below does one dict
     # lookup per message instead of re-reading the ledger file each time, and is also where a
     # pending_requeue entry (identity intentionally left out of `handled` above) is found for
