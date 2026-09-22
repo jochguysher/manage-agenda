@@ -54,6 +54,14 @@ class Config:
     # Email
     DEFAULT_EMAIL_TAG: str = os.getenv("DEFAULT_EMAIL_TAG", "zAgenda")
 
+    # What to do when a user manually deletes an event manage-agenda created: "ignore" (the
+    # message stays marked processed, the deletion stands - default, since there is no way to
+    # tell an accidental deletion from a deliberate one) or "requeue" (bump the identity's
+    # generation and un-mark its source message so the next scan recreates the event under a
+    # fresh id). See docs/investigation-limite1.md - this default was explicitly validated by
+    # the user, not chosen unilaterally.
+    ON_USER_DELETE: str = os.getenv("ON_USER_DELETE", "ignore")
+
     # API Keys
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
     MISTRAL_API_KEY: Optional[str] = os.getenv("MISTRAL_API_KEY")
@@ -83,6 +91,12 @@ class Config:
         valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if cls.LOG_LEVEL.upper() not in valid_levels:
             issues.append(f"Invalid LOG_LEVEL '{cls.LOG_LEVEL}'. Must be one of {valid_levels}")
+
+        valid_on_user_delete = ["ignore", "requeue"]
+        if cls.ON_USER_DELETE not in valid_on_user_delete:
+            issues.append(
+                f"Invalid ON_USER_DELETE '{cls.ON_USER_DELETE}'. Must be one of {valid_on_user_delete}"
+            )
 
         if issues:
             for issue in issues:

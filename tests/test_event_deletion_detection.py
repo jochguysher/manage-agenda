@@ -411,12 +411,13 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.sync_path.parent.mkdir(parents=True, exist_ok=True)
         self.sync_path.write_text(json.dumps({"tokens": {calendar_id: token}}), encoding="utf-8")
 
-    def test_message_with_deleted_event_is_released_for_reprocessing(self):
+    def _seed_gone_and_present(self):
         self._write_state(
             {
                 "msg-gone": {
                     "events": [{"calendar_id": "cal-1", "event_id": "ev-gone"}],
                     "status": "created",
+                    "generation": 0,
                 },
                 "msg-present": {
                     "events": [{"calendar_id": "cal-1", "event_id": "ev-present"}],
@@ -426,7 +427,7 @@ class TestReconcileHandledEvents(unittest.TestCase):
             }
         )
         self._seed_sync_token("cal-1", "tok-old")
-        api, _client = _api(
+        return _api(
             [
                 {
                     "items": [
@@ -437,25 +438,60 @@ class TestReconcileHandledEvents(unittest.TestCase):
                 }
             ]
         )
+
+    def test_ignore_default_keeps_a_deleted_event_s_identity_excluded(self):
+        """on_user_delete="ignore" (the validated default): the message stays marked
+        processed and the deletion stands - there is no way to tell an accidental deletion
+        from a deliberate one, so recreating by default would make a deliberate deletion
+        impossible to keep (this is "limite 1")."""
+        api, _client = self._seed_gone_and_present()
         args = Args(interactive=False)
         args.calendar_api = api
 
-        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+        still_handled = reconcile_handled_events(
+            args, path=self.path, sync_state_path=self.sync_path, on_user_delete="ignore"
+        )
+
+        self.assertEqual(still_handled, {"msg-gone", "msg-present", "msg-legacy"})
+        remaining_state = load_handled_mail_state(self.path)
+        self.assertEqual(remaining_state["msg-gone"]["status"], "no_event")
+        self.assertEqual(remaining_state["msg-gone"]["events"], [])
+        # The deleted event's id is kept, not discarded - a future manual `restore` command
+        # needs it, and it's what lets the entry purge on the longer event_end margin instead
+        # of the short no_event fallback (see _entry_purge_after).
+        self.assertEqual(
+            [ev["event_id"] for ev in remaining_state["msg-gone"]["cancelled_events"]], ["ev-gone"]
+        )
+        self.assertIn("msg-present", remaining_state)
+        self.assertIn("msg-legacy", remaining_state)
+
+    def test_requeue_bumps_generation_and_excludes_the_identity_from_still_handled(self):
+        """on_user_delete="requeue": the entry is kept (not deleted, not purged away by this
+        call) with a bumped generation and a pending_requeue status, but is deliberately left
+        out of still_handled - the caller is expected to un-mark the source message so a
+        future scan can find it again; reconcile itself never touches any mailbox."""
+        api, _client = self._seed_gone_and_present()
+        args = Args(interactive=False)
+        args.calendar_api = api
+
+        still_handled = reconcile_handled_events(
+            args, path=self.path, sync_state_path=self.sync_path, on_user_delete="requeue"
+        )
 
         self.assertEqual(still_handled, {"msg-present", "msg-legacy"})
         remaining_state = load_handled_mail_state(self.path)
-        self.assertNotIn("msg-gone", remaining_state)
-        self.assertIn("msg-present", remaining_state)
-        self.assertIn("msg-legacy", remaining_state)
+        self.assertEqual(remaining_state["msg-gone"]["status"], "pending_requeue")
+        self.assertEqual(remaining_state["msg-gone"]["generation"], 1)
+        self.assertEqual(remaining_state["msg-gone"]["events"], [])
 
     def test_an_entry_both_cancelled_and_past_its_purge_margin_goes_through_reconcile_first(self):
         """Pins the call order in process_email_cli: reconcile_handled_events() must run
         before purge_expired_ledger_entries(), never the other way around. An entry whose
-        event is cancelled in the sync delta AND already past its purge margin must be
-        resolved by reconcile (releasing the identity for reprocessing via on_user_delete's
-        ignore/requeue chain) - if purge ran first it would drop the entry before reconcile
-        ever saw the cancellation, silently turning "the event was deleted" into "this
-        message was never seen"."""
+        event is cancelled in the sync delta AND already past its purge margin must still be
+        resolved by reconcile (the ignore/requeue decision, journaled via a status change)
+        before purge gets anywhere near it - if purge ran first it would drop the "created"
+        entry outright, and the deletion would never go through on_user_delete's resolution
+        at all, just silently vanish."""
         long_ago = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
         self._write_state(
             {
@@ -479,11 +515,19 @@ class TestReconcileHandledEvents(unittest.TestCase):
         args = Args(interactive=False)
         args.calendar_api = api
 
-        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+        still_handled = reconcile_handled_events(
+            args, path=self.path, sync_state_path=self.sync_path, on_user_delete="ignore"
+        )
+        # Reconcile's own resolution is visible immediately, before purge ever runs: the
+        # deletion was journaled (status -> no_event), not silently dropped.
+        self.assertEqual(still_handled, {"msg-gone-and-old"})
+        after_reconcile = load_handled_mail_state(self.path)
+        self.assertEqual(after_reconcile["msg-gone-and-old"]["status"], "no_event")
+
         purged = purge_expired_ledger_entries(path=self.path)
 
-        self.assertEqual(still_handled, set())
-        self.assertEqual(purged, 0, "already gone via reconcile - nothing left for purge to do")
+        # Only now, as a routine no_event entry well past its short margin, does purge take it.
+        self.assertEqual(purged, 1)
         self.assertNotIn("msg-gone-and-old", load_handled_mail_state(self.path))
 
     def test_one_sync_call_per_calendar_regardless_of_event_count(self):
@@ -517,7 +561,10 @@ class TestReconcileHandledEvents(unittest.TestCase):
         self.assertEqual(still_handled, {"msg-1"})
         self.assertIn("msg-1", load_handled_mail_state(self.path))
 
-    def test_released_message_is_offered_again_by_unseen_messages(self):
+    def test_requeued_message_is_offered_again_by_unseen_messages(self):
+        """Only under on_user_delete="requeue" is a deleted-event identity excluded from
+        `still_handled` - "ignore" (the default) keeps it excluded, see
+        test_ignore_default_keeps_a_deleted_event_s_identity_excluded."""
         from email.message import EmailMessage
 
         self._write_state(
@@ -530,7 +577,9 @@ class TestReconcileHandledEvents(unittest.TestCase):
         args = Args(interactive=False)
         args.calendar_api = api
 
-        still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
+        still_handled = reconcile_handled_events(
+            args, path=self.path, sync_state_path=self.sync_path, on_user_delete="requeue"
+        )
 
         message = EmailMessage()
         message["Message-ID"] = "<gone@x>"
@@ -578,8 +627,10 @@ class TestReconcileHandledEvents(unittest.TestCase):
 
         still_handled = reconcile_handled_events(args, path=self.path, sync_state_path=self.sync_path)
 
-        self.assertEqual(still_handled, set())
-        self.assertNotIn("msg-1", load_handled_mail_state(self.path))
+        # Default on_user_delete="ignore": the deletion is resolved (journaled to no_event),
+        # not released - the identity stays excluded.
+        self.assertEqual(still_handled, {"msg-1"})
+        self.assertEqual(load_handled_mail_state(self.path)["msg-1"]["status"], "no_event")
 
     def test_old_untraceable_events_never_trigger_a_confirmation_call_in_reconcile(self):
         """Ties the age-skip to the real entry point: an old-enough tracked event, missing from
@@ -659,6 +710,24 @@ class TestEntryPurgeAfter(unittest.TestCase):
         self.assertEqual(
             purge_after,
             datetime.datetime(2026, 1, 8, tzinfo=datetime.timezone.utc),
+        )
+
+    def test_ignored_deletion_earns_the_event_end_margin_not_the_short_fallback(self):
+        """An on_user_delete="ignore" resolution moves the deleted ref to cancelled_events
+        (see reconcile_handled_events) - it must still purge on the longer event_end margin,
+        not the short no_event fallback, since it did have a real event until now."""
+        entry = {
+            "events": [],
+            "cancelled_events": [
+                {"calendar_id": "primary", "event_id": "ev-gone", "event_end": "2026-01-01T10:00:00Z"}
+            ],
+            "status": "no_event",
+            "recorded_at": "2020-01-01T00:00:00Z",
+        }
+        purge_after = _entry_purge_after(entry, event_margin_days=30, no_event_margin_days=7)
+        self.assertEqual(
+            purge_after,
+            datetime.datetime(2026, 1, 31, 10, tzinfo=datetime.timezone.utc),
         )
 
     def test_legacy_entry_with_no_age_signal_is_never_purged(self):

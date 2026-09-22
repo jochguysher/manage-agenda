@@ -146,6 +146,12 @@ def _load_state(path):
     read from the legacy {"ids": [...]} format or an older ledger file written before this field
     existed - see purge_expired_ledger_entries(), which never purges an entry it has no age
     signal for at all.
+
+    `cancelled_events` (same shape as `events`) holds the refs of events reconcile confirmed
+    deleted under on_user_delete="ignore" - kept, not discarded, so their event_end still
+    earns the entry the longer purge margin (see _entry_purge_after) and so a future manual
+    `restore` command has an id to act on. A "requeue" resolution clears them instead - it
+    deliberately abandons the old ids, computing a fresh one from the bumped generation.
     """
     if not path.is_file():
         return {}
@@ -158,6 +164,9 @@ def _load_state(path):
         for identity, entry in data["messages"].items():
             if isinstance(entry, dict):
                 events = [ev for ev in (entry.get("events") or []) if isinstance(ev, dict)]
+                cancelled_events = [
+                    ev for ev in (entry.get("cancelled_events") or []) if isinstance(ev, dict)
+                ]
                 status = entry.get("status") or ("created" if events else "no_event")
                 try:
                     generation = int(entry.get("generation") or 0)
@@ -165,8 +174,10 @@ def _load_state(path):
                     generation = 0
                 recorded_at = entry.get("recorded_at")
             else:
-                events, status, generation, recorded_at = [], "no_event", 0, None
+                events, cancelled_events, status, generation, recorded_at = [], [], "no_event", 0, None
             parsed = {"events": events, "status": status, "generation": generation}
+            if cancelled_events:
+                parsed["cancelled_events"] = cancelled_events
             if isinstance(recorded_at, str) and recorded_at:
                 parsed["recorded_at"] = recorded_at
             state[str(identity)] = parsed
@@ -285,8 +296,23 @@ def _extract_event_refs(calendar_result):
     return refs
 
 
-def reconcile_handled_events(args, path=None, sync_state_path=None):
-    """Drop messages whose recorded Calendar events have all been deleted, so they get reprocessed.
+def reconcile_handled_events(args, path=None, sync_state_path=None, on_user_delete=None):
+    """Resolve messages whose recorded Calendar events have all been deleted, per
+    `on_user_delete` (default from config.Config.ON_USER_DELETE, itself defaulting to
+    "ignore" - see docs/investigation-limite1.md, this default was explicitly validated by
+    the user, never chosen unilaterally):
+
+    - "ignore": the message stays marked processed (its identity stays in `still_handled`,
+      excluded from future scans exactly like a "no_event" entry) and the deletion stands.
+      There is no way to tell an accidental deletion from a deliberate one, so recreating the
+      event by default would make a deliberate deletion impossible to keep - this is the
+      failure mode "limite 1" names, and `ignore` is what prevents it.
+    - "requeue": the identity's `generation` is bumped (so a future re-publish computes a
+      fresh deterministic id, never colliding with the deleted one - see
+      deterministic_event_id()) and the entry is marked "pending_requeue", *not* added to
+      `still_handled` and *not* deleted. The entry stays in the ledger so the caller
+      (process_email_cli, which already holds the account's api_src/source_details) can find
+      it and un-mark the source message - reconcile itself never touches any mailbox.
 
     Messages with no recorded event (too old, empty content, output=file, or migrated from the
     legacy ledger format) are left untouched: there is nothing to check, so they stay skipped.
@@ -295,6 +321,7 @@ def reconcile_handled_events(args, path=None, sync_state_path=None):
     what was cancelled since the last run: one cheap call per calendar, regardless of how many
     events are on record, instead of one check per known event.
     """
+    on_user_delete = on_user_delete or config.ON_USER_DELETE
     path = Path(path) if path else handled_mail_file()
     state = _load_state(path)
     api_dst = getattr(args, "calendar_api", None)
@@ -336,9 +363,30 @@ def reconcile_handled_events(args, path=None, sync_state_path=None):
             if len(remaining) != len(events):
                 entry["events"] = remaining
                 changed = True
+            continue
+
+        # Every tracked event for this identity was cancelled - a user deletion.
+        changed = True
+        if on_user_delete == "requeue":
+            # Deliberately abandons the old ids - a requeue always computes a fresh
+            # deterministic id from the bumped generation, so there is nothing to keep them
+            # for; see deterministic_event_id()'s "never reuse a deleted event's id" rule.
+            entry["events"] = []
+            entry["status"] = "pending_requeue"
+            entry["generation"] = int(entry.get("generation") or 0) + 1
+            logging.info(f"{identity}: event deleted, requeueing (generation bumped).")
+            # Deliberately not added to still_handled - the caller is expected to un-mark the
+            # source message so the next scan can pick it up again.
         else:
-            del state[identity]
-            changed = True
+            # Kept, not discarded: still the only record of which event id was deleted, which
+            # a future manual `restore` command needs, and it also earns the entry the longer
+            # event_end-based purge margin (see _entry_purge_after) instead of the short
+            # no_event fallback, since it did have a real event until now.
+            entry["cancelled_events"] = list(entry.get("cancelled_events") or []) + events
+            entry["events"] = []
+            entry["status"] = "no_event"
+            still_handled.add(identity)
+            logging.info(f"{identity}: event deleted, ignoring per on_user_delete=ignore.")
 
     if changed:
         _save_state(path, state)
@@ -375,17 +423,20 @@ def _entry_purge_after(entry, event_margin_days, no_event_margin_days):
     such entries are left untouched, exactly as before purging existed for them.
 
     Purges on the *event's own end date* (+ margin), never on `recorded_at`, whenever at least
-    one event ref carries an `event_end` - taking the max across all of an entry's events
-    (a multi-event message expires only once every one of its events has ended, per amendment
-    2). Falls back to the entry's own `recorded_at` (+ a shorter margin) for "no_event"/
-    "source_lost"/"legacy" entries and for refs recorded before `event_end` was tracked - the
-    "log-date" fallback from amendment 2's own wording. manage-agenda never creates recurring
-    events (confirmed in Phase 1 by reading the event-building code), so there is no separate
-    recurrence-based purge rule to apply here.
+    one ref (live in `events`, or cancelled-but-kept in `cancelled_events` under
+    on_user_delete="ignore") carries an `event_end` - taking the max across all of an entry's
+    events, live or cancelled (a multi-event message expires only once every one of its events
+    has ended, per amendment 2; an ignored deletion still earns this margin, since it did have
+    a real event until reconcile resolved it). Falls back to the entry's own `recorded_at` (+ a
+    shorter margin) for "no_event"/"source_lost"/"legacy" entries and for refs recorded before
+    `event_end` was tracked - the "log-date" fallback from amendment 2's own wording.
+    manage-agenda never creates recurring events (confirmed in Phase 1 by reading the
+    event-building code), so there is no separate recurrence-based purge rule to apply here.
     """
+    all_refs = list(entry.get("events") or []) + list(entry.get("cancelled_events") or [])
     ends = [
         parsed
-        for parsed in (_parse_iso_datetime(ev.get("event_end")) for ev in entry.get("events") or [])
+        for parsed in (_parse_iso_datetime(ev.get("event_end")) for ev in all_refs)
         if parsed is not None
     ]
     if ends:
@@ -998,15 +1049,17 @@ def process_email_cli(args, model, selected_source=None, rules=None):
         print(t("sources.no_message_read_fix_calendar"))
         return False
 
-    # Reconcile BEFORE purge, always: reconcile is what notices a deleted event and releases
-    # the identity for reprocessing (feeding on_user_delete's ignore/requeue resolution) -
-    # purging an entry first would drop it before reconcile ever sees it, silently turning
-    # "the event was deleted" into "this message was never seen", defeating on_user_delete
-    # entirely for anything that happens to also be past its purge margin.
+    # Reconcile BEFORE purge, always: reconcile is what notices a deleted event and applies
+    # the on_user_delete resolution (ignore keeps the identity excluded; requeue bumps its
+    # generation and marks it pending_requeue) - purging an entry first would drop it before
+    # reconcile ever sees it, silently turning "the event was deleted" into "this message was
+    # never seen", defeating on_user_delete entirely for anything past its purge margin too.
     handled = reconcile_handled_events(args)
     purge_expired_ledger_entries()
     # Loaded once, after reconcile and purge - metadata_extractor below does one dict lookup
-    # per message instead of re-reading the ledger file each time.
+    # per message instead of re-reading the ledger file each time. Also how a pending_requeue
+    # entry (identity intentionally left out of `handled` above) would be found by a future
+    # un-marking step - not wired yet, this commit only lands the local resolution decision.
     handled_state = load_handled_mail_state()
 
     posts = _get_emails_from_folder(args, api_src, source_details=source_details, handled=handled)
