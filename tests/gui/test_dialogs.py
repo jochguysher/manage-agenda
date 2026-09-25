@@ -211,3 +211,23 @@ class TestReviewEventDialog:
         dialog.start.setText("2030-06-01 10:00:00")
         dialog.accept_button.click()
         assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_review_dialog_names_the_source_message(qapp):
+    from PySide6.QtWidgets import QLabel
+
+    context = {"subject": "Visite", "sender": "a@b.org", "date": "2026-09-24 14:33", "identifier": "m1"}
+    dialog, _ = _dialog("review_event", event={"summary": "x"}, label="[m1] ", context=context)
+    texts = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any("Visite" in text and "14:33" in text and "a@b.org" in text for text in texts)
+    plain, _ = _dialog("review_event", event={"summary": "x"}, label="[m1] ", context={})
+    assert not any("Visite" in label.text() for label in plain.findChildren(QLabel))
+
+
+def test_review_dialog_says_what_a_planned_cleaning_is(qapp):
+    from PySide6.QtWidgets import QLabel
+
+    context = {"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-09-27", "occupied_to": "2026-10-03"}
+    dialog, _ = _dialog("review_event", event={"summary": "NDU - Salle 1"}, label="", context=context)
+    texts = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any("Salle 1" in text and "2026-10-03" in text for text in texts)

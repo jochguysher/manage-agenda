@@ -128,8 +128,10 @@ class TestScriptedUI:
         edited = {"summary": "y"}
         scripted = ScriptedUI([("review_event", "retry"), ("review_event", ("accept", edited))])
         assert scripted.review_event(event) == (event, "retry")
-        assert scripted.review_event(event, label="[1] ") == (edited, "accept")
+        assert scripted.review_event(event, label="[1] ", context={"subject": "s"}) == (edited, "accept")
         assert scripted.calls[1].payload["label"] == "[1] "
+        assert scripted.calls[1].payload["context"] == {"subject": "s"}
+        assert scripted.calls[0].payload["context"] is None
 
     def test_text_prompts_return_the_scripted_string(self):
         scripted = ScriptedUI([("ask_text", "u1 u2"), ("ask_multiline", "a\nb"), ("choose_action", "r")])
@@ -172,3 +174,25 @@ def test_scripted_ui_fixture_is_installed_and_checked(scripted_ui):
     scripted_ui.queue("confirm", True)
     assert get_ui() is scripted_ui
     assert get_ui().confirm("?") is True
+
+
+class TestDescribeNature:
+    def test_cleaning_context_is_named_and_extracted_events_are_not(self):
+        from manage_agenda.ui import describe_nature
+
+        week = describe_nature(
+            {"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-09-27", "occupied_to": "2026-10-03"}
+        )
+        assert "Salle 1" in week and "2026-09-27" in week and "2026-10-03" in week
+        day = describe_nature({"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-09-27", "occupied_to": "2026-09-27"})
+        assert "2026-09-27" in day and day != week
+        assert describe_nature({"subject": "x"}) == ""
+        assert describe_nature(None) == ""
+
+    def test_a_deadline_is_said(self):
+        from manage_agenda.ui import describe_nature
+
+        text = describe_nature(
+            {"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-05-30 14:00", "occupied_to": "2026-05-31 02:00", "clean_before": "2026-05-31 08:00"}
+        )
+        assert "2026-05-31 08:00" in text and "2026-05-30 14:00" in text

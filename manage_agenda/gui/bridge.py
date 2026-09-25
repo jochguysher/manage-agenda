@@ -109,8 +109,8 @@ class QtUI:
     def ask_multiline(self, text):
         return self._ask("ask_multiline", text=text)
 
-    def review_event(self, event, label=""):
-        return self._ask("review_event", event=event, label=label)
+    def review_event(self, event, label="", context=None):
+        return self._ask("review_event", event=event, label=label, context=context or {})
 
     def select_events(self, events, labels, title="", prompt_text="", render=None):
         # `render` prints the list on a terminal; the dialog shows `labels` instead.

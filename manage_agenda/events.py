@@ -177,15 +177,16 @@ def _ensure_valid_event_timezones(event, fallback_tz="UTC"):
     return event
 
 
-def _validate_event_dates_interactive(event, post_identifier=None):
+def _validate_event_dates_interactive(event, post_identifier=None, context=None):
     """Let the user confirm or correct an extracted event's dates, through the UI port.
 
     Returns (event, is_valid, errors) like the non-interactive twin: is_valid is False when
     the user asked for the LLM to be run again ("retry"), which the caller honours by
     re-extracting. The terminal menu (s/r/y/m/d/h/i/f) lives in
-    manage_agenda.ui.console.ConsoleUI.review_event; a GUI shows a form instead."""
+    manage_agenda.ui.console.ConsoleUI.review_event; a GUI shows a form instead. `context`
+    (extraction.message_context()) names the source message next to the event."""
     label = f"[{post_identifier}] " if post_identifier else ""
-    event, decision = get_ui().review_event(event, label=label)
+    event, decision = get_ui().review_event(event, label=label, context=context)
     return event, decision != "retry", []
 
 

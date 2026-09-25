@@ -24,6 +24,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Protocol
 
+from manage_agenda.i18n import t
+
 
 class UI(Protocol):
     """One method per kind of question the library asks. `ConsoleUI` (manage_agenda.ui.
@@ -48,9 +50,11 @@ class UI(Protocol):
     def ask_multiline(self, text) -> str:
         """Several lines of free text; "" when nothing was entered."""
 
-    def review_event(self, event, label="") -> tuple:
+    def review_event(self, event, label="", context=None) -> tuple:
         """Let the user check and edit an extracted event's dates; (event, decision) with
-        decision "accept" or "retry" (ask the LLM again)."""
+        decision "accept" or "retry" (ask the LLM again). `context` names the source
+        message (subject, sender, date, identifier - see describe_source()) so the person
+        can find it and judge the extraction against it."""
 
     def select_events(self, events, labels, title="", prompt_text="", render=None) -> list:
         """Pick any number of `events` (shown as `labels`); a list of events."""
@@ -58,6 +62,41 @@ class UI(Protocol):
     def echo(self, *parts, sep=" ", end="\n", flush=False) -> None:
         """Show one line to the user. Same signature as print(), so library code's
         `print(...)` calls became `echo(...)` mechanically, keyword arguments included."""
+
+
+def describe_source(context) -> str:
+    """One line naming the message an event came from, built from whichever of `context`'s
+    subject, sender, date and identifier the flow knew; "" when it knew none. What every UI
+    shows next to an event under review."""
+    context = context or {}
+    parts = []
+    if context.get("subject"):
+        parts.append(t("events.review_source_subject", subject=context["subject"]))
+    if context.get("sender"):
+        parts.append(t("events.review_source_from", sender=context["sender"]))
+    if context.get("date"):
+        parts.append(t("events.review_source_date", date=context["date"]))
+    if context.get("identifier"):
+        parts.append(t("events.review_source_id", identifier=context["identifier"]))
+    return t("events.review_source", details=" · ".join(parts)) if parts else ""
+
+
+def describe_nature(context) -> str:
+    """One line saying what a proposed event is when the tool made it up from the message
+    rather than extracting it: a cleaning after a room occupation (extraction.event_nature()
+    puts kind, room, occupied_from and occupied_to in `context`). "" for an extracted event."""
+    context = context or {}
+    if context.get("kind") != "cleaning":
+        return ""
+    first, last = context.get("occupied_from") or "", context.get("occupied_to") or ""
+    room = context.get("room") or ""
+    if first and first == last:
+        text = t("events.review_nature_cleaning_day", room=room, day=first)
+    else:
+        text = t("events.review_nature_cleaning", room=room, first=first, last=last)
+    if context.get("clean_before"):
+        text += " " + t("events.review_nature_deadline", when=context["clean_before"])
+    return text
 
 
 def label_for(item, identifier=None) -> str:

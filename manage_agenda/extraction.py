@@ -247,6 +247,40 @@ def _from_header(content_text):
     return ""
 
 
+def message_context(content_text, post_identifier, subject, reference_date_time):
+    """What identifies the source message to whoever reviews an extracted event - the
+    subject, the sender (the From: line of `content_text`), the message's date and time
+    (local) and its identifier - so the message can be found again and the extraction
+    judged against it. The `context` of the UI port's review_event()."""
+    if isinstance(reference_date_time, datetime.datetime):
+        when = reference_date_time
+        if when.tzinfo is not None:
+            when = when.astimezone()
+        date = when.strftime("%Y-%m-%d %H:%M")
+    else:
+        date = str(reference_date_time or "").strip()
+    return {
+        "identifier": str(post_identifier or ""),
+        "subject": str(subject or "").strip(),
+        "sender": _from_header(content_text),
+        "date": date,
+    }
+
+
+def event_nature(event):
+    """What kind of event this is when the tool made it up rather than extracted it - a
+    cleaning after a room occupation (scheduling.plan_room_visits) - as review_event()
+    context keys (kind, room, occupied_from, occupied_to); {} for an extracted event."""
+    private = ((event or {}).get("extendedProperties") or {}).get("private") or {}
+    if not private.get("kind"):
+        return {}
+    return {
+        key: str(private.get(key) or "")
+        for key in ("kind", "room", "occupied_from", "occupied_to", "clean_before")
+        if key in private
+    }
+
+
 def _prompt_template_for(content_text):
     from manage_agenda.scheduling import prompt_template_for
 
@@ -476,8 +510,12 @@ def _process_event_with_llm_and_calendar(
 
                 retry_needed = False
                 if args.interactive:
+                    context = message_context(
+                        content_text, post_identifier, subject_for_print, reference_date_time
+                    )
+                    context.update(event_nature(single_event))
                     single_event, is_valid, _ = _validate_event_dates_interactive(
-                        single_event, post_identifier
+                        single_event, post_identifier, context=context
                     )
                     retry_needed = not is_valid
                 else:

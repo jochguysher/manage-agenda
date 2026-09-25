@@ -150,3 +150,23 @@ class TestReviewEvent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewEventSource(unittest.TestCase):
+    """The source message is named before the date menu, so it can be found again."""
+
+    def test_the_source_message_is_printed_before_the_menu(self):
+        ui = ConsoleUI()
+        event = {
+            "start": {"dateTime": "2024-01-15T10:00:00+00:00", "timeZone": "UTC"},
+            "end": {"dateTime": "2024-01-15T11:00:00+00:00", "timeZone": "UTC"},
+        }
+        context = {"subject": "Visite", "sender": "a@b.org", "date": "2026-09-24 14:33", "identifier": "m1"}
+        with patch("builtins.input", return_value="s"), patch("builtins.print") as mock_print:
+            ui.review_event(event, label="[m1] ", context=context)
+        printed = " ".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+        for piece in ("Visite", "a@b.org", "2026-09-24 14:33", "m1"):
+            self.assertIn(piece, printed)
+        with patch("builtins.input", return_value="s"), patch("builtins.print") as mock_print:
+            ui.review_event(event)
+        self.assertEqual(mock_print.call_count, 0)

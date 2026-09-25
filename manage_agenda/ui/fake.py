@@ -106,9 +106,11 @@ class ScriptedUI:
     def ask_multiline(self, text):
         return self._next("ask_multiline", {"text": text}, lambda: "")
 
-    def review_event(self, event, label=""):
+    def review_event(self, event, label="", context=None):
         answer = self._next(
-            "review_event", {"event": event, "label": label}, lambda: "accept"
+            "review_event",
+            {"event": event, "label": label, "context": context},
+            lambda: "accept",
         )
         if isinstance(answer, tuple):
             decision, edited = answer

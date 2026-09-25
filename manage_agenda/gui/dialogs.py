@@ -6,13 +6,10 @@ window closed) cancels the request, which raises UserCancelled in the worker.
 
 from __future__ import annotations
 
-import datetime
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -23,11 +20,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from manage_agenda.events import DATETIME_FORMAT
 from manage_agenda.gui.bridge import UIRequest
-from manage_agenda.gui.widgets import select_all_none_row, set_role
+from manage_agenda.gui.review_form import (  # noqa: F401 - to_/from_local_text re-exported
+    EventReviewForm,
+    from_local_text,
+    to_local_text,
+)
+from manage_agenda.gui.widgets import hint_label, primary, select_all_none_row
 from manage_agenda.i18n import t
-from manage_agenda.ui import label_for
+from manage_agenda.ui import describe_nature, describe_source, label_for
 
 
 class PromptDialog(QDialog):
@@ -228,63 +229,38 @@ class SelectEventsDialog(PromptDialog):
         return [self.events[row] for row in self.list.checked_rows()]
 
 
-def to_local_text(iso_value):
-    """An event dateTime (ISO 8601, usually UTC) shown as local time in DATETIME_FORMAT."""
-    if not iso_value:
-        return ""
-    try:
-        parsed = datetime.datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
-    except ValueError:
-        return str(iso_value)
-    if parsed.tzinfo is None:
-        return parsed.strftime(DATETIME_FORMAT)
-    return parsed.astimezone().strftime(DATETIME_FORMAT)
-
-
-def from_local_text(text):
-    """A DATETIME_FORMAT local time as an aware UTC ISO string; ValueError when malformed."""
-    naive = datetime.datetime.strptime(text.strip(), DATETIME_FORMAT)
-    return naive.astimezone().astimezone(datetime.timezone.utc).isoformat()
-
-
 class ReviewEventDialog(PromptDialog):
-    """The GUI's version of the s/r/y/m/d/h/i/f date menu: an editable form, Accept or
-    Retry (ask the LLM again). Times are shown and edited in local time; an edited time is
-    written back as UTC, the form adjust_event_times() produces, so the rest of the flow
-    sees exactly what it would after a terminal edit."""
+    """The GUI's version of the s/r/y/m/d/h/i/f date menu: the EventReviewForm, Accept or
+    Retry (ask the LLM again). The fields are reachable on the dialog itself (summary,
+    start, end, error...), as the main window and the tests use them."""
 
     def __init__(self, request, parent=None):
         super().__init__(request, parent)
         payload = request.payload
-        self.event_data = payload["event"]
         self._decision = "accept"
         self.setWindowTitle(f"{payload.get('label', '')}{t('events.review_title')}")
         self.setMinimumWidth(640)
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
-        self.summary = QLineEdit(self.event_data.get("summary") or "", self)
-        self.location = QLineEdit(self.event_data.get("location") or "", self)
-        self.description = QPlainTextEdit(self)
-        self.description.setPlainText(self.event_data.get("description") or "")
-        self._start_initial = to_local_text((self.event_data.get("start") or {}).get("dateTime"))
-        self._end_initial = to_local_text((self.event_data.get("end") or {}).get("dateTime"))
-        self.start = QLineEdit(self._start_initial, self)
-        self.end = QLineEdit(self._end_initial, self)
-        form.addRow(t("events.review_summary"), self.summary)
-        form.addRow(t("events.review_location"), self.location)
-        form.addRow(t("events.review_start"), self.start)
-        form.addRow(t("events.review_end"), self.end)
-        form.addRow("", QLabel(t("events.review_datetime_hint", format=DATETIME_FORMAT)))
-        form.addRow(t("events.review_description"), self.description)
-        layout.addLayout(form)
-        self.error = QLabel("", self)
-        set_role(self.error, "error")
-        layout.addWidget(self.error)
+        for line in (
+            describe_source(payload.get("context")),
+            describe_nature(payload.get("context")),
+        ):
+            if line:
+                layout.addWidget(hint_label(line, self))
+        self.form = EventReviewForm(self)
+        self.form.load(payload["event"])
+        layout.addWidget(self.form)
+        self.summary, self.location, self.description = (
+            self.form.summary,
+            self.form.location,
+            self.form.description,
+        )
+        self.start, self.end, self.error = self.form.start, self.form.end, self.form.error
 
         row = QHBoxLayout()
         self.retry = QPushButton(t("events.review_retry"), self)
-        self.accept_button = QPushButton(t("events.review_accept"), self)
+        self.accept_button = primary(QPushButton(t("events.review_accept"), self))
         cancel = QPushButton(t("gui.dialog.cancel"), self)
         self.retry.clicked.connect(self._retry)
         self.accept_button.clicked.connect(self._accept_edits)
@@ -296,44 +272,26 @@ class ReviewEventDialog(PromptDialog):
         row.addWidget(self.accept_button)
         layout.addLayout(row)
 
+    @property
+    def event_data(self):
+        return self.form.event_data
+
     def _retry(self):
         self._decision = "retry"
         self.accept()
 
     def _accept_edits(self):
-        try:
-            self.apply_edits()
-        except ValueError:
-            self.error.setText(t("events.review_invalid_datetime", format=DATETIME_FORMAT))
+        if not self.form.validate():
             return
         self._decision = "accept"
         self.accept()
 
     def apply_edits(self):
         """Write the form back into the event; ValueError on a malformed time."""
-        times = {}
-        for when, edit, initial in (
-            ("start", self.start, self._start_initial),
-            ("end", self.end, self._end_initial),
-        ):
-            text = edit.text().strip()
-            if text != initial.strip():
-                times[when] = from_local_text(text) if text else None
-        for when, value in times.items():
-            field = self.event_data.setdefault(when, {})
-            if value is None:
-                field.pop("dateTime", None)
-            else:
-                field["dateTime"] = value
-                field["timeZone"] = "UTC"
-        for key, edit in (("summary", self.summary), ("location", self.location)):
-            if edit.text() != (self.event_data.get(key) or ""):
-                self.event_data[key] = edit.text()
-        if self.description.toPlainText() != (self.event_data.get("description") or ""):
-            self.event_data["description"] = self.description.toPlainText()
+        return self.form.apply_edits()
 
     def value(self):
-        return self.event_data, self._decision
+        return self.form.event_data, self._decision
 
 
 DIALOGS = {

@@ -497,3 +497,47 @@ class TestMultiEventRetryPreservesDistinctDates(unittest.TestCase):
             [item["start"]["dateTime"] for item in event],
             ["2030-02-10", "2030-03-11"],
         )
+
+
+class TestMessageContext(unittest.TestCase):
+    """extraction.message_context(): what review_event() shows about the source message."""
+
+    def test_names_the_message_with_its_local_date_and_time(self):
+        from manage_agenda.extraction import message_context
+
+        text = "From: Christine <c@x.org>\nSubject: Visite\nMessage: ...\nMessage date: 2026-09-24\n"
+        when = datetime.datetime(2026, 9, 24, 14, 33, tzinfo=datetime.timezone.utc)
+        context = message_context(text, "m1", "Visite", when)
+        self.assertEqual(context["identifier"], "m1")
+        self.assertEqual(context["subject"], "Visite")
+        self.assertEqual(context["sender"], "Christine <c@x.org>")
+        self.assertEqual(context["date"], when.astimezone().strftime("%Y-%m-%d %H:%M"))
+
+    def test_survives_missing_pieces(self):
+        from manage_agenda.extraction import message_context
+
+        context = message_context("", None, None, None)
+        self.assertEqual(context, {"identifier": "", "subject": "", "sender": "", "date": ""})
+        naive = datetime.datetime(2026, 9, 24, 9, 5)
+        self.assertEqual(message_context("", "x", " s ", naive)["date"], "2026-09-24 09:05")
+        self.assertEqual(message_context("", "x", "s", "2026-09-24")["date"], "2026-09-24")
+
+
+class TestEventNature(unittest.TestCase):
+    def test_a_planned_cleaning_is_recognised_by_its_private_properties(self):
+        from manage_agenda.extraction import event_nature
+
+        cleaning = {
+            "summary": "NDU - Salle 1",
+            "extendedProperties": {
+                "private": {"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-09-27", "occupied_to": "2026-10-03"}
+            },
+        }
+        self.assertEqual(
+            event_nature(cleaning),
+            {"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-09-27", "occupied_to": "2026-10-03"},
+        )
+        self.assertEqual(event_nature({"summary": "extracted"}), {})
+        self.assertEqual(event_nature({"extendedProperties": {"private": {"ai_model_used": "m"}}}), {})
+        self.assertEqual(event_nature(None), {})
+

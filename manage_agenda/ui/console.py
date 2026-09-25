@@ -20,6 +20,7 @@ from manage_agenda.events import (
 )
 from manage_agenda.i18n import t
 from manage_agenda.interactive import select_many, select_one
+from manage_agenda.ui import describe_nature, describe_source
 
 
 class ConsoleUI:
@@ -54,7 +55,10 @@ class ConsoleUI:
                 break
         return "\n".join(lines)
 
-    def review_event(self, event, label=""):
+    def review_event(self, event, label="", context=None):
+        for line in (describe_source(context), describe_nature(context)):
+            if line:
+                print(line)
         decision = "accept"
         confirmed = False
         while not confirmed:
