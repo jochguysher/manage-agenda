@@ -201,3 +201,24 @@ def test_settings_save_keeps_the_saved_account_when_accounts_cannot_be_listed(qa
     saved = load_user_config()
     assert saved["calendar_account"] == list(CAL)
     assert saved["model"] == "m2" and saved["calendar"] == ["c1"]
+
+
+def test_settings_names_the_typed_calendar_ids_when_it_can(qapp, pump):
+    runner = JobRunner(Bridge())
+    screen = settings.SettingsScreen(runner)
+    save_user_config({"calendar_account": list(CAL), "calendar": ["c1", "c2"], "calendar_names": {"c1": "One"}})
+    with patch.object(settings, "load_rules", return_value=_rules()):
+        screen.refresh()
+    assert "One" in screen.calendar_names.text() and not screen.calendar_names.isHidden()
+
+    screen.calendar_ids.setText("c2")
+    assert screen.calendar_names.text() == "" and screen.calendar_names.isHidden()
+
+    api = MagicMock()
+    calendars = [{"id": "c1", "summary": "One"}, {"id": "c2", "summary": "Two"}]
+    with patch.object(settings, "fetch_calendars", return_value=(api, calendars)):
+        screen.load_calendars()
+        assert pump(lambda: not runner.is_busy())
+    assert "Two" in screen.calendar_names.text() and not screen.calendar_names.isHidden()
+    screen.calendars.item(0).setCheckState(screen.calendars.item(0).checkState().Checked)
+    assert screen.calendar_ids.text() == "c1, c2" and "One, Two" in screen.calendar_names.text()

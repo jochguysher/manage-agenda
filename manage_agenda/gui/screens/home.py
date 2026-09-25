@@ -34,6 +34,7 @@ from manage_agenda.gui.review_form import EventReviewForm, to_local_text
 from manage_agenda.gui.screens.base import Screen
 from manage_agenda.gui.widgets import (
     AccountPicker,
+    ElidedLabel,
     account_label,
     form_layout,
     hint_label,
@@ -49,12 +50,22 @@ from manage_agenda.sources import (
     load_handled_mail_state,
 )
 from manage_agenda.ui import describe_nature, describe_source
-from manage_agenda.user_config import load_user_config, saved_calendar_ids
+from manage_agenda.user_config import load_user_config, saved_calendar_ids, saved_calendar_names
 
 MAIL_SERVICES = ("gmail", "imap")
 MAX_ROWS = 80
 SETTING_SOURCE = "home/source"
 SETTING_REVIEW = "home/review"
+SHORT_ID_LENGTH = 24
+
+
+def short_id(value):
+    """A calendar id a person can still recognise when its name is not known: the first and
+    last characters of a long one (Google's are 90-character hashes), the whole of a short one."""
+    value = str(value)
+    if len(value) <= SHORT_ID_LENGTH:
+        return value
+    return f"{value[:10]}…{value[-8:]}"
 
 
 def tool_created(event):
@@ -184,7 +195,7 @@ class HomeScreen(Screen):
         mode_row.addWidget(self.review_mode)
         mode_row.addWidget(self.auto_mode)
         mode_row.addStretch(1)
-        self.destination = QLabel("", self)
+        self.destination = ElidedLabel("", self)
         form.addRow(t("gui.home.source"), self.source)
         form.addRow(t("gui.home.mode"), mode_row)
         form.addRow(t("gui.home.destination"), self.destination)
@@ -283,7 +294,7 @@ class HomeScreen(Screen):
         if self.rules is not None:
             self._restore_choices()
         self._update_mailbox_hint()
-        self.destination.setText(self._destination_text())
+        self._show_destination()
         self._update_ledger_summary()
 
     def _update_mailbox_hint(self, *_ignored):
@@ -320,9 +331,15 @@ class HomeScreen(Screen):
         account = self.saved.get("calendar_account")
         return tuple(account) if isinstance(account, list) else account
 
-    def _destination_text(self):
+    def _destination_text(self, full=False):
+        """The saved calendars and model in one line: each calendar by the name the tool has
+        learnt for it, else a shortened id (`full`: the ids as saved, for the tooltip)."""
         account = self.saved_calendar_account()
-        calendars = ", ".join(saved_calendar_ids(self.saved))
+        names = saved_calendar_names(self.saved)
+        ids = saved_calendar_ids(self.saved)
+        calendars = ", ".join(
+            calendar_id if full else names.get(calendar_id) or short_id(calendar_id) for calendar_id in ids
+        )
         if not account or not calendars:
             where = t("gui.home.no_calendar")
         else:
@@ -331,6 +348,12 @@ class HomeScreen(Screen):
             part for part in (self.saved.get("provider"), self.saved.get("model")) if part
         )
         return t("gui.home.destination_text", calendars=where, model=model or t("gui.home.model_default"))
+
+    def _show_destination(self):
+        """The destination line, never wider than the page: the label elides what does not
+        fit and its tooltip carries the saved ids in full."""
+        self.destination.setText(self._destination_text())
+        self.destination.setToolTip(self._destination_text(full=True))
 
     def _update_ledger_summary(self):
         messages, events, last, _recorded = ledger_stats()
@@ -471,6 +494,10 @@ class HomeScreen(Screen):
             self.planned_message.setText(result)
             return
         self.rows = list(result)
+        # Listing the calendars taught their names (connections._eligible_calendars): the
+        # destination line can now name them instead of showing shortened ids.
+        self.saved = load_user_config()
+        self._show_destination()
         _messages, _events, _last, recorded = ledger_stats()
         self.table.setRowCount(len(self.rows))
         for index, row in enumerate(self.rows):

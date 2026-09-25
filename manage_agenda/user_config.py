@@ -71,3 +71,31 @@ def saved_calendar_ids(config_data):
     if value:
         return [str(value)]
     return []
+
+
+def saved_calendar_names(config_data):
+    """The calendar names the tool has learnt, as {calendar id: name}: the "calendar_names"
+    key remember_calendar_names() maintains. {} when none is known yet."""
+    value = config_data.get("calendar_names")
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(name) for key, name in value.items() if key and name}
+
+
+def remember_calendar_names(calendars, path=None):
+    """Keep the names of `calendars` (dicts with "id" and "summary", as the Google API lists
+    them) under "calendar_names", merged with what is already known, so a screen can show
+    a name for a saved calendar id without connecting to the account. The merged mapping;
+    nothing is written when `calendars` teaches nothing new."""
+    learnt = {
+        str(calendar["id"]): str(calendar.get("summary") or "")
+        for calendar in calendars or []
+        if isinstance(calendar, dict) and calendar.get("id") and calendar.get("summary")
+    }
+    if not learnt:
+        return saved_calendar_names(load_user_config(path))
+    known = saved_calendar_names(load_user_config(path))
+    merged = {**known, **learnt}
+    if merged != known:
+        update_user_config({"calendar_names": merged}, path)
+    return merged

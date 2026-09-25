@@ -3,7 +3,8 @@ that give every screen the same layout and the theme's roles (see gui/theme.py).
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QPainter, QPalette
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
 )
 
@@ -51,6 +53,48 @@ def primary(button):
     """Mark `button` as the screen's main action: the theme colours it with the accent."""
     button.setProperty("primary", True)
     return button
+
+
+ELIDED_MIN_CHARS = 12
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that shortens its text to the width it is given (an ellipsis in the
+    middle) instead of demanding that width from its layout - a plain QLabel with a long
+    calendar id widens the whole page. text() is still the full text, which is also the
+    tooltip. Meant for a value in a form row, where a wrapped label would be clipped."""
+
+    def __init__(self, text="", parent=None, mode=Qt.TextElideMode.ElideMiddle):
+        super().__init__(parent)
+        self.mode = mode
+        # Expanding, with a size hint of a few characters: takes the width the layout has,
+        # never asks for more (form_layout() only grows expanding fields).
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self):
+        return QSize(self.fontMetrics().averageCharWidth() * ELIDED_MIN_CHARS, super().minimumSizeHint().height())
+
+    def sizeHint(self):
+        return self.minimumSizeHint()
+
+    def elided_text(self):
+        """What is drawn: the text shortened to the current width."""
+        return self.fontMetrics().elidedText(self.text(), self.mode, self.contentsRect().width())
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        # QPainter starts with a black pen: take the colour the label would use itself (its
+        # palette's foreground role, which a `role` rule in the theme's stylesheet sets).
+        group = QPalette.ColorGroup.Active if self.isEnabled() else QPalette.ColorGroup.Disabled
+        painter.setPen(self.palette().color(group, self.foregroundRole()))
+        painter.drawText(
+            self.contentsRect(), int(self.alignment()) | Qt.TextFlag.TextSingleLine, self.elided_text()
+        )
 
 
 def load_rules():

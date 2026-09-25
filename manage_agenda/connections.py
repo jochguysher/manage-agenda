@@ -11,6 +11,7 @@ from manage_agenda.compat import install_socialmodules_shims
 from manage_agenda.exceptions import CalendarAccountChoiceRequired, CalendarError
 from manage_agenda.i18n import t
 from manage_agenda.ui import echo, get_ui, select_many, select_one
+from manage_agenda.user_config import remember_calendar_names
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,12 @@ def _eligible_calendars(calendar_api):
     ]
     if not eligible_calendars:
         raise CalendarError(t("connections.no_writable_calendars_found"))
+    # Every listing teaches the calendars' names: kept in config.yaml so the window can name
+    # a saved calendar id before any connection. A failed write never spoils the listing.
+    try:
+        remember_calendar_names(eligible_calendars)
+    except OSError as error:
+        logger.warning(f"Could not remember the calendar names: {error}")
     return eligible_calendars
 
 

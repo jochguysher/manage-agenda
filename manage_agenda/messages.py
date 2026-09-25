@@ -1644,6 +1644,10 @@ TRANSLATIONS = {
         "en": 'Comma-separated calendar ids (filled from the list above)',
         "fr": 'Identifiants de calendrier séparés par des virgules (remplis depuis la liste ci-dessus)',
     },
+    'gui.settings.calendar_names': {
+        "en": 'Named: {names}',
+        "fr": 'Soit : {names}',
+    },
     'gui.settings.language': {
         "en": 'Interface language',
         "fr": "Langue de l'interface",

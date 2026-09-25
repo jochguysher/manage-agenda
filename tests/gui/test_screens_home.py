@@ -9,7 +9,7 @@ from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.main_window import MainWindow
 from manage_agenda.gui.persist import gui_settings
 from manage_agenda.gui.screens import home
-from manage_agenda.gui.screens.home import HomeScreen, ledger_stats, tool_created
+from manage_agenda.gui.screens.home import HomeScreen, ledger_stats, short_id, tool_created
 from manage_agenda.gui.screens.settings import SettingsScreen
 from manage_agenda.sources import remember_handled_mail
 from manage_agenda.ui import get_ui
@@ -304,3 +304,38 @@ def test_the_proposal_names_the_source_message(qapp):
     lines = screen.review_label.text().splitlines()
     assert len(lines) == 2 and "Entretien ménager" in lines[0]
     assert "Salle 1" in lines[1] and "2026-09-27" in lines[1] and "2026-10-03" in lines[1]
+
+
+LONG_ID = "12eb0a1d67f5bf432b61187207dd25c826931bade21ebdc904f990947d20e41b@group.calendar.google.com"
+
+
+def test_destination_names_the_calendar_and_never_widens_the_page(qapp):
+    save_user_config({"calendar_account": list(CAL), "calendar": [LONG_ID], "provider": "ollama", "model": "m"})
+    _runner, screen = _home(qapp)
+    # No name known yet: a shortened id, the full one in the tooltip.
+    assert short_id(LONG_ID) in screen.destination.text() and LONG_ID not in screen.destination.text()
+    assert LONG_ID in screen.destination.toolTip()
+    assert short_id("c1") == "c1"
+    # The label asks its layout for a few characters, whatever its text.
+    assert screen.destination.minimumSizeHint().width() < screen.destination.fontMetrics().horizontalAdvance(LONG_ID)
+    assert screen.destination.sizeHint().width() == screen.destination.minimumSizeHint().width()
+
+    save_user_config({"calendar_account": list(CAL), "calendar": [LONG_ID], "calendar_names": {LONG_ID: "Salle"}})
+    screen.refresh()
+    assert "Salle" in screen.destination.text() and short_id(LONG_ID) not in screen.destination.text()
+    assert LONG_ID in screen.destination.toolTip()
+
+
+def test_a_listing_updates_the_destination_with_the_learnt_names(qapp, pump):
+    save_user_config({"calendar_account": list(CAL), "calendar": ["c1"]})
+    runner, screen = _home(qapp)
+    assert "c1" in screen.destination.text()
+
+    def listing(_rules, _account, _ids):
+        save_user_config({"calendar_account": list(CAL), "calendar": ["c1"], "calendar_names": {"c1": "One"}})
+        return []
+
+    with patch.object(home, "fetch_planned", side_effect=listing):
+        screen.refresh_planned()
+        assert pump(lambda: not runner.is_busy())
+    assert "One" in screen.destination.text() and screen.destination.text().count("c1") == 0

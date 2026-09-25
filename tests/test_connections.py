@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from socialModules.configMod import safe_get, select_from_list
 
 from manage_agenda.connections import (
+    _eligible_calendars,
     authorize,
     describe_auth_failure,
     prepare_calendar,
@@ -454,3 +455,26 @@ class TestPrepareCalendar(unittest.TestCase):
         result = prepare_calendar(args, rules=self.rules, config_path=self.config_path)
 
         self.assertFalse(result)
+
+
+class TestCalendarListingRemembersNames(unittest.TestCase):
+    """_eligible_calendars() keeps the names it lists in config.yaml (the isolated one)."""
+
+    @patch("manage_agenda.connections.select_many")
+    def test_select_calendars_teaches_the_names(self, mock_select_many):
+        calendars = [
+            {"id": "c1", "summary": "One", "accessRole": "owner"},
+            {"id": "ro", "summary": "Read only", "accessRole": "reader"},
+        ]
+        api = MagicMock()
+        api.getCalendarList.return_value = calendars
+        mock_select_many.return_value = [calendars[0]]
+        select_calendars(api, args=Args(interactive=True))
+        self.assertEqual(load_user_config().get("calendar_names"), {"c1": "One"})
+
+    def test_a_failed_write_does_not_spoil_the_listing(self):
+        api = MagicMock()
+        calendars = [{"id": "c1", "summary": "One", "accessRole": "owner"}]
+        api.getCalendarList.return_value = calendars
+        with patch("manage_agenda.connections.remember_calendar_names", side_effect=OSError("ro")):
+            self.assertEqual(_eligible_calendars(api), calendars)
