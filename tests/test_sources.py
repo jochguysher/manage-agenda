@@ -978,3 +978,48 @@ class TestAddEventsCliPreselected(unittest.TestCase):
         add_events_cli(Args(interactive=True), rules, selected="gmail1")
         mock_resolve.assert_not_called()
         mock_run.assert_called_once_with(Args(interactive=True), mock_llm.return_value, "gmail1", rules=rules)
+
+    @patch("manage_agenda.sources.print_events_summary")
+    @patch("manage_agenda.sources.process_email_cli")
+    @patch("manage_agenda.sources.get_add_sources")
+    @patch("manage_agenda.sources.select_llm")
+    def test_add_events_cli_non_interactive_prints_summary(
+        self, mock_select_llm, mock_get_sources, mock_process_email, mock_print_summary
+    ):
+        """Without -i, add_events_cli lists what the run created."""
+        from manage_agenda.sources import add_events_cli
+
+        args = Args(interactive=False, source="gmail", verbose=False)
+        mock_get_sources.return_value = (["gmail"], [])
+        mock_select_llm.return_value = MagicMock()
+        added_events = [{"summary": "Test Event"}]
+        mock_process_email.return_value = added_events
+
+        result = add_events_cli(args, rules=MagicMock())
+
+        self.assertEqual(result, added_events)
+        mock_print_summary.assert_called_once_with(added_events)
+
+    @patch("manage_agenda.sources.print_events_summary")
+    @patch("manage_agenda.sources.process_email_cli")
+    @patch("manage_agenda.sources.get_add_sources")
+    @patch("manage_agenda.sources.select_llm")
+    def test_add_events_cli_interactive_does_not_print_summary(
+        self, mock_select_llm, mock_get_sources, mock_process_email, mock_print_summary
+    ):
+        """With -i the events were reviewed one by one: no summary at the end."""
+        from manage_agenda.sources import add_events_cli
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        args = Args(interactive=True, source=None, verbose=False)
+        mock_get_sources.return_value = (["gmail"], [])
+        mock_select_llm.return_value = MagicMock()
+        added_events = [{"summary": "Test Event"}]
+        mock_process_email.return_value = added_events
+
+        with use_ui(ScriptedUI([("choose_one", 0)])):
+            result = add_events_cli(args, rules=MagicMock())
+
+        self.assertEqual(result, added_events)
+        mock_print_summary.assert_not_called()

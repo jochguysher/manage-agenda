@@ -9,7 +9,7 @@ from socialModules.moduleContent import display_posts
 
 from manage_agenda import connections
 from manage_agenda.config import config
-from manage_agenda.connections import select_calendar
+from manage_agenda.connections import select_calendar_from_all_rules
 from manage_agenda.i18n import t
 from manage_agenda.ui import echo, get_ui
 
@@ -41,7 +41,7 @@ def _default_naive_timezone():
     try:
         return pytz.timezone(config.DEFAULT_TIMEZONE)
     except pytz.exceptions.UnknownTimeZoneError:
-        logger.error(f"Invalid timezone '{config.DEFAULT_TIMEZONE}' in config. Falling back to UTC.")
+        logger.error("Invalid timezone '%s' in config. Falling back to UTC.", config.DEFAULT_TIMEZONE)
         return pytz.utc
 
 
@@ -78,7 +78,7 @@ def _parse_datetime_to_utc(dt_str, tz_name=None):
         try:
             dt_obj = datetime.datetime.strptime(normalized_str, DATETIME_FORMAT)
         except ValueError as parse_err:
-            logger.error(f"Invalid datetime format: '{dt_str}'. Error: {parse_err}")
+            logger.error("Invalid datetime format: '%s'. Error: %s", dt_str, parse_err)
             return None
 
     if dt_obj.tzinfo is None:
@@ -107,11 +107,11 @@ def _parse_event_times(event):
 
     current_start = _parse_datetime_to_utc(start_str, start_tz)
     if start_str and current_start is None:
-        echo(t("events.could_not_parse_start_time"))
+        logger.warning("Could not parse start time, using empty value")
 
     current_end = _parse_datetime_to_utc(end_str, end_tz)
     if end_str and current_end is None:
-        echo(t("events.could_not_parse_end_time"))
+        logger.warning("Could not parse end time, using empty value")
 
     return current_start, current_end
 
@@ -319,29 +319,38 @@ def process_calendar_events(
         None
     """
     # Initialize API and calendar
-    api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
+
     if getattr(args, "source", None):
+        api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
         selected_calendar = args.source
     else:
-        selected_calendar = select_calendar(api_cal, title=t("events.select_calendar_title"), args=args)
+        api_cal, selected_calendar = select_calendar_from_all_rules(
+            args, title=t("events.select_calendar_title")
+        )
 
     # Set the active calendar using socialModules method
     api_cal.setActive(selected_calendar)
 
-    today = datetime.datetime.now()
-    today = datetime.datetime.now(datetime.timezone.utc)
+    # Determine the start date for fetching events
+    start_date_str = getattr(args, "start_date", None)
+    if start_date_str:
+        parsed = dateparser.parse(start_date_str)
+        if parsed is not None:
+            today = parsed.astimezone(datetime.timezone.utc)
+        else:
+            logger.warning("Could not parse start_date '%s', falling back to today.", start_date_str)
+            today = datetime.datetime.now(datetime.timezone.utc)
+    else:
+        today = datetime.datetime.now(datetime.timezone.utc)
 
     # Fetch events from calendar using socialModules methods
     all_posts = []
     try:
         api_cal.setPostsType("posts")
-        api_cal.setPosts("2008-01-01")
+        api_cal.setPosts(date=today)
         all_posts = api_cal.getPosts()
     except Exception:
         all_posts = []
-
-    today = datetime.datetime.now()
-    today = datetime.datetime.now(datetime.timezone.utc)
 
     # If interactive, present all fetched posts (tests expect interactive flows
     # to show items regardless of date)
@@ -351,7 +360,7 @@ def process_calendar_events(
         future_events = []
         for post in all_posts:
             post_date = api_cal.getPostDate(post)
-            echo(t("events.date_label", value=post_date))
+            logger.debug("Date: %s", post_date)
 
             if not isinstance(post_date, str):
                 if isinstance(post, dict):
@@ -413,14 +422,15 @@ def process_calendar_events(
 
     # Handle destination calendar if needed
     if destination_needed:
-        my_calendar_dst = connections.select_api(
-            args, "gcalendar", rules=None, title=t("events.select_rule_lower_title")
-        )
+
         if getattr(args, "destination", None):
+            my_calendar_dst = connections.select_api(
+                args, "gcalendar", rules=None, title=t("events.select_rule_lower_title")
+            )
             my_calendar = args.destination
         else:
-            my_calendar = select_calendar(
-                my_calendar_dst, title=t("events.select_destination_calendar"), args=args
+            my_calendar_dst, my_calendar = select_calendar_from_all_rules(
+                args, title=t("events.select_destination_calendar")
             )
     else:
         my_calendar = None
@@ -470,12 +480,12 @@ def move_events_cli(args):
 
 def update_event_status_cli(args):
     """Update event status from busy to available for selected events."""
-    api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
 
     if args.source:
+        api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
         my_calendar = args.source
     else:
-        my_calendar = select_calendar(api_cal)
+        api_cal, my_calendar = select_calendar_from_all_rules(args, title=t("events.select_calendar_title"))
 
     api_cal.setActive(my_calendar)
     api_cal.setPosts(max_results=None, event_types="default", show_active=False)
@@ -527,3 +537,130 @@ def update_event_status_cli(args):
 def clean_events_cli(args):
     """Combined command to clean calendar entries (select between copy or delete)."""
     process_calendar_events(args, "clean", clean_action, destination_needed=True)
+
+
+def _parse_datetime_value(val):
+    """Parse a datetime value (string, datetime, or date) into a (datetime, is_date_only) tuple."""
+    dt = None
+    is_date_only = False
+    if val:
+        if isinstance(val, datetime.datetime):
+            dt = val
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
+        elif isinstance(val, datetime.date):
+            dt = datetime.datetime(val.year, val.month, val.day)
+            is_date_only = True
+        else:
+            val_str = str(val).strip()
+            import re
+
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", val_str):
+                try:
+                    d = datetime.date.fromisoformat(val_str)
+                    dt = datetime.datetime(d.year, d.month, d.day)
+                    is_date_only = True
+                except ValueError:
+                    pass
+
+            if dt is None:
+                try:
+                    dt_parsed = datetime.datetime.fromisoformat(val_str)
+                    if dt_parsed.tzinfo is not None:
+                        dt_parsed = dt_parsed.astimezone()
+                    dt = dt_parsed
+                except ValueError:
+                    pass
+
+            if dt is None:
+                try:
+                    dt_parsed = dateparser.parse(val_str)
+                    if dt_parsed is not None:
+                        if dt_parsed.tzinfo is not None:
+                            dt_parsed = dt_parsed.astimezone()
+                        dt = dt_parsed
+                except Exception:
+                    pass
+    return dt, is_date_only
+
+
+def format_event_time_range(start_val, end_val):
+    """Format event start and end times into a readable range string."""
+    start_dt, start_is_date = _parse_datetime_value(start_val)
+    end_dt, end_is_date = _parse_datetime_value(end_val)
+
+    if start_dt and end_dt:
+        if start_is_date and end_is_date:
+            if start_dt.date() == end_dt.date():
+                res = start_dt.strftime("%Y-%m-%d")
+            else:
+                res = f"{start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}"
+        elif start_dt.date() == end_dt.date():
+            res = f"{start_dt.strftime('%Y-%m-%d %H:%M')} to {end_dt.strftime('%H:%M')}"
+        else:
+            res = f"{start_dt.strftime('%Y-%m-%d %H:%M')} to {end_dt.strftime('%Y-%m-%d %H:%M')}"
+    elif start_dt:
+        if start_is_date:
+            res = start_dt.strftime("%Y-%m-%d")
+        else:
+            res = start_dt.strftime("%Y-%m-%d %H:%M")
+    elif start_val and end_val:
+        res = f"{start_val} to {end_val}"
+    elif start_val:
+        res = str(start_val)
+    elif end_val:
+        res = str(end_val)
+    else:
+        res = ""
+    return res
+
+
+def format_event_summary(event):
+    """Format a single event summary line for display."""
+    summary = event.get("summary") or "(untitled)"
+    start = event.get("start", {})
+    end = event.get("end", {})
+    start_val = (
+        start.get("dateTime") or start.get("date") if isinstance(start, dict) else None
+    )
+    end_val = (
+        end.get("dateTime") or end.get("date") if isinstance(end, dict) else None
+    )
+    time_str = format_event_time_range(start_val, end_val)
+    if time_str:
+        formatted = f"- {summary} ({time_str})"
+    else:
+        formatted = f"- {summary}"
+    return formatted
+
+
+def _get_event_sort_key(event):
+    """Return a sort key tuple (datetime, summary) for an event based on its start date."""
+    if not isinstance(event, dict):
+        return (datetime.datetime.max.replace(tzinfo=datetime.timezone.utc), "")
+    start = event.get("start", {})
+    start_val = (
+        start.get("dateTime") or start.get("date") if isinstance(start, dict) else None
+    )
+    dt, _ = _parse_datetime_value(start_val)
+    if dt is None:
+        dt_key = datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
+    else:
+        dt_key = dt.astimezone(datetime.timezone.utc)
+    summary = str(event.get("summary") or "")
+    return (dt_key, summary)
+
+
+def print_events_summary(events):
+    """Print a summary list of added events to standard output, sorted by start date."""
+    output_lines = [t("events.summary_title")]
+    if events:
+        sorted_events = sorted(events, key=_get_event_sort_key)
+        for event in sorted_events:
+            output_lines.append(format_event_summary(event))
+    else:
+        output_lines.append(t("events.summary_none"))
+    for line in output_lines:
+        echo(line)
+    return output_lines
+

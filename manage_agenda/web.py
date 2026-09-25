@@ -6,8 +6,6 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from manage_agenda.i18n import t
-
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "manage_agenda")
@@ -122,7 +120,7 @@ def reduce_html(url, post, force_refresh=False):
         force_refresh: If True, bypass cache comparison and return full content
     """
     if not post or not post.strip():
-        logger.warning(f"Empty content received for {url}")
+        logger.warning("Empty content received for %s", url)
         return None
 
     if not os.path.exists(CACHE_DIR):
@@ -134,13 +132,13 @@ def reduce_html(url, post, force_refresh=False):
     cached_file_path = os.path.join(CACHE_DIR, safe_filename)
 
     new_html = post
-    logger.debug(f"Post: {post}")
+    logger.debug("Post: %s", post)
 
     soup = BeautifulSoup(new_html, "html.parser")
 
     # Detect error pages
     if is_error_content(soup):
-        logger.warning(f"Error page detected for {url}")
+        logger.warning("Error page detected for %s", url)
         return None
 
     # Extract relevant script content before they are decomposed
@@ -261,11 +259,9 @@ def reduce_html(url, post, force_refresh=False):
 
     # Whole-page dumps: debug diagnostics, not the interface - they went to stdout on every
     # URL, which a GUI's log panel could not absorb. The log file gets them at DEBUG (-v).
-    logger.debug(t("web.orig_debug", result=result))
-    logger.debug(t("web.end_orig_debug"))
+    logger.debug("Orig: %s", result)
     result = newResult
-    logger.debug(t("web.res_debug", result=result))
-    logger.debug(t("web.end_res_debug"))
+    logger.debug("Res: %s", result)
 
     # if extra_script_data:
     #     result = f"{result}\n\n--- Extra Data Found in Scripts ---\n{extra_script_data}"

@@ -143,14 +143,14 @@ def get_event_from_llm(model, prompt, post_id, verbose=False, debug_log_extracti
             event = vcal_json
             json_error_occurred = False
         except json.JSONDecodeError as error:
-            logger.error(f"Invalid JSON in vCal data: {vcal_json}")
-            logger.error(f"Error: {error}")
+            logger.error("Invalid JSON in vCal data: %s", vcal_json)
+            logger.error("Error: %s", error)
         except SyntaxError as error:
-            logger.error(f"Syntax error: {vcal_json}")
-            logger.error(f"Error: {error}")
+            logger.error("Syntax error: %s", vcal_json)
+            logger.error("Error: %s", error)
         except ValueError as error:
-            logger.error(f"Value error: {vcal_json}")
-            logger.error(f"Error: {error}")
+            logger.error("Value error: %s", vcal_json)
+            logger.error("Error: %s", error)
 
     if memory_error_occurred or json_error_occurred:
         event = None
@@ -205,7 +205,7 @@ def get_event_from_llm_with_retry(model, prompt, post_id, args):
             source = None if args.interactive else model.model_name
             if not args.interactive:
                 echo(t("extraction.trying_lighter_model"))
-            echo(t("extraction.source_debug", source=source))
+            logger.debug("Source: %s", source)
             new_model = select_llm(_with_source(args, source))
             if new_model:
                 model = new_model
@@ -501,6 +501,8 @@ def _process_event_with_llm_and_calendar(
                 return None, None
         else:
             events = list(event)
+            if not events:
+                return None, None
             api_dst, selected_calendars = _selected_calendar(
                 args, rules, title=events[0].get("summary") or t("extraction.event_fallback_title")
             )
@@ -617,11 +619,11 @@ def _process_event_with_llm_and_calendar(
                     success = True
                     write_file(file_name, json.dumps(single_event), enabled=getattr(args, "debug_log_extractions", False))
 
-        echo(t("extraction.success_debug", success=success))
+        logger.debug("Success: %s", success)
         if success:
             if args.verbose:
-                echo(t("extraction.events_debug", events=events))
-                echo(t("extraction.results_debug", results=calendar_results))
+                logger.debug("Events: %s", events)
+                logger.debug("Results: %s", calendar_results)
             return events, calendar_results
         return None, None
     return None, None
@@ -1264,7 +1266,7 @@ def _publish_event_to_calendar(
     try:
         return _insert(event)
     except googleapiclient.errors.HttpError as error:
-        logger.error(f"Error creating calendar event: {error}")
+        logger.error("Error creating calendar event: %s", error)
         if "Invalid time zone definition for end time'" in str(error):
             logger.info(
                 "Detected invalid timezone definition for end time. Correcting event timezones and retrying."
@@ -1273,7 +1275,7 @@ def _publish_event_to_calendar(
             try:
                 return _insert(event)
             except Exception as retry_error:
-                logger.error(f"Retry after timezone correction failed: {retry_error}")
+                logger.error("Retry after timezone correction failed: %s", retry_error)
     return False, None
 
 

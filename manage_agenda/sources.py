@@ -22,6 +22,7 @@ from manage_agenda.connections import (
     select_calendar_account,
     select_rule_interactive,
 )
+from manage_agenda.events import print_events_summary
 from manage_agenda.exceptions import CalendarAccountChoiceRequired
 from manage_agenda.extraction import (
     LEDGER_EVENT_END_MARGIN_DAYS,
@@ -69,6 +70,7 @@ class Args:
     # once per add_events_cli() call to enforce debug_log_retention_days.
     debug_log_extractions: bool = False
     debug_log_retention_days: int = 7
+    start_date: str | None = None
 
 
 def get_add_sources(rules=None):
@@ -2111,9 +2113,9 @@ def _get_post_datetime_and_diff(post_date):
         now_aware = datetime.datetime.now(madrid_tz)
 
         time_difference = now_aware - post_date_time
-        logger.debug(f"Date: {post_date_time} Diff: {time_difference.days}")
+        logger.debug("Date: %s Diff: %s", post_date_time, time_difference.days)
     except Exception as e:
-        logger.error(f"Error processing post date: {e}")
+        logger.error("Error processing post date: %s", e)
         time_difference = datetime.timedelta(0)
 
     return post_date_time, time_difference
@@ -2132,32 +2134,31 @@ def _delete_email(args, api_src, post_id, source_name, rules=None):
         label = None
         for attempt in range(max_retries + 1):
             try:
-                echo(t("sources.service_debug", service=api_src.service.lower()))
+                logger.debug("Service: %s", api_src.service.lower())
                 res = ""
                 if "imap" not in api_src.service.lower():
-                    echo(t("sources.label_debug", label=api_src.getChannel()))
-                    logger.info(f"label: {api_src.getChannel()}")
+                    logger.info("label: %s", api_src.getChannel())
                     folder = api_src.getChannel()
                     label = api_src.getLabels(folder)
-                    logger.info(f"label: {label}")
+                    logger.info("Label: %s", label)
                     res = api_src.modifyLabels(post_id, label[0], None)
-                    logger.info(f"Label removed from email {post_id}.")
+                    logger.info("Label removed from email %s", post_id)
                 else:
                     label = api_src.getChannel()
                     api_src.getClient().select(label)
                     res = api_src.deletePostId(post_id)
-                    logger.info(f"State: {api_src.getClient().state}")
-                logger.info(f"Res: {res}")
+                    logger.info("State: %s", api_src.getClient().state)
+                logger.info("Res: %s", res)
                 if "Fail!" not in res:
-                    logger.info(f"Email {post_id} processed successfully.")
+                    logger.info("Email %s processed successfully", post_id)
                     return  # Success
             except Exception as e:
-                logger.warning(f"Attempt {attempt + 1} of {max_retries + 1} failed: {e}")
+                logger.warning("Attempt %d of %d failed: %s", attempt + 1, max_retries + 1, e)
                 if attempt < max_retries:
                     logger.info("Retrying to connect to the email server...")
 
                     rules = rules or moduleRules.from_config()
-                    logger.info(f"Source: {source_name}")
+                    logger.info("Source: %s", source_name)
                     source_details = rules.more.get(source_name, {})
                     api_src = rules.readConfigSrc("", source_name, source_details)
                     if label:
@@ -2214,7 +2215,7 @@ def _process_common_flow(
     """
     from manage_agenda.exceptions import CalendarError, LLMError
 
-    processed_any_event = False
+    added_events = []
     for i, item in enumerate(items):
         finished = False
         calendar_result = None
@@ -2257,11 +2258,16 @@ def _process_common_flow(
             except (LLMError, CalendarError) as error:
                 echo(error)
                 echo(t("sources.stopping_scan"))
-                return processed_any_event
+                return added_events
             finished = True
 
             if processed_event:
-                processed_any_event = True
+                if isinstance(processed_event, list):
+                    added_events.extend(processed_event)
+                elif isinstance(processed_event, dict):
+                    added_events.append(processed_event)
+                else:
+                    added_events.append({"summary": post_title})
                 # 6. Post-process
                 if item_cleaner:
                     item_cleaner(item, i, post_id)
@@ -2275,12 +2281,12 @@ def _process_common_flow(
             if finished and on_item_done:
                 on_item_done(item, i, calendar_result)
 
-    return processed_any_event
+    return added_events
 
 
 def process_txt_cli(args, model, source_name=None, rules=None):
     """Processes txt files and creates calendar events."""
-
+    res = []
     if not source_name:
         # Only ask with -i: without it, every *.txt under msg_txt_dir() is processed, which
         # is what an empty answer meant anyway (and what a headless run can only mean).
@@ -2304,8 +2310,6 @@ def process_txt_cli(args, model, source_name=None, rules=None):
             else:
                 post_id = post[0]
 
-            # print(f"Post id: {post_id}")
-            # print(f"Post id: {post_id}")
             lines_txt = post[1].split("\n")
             import re
 
@@ -2336,7 +2340,7 @@ def process_txt_cli(args, model, source_name=None, rules=None):
                 title = next((i for i, s in enumerate(lines_txt) if "Subject: " in s), -1)
             else:
                 title = lines_txt[0]
-            logger.info(f"Extracted info. PostId: {post_id} Title: {title} Date: {date}")
+            logger.info("Extracted info. PostId: %s Title: %s Date: %s", post_id, title, date)
             return post_id, title, date, None, 0
 
         def content_extractor(post, i, post_date_time, post_title):
@@ -2358,15 +2362,15 @@ def process_txt_cli(args, model, source_name=None, rules=None):
         def item_cleaner(post, i, post_id):
             pass
 
-        return _process_common_flow(
+        res = _process_common_flow(
             args, model, posts, metadata_extractor, content_extractor, item_cleaner, rules=rules
         )
-    return False  # Default return if something went wrong before the main logic
+    return res
 
 
 def process_email_cli(args, model, selected_source=None, rules=None):
     """Processes emails and creates calendar events."""
-
+    res = []
     rules = rules or moduleRules.from_config()
     source_details = {}
     if selected_source:
@@ -2541,7 +2545,7 @@ def process_email_cli(args, model, selected_source=None, rules=None):
 
         from manage_agenda.scheduling import message_age_limit_days
 
-        return _process_common_flow(
+        res = _process_common_flow(
             args,
             model,
             posts,
@@ -2552,14 +2556,14 @@ def process_email_cli(args, model, selected_source=None, rules=None):
             on_item_done=on_item_done,
             max_message_age_days=message_age_limit_days(source_details),
         )
-    return False  # Default return if something went wrong before the main logic
+    return res
 
 
 def _get_pages_from_urls(args, urls):
 
     page = moduleHtml.moduleHtml()
     if args.verbose:
-        echo(t("sources.urls_debug", urls=urls))
+        logger.debug("Urls: %s", urls)
     page.setUrl(urls)
     page.setApiPosts()
     posts = page.getPosts()
@@ -2578,7 +2582,7 @@ def _get_links_from_notes():
 
         notes_dir = os.path.expanduser("~/notes")
         if not os.path.exists(notes_dir):
-            logger.warning(f"Notes directory {notes_dir} does not exist.")
+            logger.warning("Notes directory %s does not exist", notes_dir)
             return {}
 
         manager = NoteManager(storage_dir=notes_dir)
@@ -2599,7 +2603,7 @@ def _get_links_from_notes():
         logger.warning("note_app not found. Cannot extract links from notes.")
         return {}
     except Exception as e:
-        logger.error(f"Error extracting links from notes: {e}")
+        logger.error("Error extracting links from notes: %s", e)
         return {}
 
 
@@ -2617,10 +2621,10 @@ def process_web_cli(args, model, urls=None, force_refresh=False, rules=None):
             if not url_to_notes:
                 echo(t("sources.no_links_found"))
                 return False
-            echo(t("sources.found_notes", url_to_notes=url_to_notes))
+            logger.debug("Found notes: %s", url_to_notes)
             urls = list(url_to_notes.keys())
-            echo(t("sources.found_total_links", count=len(urls)))
-            echo(t("sources.found_links", urls=urls))
+            logger.debug("Found total of links: %d", len(urls))
+            logger.debug("Found links: %s", urls)
         else:
             urls = urls_input
 
@@ -2701,9 +2705,9 @@ def resolve_add_source(args, rules=None):
     rules = rules or moduleRules.from_config()
     sources, more_options = get_add_sources(rules=rules)
     if args.verbose:
-        echo(t("sources.source_debug", source=args.source))
-        logger.debug(f"Sources: {sources}")
-        logger.debug(f"More options: {more_options}")
+        logger.debug("Source: %s", args.source)
+        logger.debug("Sources: %s", sources)
+        logger.debug("More options: %s", more_options)
     matches = []
     if args.source:
         matches = [item for item in sources if args.source in item]
@@ -2730,16 +2734,13 @@ def run_add_source(args, model, selected, rules=None):
         url_list = None
         if isinstance(selected, str) and "http" in selected:
             url_list = selected.split(" ")
-        process_web_cli(args, model, urls=url_list, force_refresh=args.force_refresh, rules=rules)
-    elif hasattr(selected, "__iter__") and (
-        ("text" in str(selected)) or os.path.exists(str(selected))
-    ):
+        return process_web_cli(args, model, urls=url_list, force_refresh=args.force_refresh, rules=rules)
+    if hasattr(selected, "__iter__") and (("text" in str(selected)) or os.path.exists(str(selected))):
         file_list = None
         if isinstance(selected, str) and "." in selected:
             file_list = selected.split(" ")
-        process_txt_cli(args, model, source_name=file_list, rules=rules)
-    else:
-        process_email_cli(args, model, selected_source=selected, rules=rules)
+        return process_txt_cli(args, model, source_name=file_list, rules=rules)
+    return process_email_cli(args, model, selected_source=selected, rules=rules)
 
 
 def add_events_cli(args, rules=None, selected=None):
@@ -2762,5 +2763,14 @@ def add_events_cli(args, rules=None, selected=None):
 
     if selected is None:
         selected = resolve_add_source(args, rules=rules)
+    events_added = []
     if selected:
-        run_add_source(args, model, selected, rules=rules)
+        result = run_add_source(args, model, selected, rules=rules)
+        if isinstance(result, list):
+            events_added = result
+        elif isinstance(result, dict):
+            events_added = [result]
+    # What a run without -i created, listed once at the end, as the terminal's `add` does.
+    if not getattr(args, "interactive", False):
+        print_events_summary(events_added)
+    return events_added

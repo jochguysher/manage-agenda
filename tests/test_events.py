@@ -46,7 +46,7 @@ class TestEvents(unittest.TestCase):
 
     @patch("manage_agenda.events.select_events_by_user_input", return_value=[])
     @patch("manage_agenda.events.display_posts")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar-id")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("manage_agenda.events.connections.select_api")
     def test_update_event_status_uses_calendar_posts(
         self,
@@ -61,6 +61,7 @@ class TestEvents(unittest.TestCase):
         api_cal.getPosts.return_value = events
         api_cal.getPostTitle.return_value = "Event"
         mock_select_api.return_value = api_cal
+        mock_select_calendar.return_value = (api_cal, "calendar-id")
 
         update_event_status_cli(args)
 
@@ -99,7 +100,7 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(result["start"]["timeZone"], "UTC")
 
     @patch("manage_agenda.events.connections.select_api")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("builtins.input", side_effect=["meeting", "0", "calendar2"])
     def test_copy_events_cli_basic(self, mock_input, mock_select_cal, mock_select_api):
         """Test copy_events_cli basic flow."""
@@ -127,13 +128,14 @@ class TestEvents(unittest.TestCase):
         mock_api.getPostTitle.return_value = "Team meeting"
         mock_api.getPosts.return_value = mock_events["items"]
         mock_select_api.return_value = mock_api
+        mock_select_cal.return_value = (mock_api, "calendar1")
 
         copy_events_cli(args)
 
         mock_client.events().insert.assert_called()
 
     @patch("manage_agenda.events.connections.select_api")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("builtins.input", side_effect=["", "0"])
     def test_delete_events_cli_basic(self, mock_input, mock_select_cal, mock_select_api):
         """Test delete_events_cli basic flow."""
@@ -161,13 +163,14 @@ class TestEvents(unittest.TestCase):
         mock_api.getPostTitle.return_value = "Old meeting"
         mock_api.getPosts.return_value = mock_events["items"]
         mock_select_api.return_value = mock_api
+        mock_select_cal.return_value = (mock_api, "calendar1")
 
         delete_events_cli(args)
 
         mock_client.events().delete.assert_called()
 
     @patch("manage_agenda.events.connections.select_api")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("builtins.input", side_effect=["", "0", "calendar2"])
     def test_move_events_cli_basic(self, mock_input, mock_select_cal, mock_select_api):
         """Test move_events_cli basic flow."""
@@ -195,6 +198,7 @@ class TestEvents(unittest.TestCase):
         mock_api.getPostTitle.return_value = "Moving meeting"
         mock_api.getPosts.return_value = mock_events["items"]
         mock_select_api.return_value = mock_api
+        mock_select_cal.return_value = (mock_api, "calendar1")
 
         move_events_cli(args)
 
@@ -258,7 +262,7 @@ class TestUpdateEventStatusThroughThePort(unittest.TestCase):
 class TestCalendarOperationsThroughThePort(unittest.TestCase):
     @patch("manage_agenda.events.display_posts")
     @patch("manage_agenda.events.connections.select_api")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     def test_clean_asks_the_operation_through_choose_action(
         self, _select_cal, mock_select_api, _display
     ):
@@ -272,6 +276,7 @@ class TestCalendarOperationsThroughThePort(unittest.TestCase):
         ]
         api.getPostTitle.return_value = "Old meeting"
         mock_select_api.return_value = api
+        _select_cal.return_value = (api, "calendar1")
         args = Args(interactive=True)
 
         answers = [("ask_text", ""), ("select_events", "all"), ("choose_action", "1")]
@@ -283,3 +288,115 @@ class TestCalendarOperationsThroughThePort(unittest.TestCase):
         # "1" is copy: an insert on the destination, no delete on the source.
         api.getClient.return_value.events.return_value.insert.assert_called_once()
         api.getClient.return_value.events.return_value.delete.assert_not_called()
+    def test_parse_datetime_value(self):
+        """Test _parse_datetime_value handles datetimes, dates, and strings."""
+        from manage_agenda.events import _parse_datetime_value
+
+        dt, is_date = _parse_datetime_value(None)
+        self.assertIsNone(dt)
+        self.assertFalse(is_date)
+
+        now = datetime.datetime(2026, 9, 20, 10, 0, 0)
+        dt, is_date = _parse_datetime_value(now)
+        self.assertEqual(dt, now)
+        self.assertFalse(is_date)
+
+        today = datetime.date(2026, 9, 20)
+        dt, is_date = _parse_datetime_value(today)
+        self.assertEqual(dt.date(), today)
+        self.assertTrue(is_date)
+
+        dt, is_date = _parse_datetime_value("2026-09-20")
+        self.assertEqual(dt.strftime("%Y-%m-%d"), "2026-09-20")
+        self.assertTrue(is_date)
+
+        dt, is_date = _parse_datetime_value("2026-09-20T10:00:00")
+        self.assertEqual(dt.strftime("%Y-%m-%d %H:%M"), "2026-09-20 10:00")
+        self.assertFalse(is_date)
+
+    def test_format_event_time_range(self):
+        """Test format_event_time_range for same-day, cross-day, and date-only ranges."""
+        from manage_agenda.events import format_event_time_range
+
+        same_day = format_event_time_range("2026-09-20T10:00:00", "2026-09-20T11:00:00")
+        self.assertEqual(same_day, "2026-09-20 10:00 to 11:00")
+
+        diff_days = format_event_time_range("2026-09-20T10:00:00", "2026-09-21T11:00:00")
+        self.assertEqual(diff_days, "2026-09-20 10:00 to 2026-09-21 11:00")
+
+        date_only_same = format_event_time_range("2026-09-20", "2026-09-20")
+        self.assertEqual(date_only_same, "2026-09-20")
+
+        date_only_diff = format_event_time_range("2026-09-20", "2026-09-22")
+        self.assertEqual(date_only_diff, "2026-09-20 to 2026-09-22")
+
+        start_only = format_event_time_range("2026-09-20T10:00:00", None)
+        self.assertEqual(start_only, "2026-09-20 10:00")
+
+    def test_format_event_summary(self):
+        """Test format_event_summary formats event dict properly."""
+        from manage_agenda.events import format_event_summary
+
+        event = {
+            "summary": "Project Sync",
+            "start": {"dateTime": "2026-09-20T10:00:00"},
+            "end": {"dateTime": "2026-09-20T11:00:00"},
+        }
+        res = format_event_summary(event)
+        self.assertEqual(res, "- Project Sync (2026-09-20 10:00 to 11:00)")
+
+        event_no_dates = {"summary": "Quick Note"}
+        res_no_dates = format_event_summary(event_no_dates)
+        self.assertEqual(res_no_dates, "- Quick Note")
+
+    def test_print_events_summary(self):
+        """Test print_events_summary outputs summary to stdout."""
+        import io
+        import sys
+
+        from manage_agenda.events import print_events_summary
+
+        events = [
+            {
+                "summary": "Meeting with Alice",
+                "start": {"dateTime": "2026-09-20T10:00:00"},
+                "end": {"dateTime": "2026-09-20T11:00:00"},
+            },
+            {
+                "summary": "Conference Day",
+                "start": {"date": "2026-09-22"},
+                "end": {"date": "2026-09-22"},
+            },
+        ]
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            print_events_summary(events)
+        finally:
+            sys.stdout = old_stdout
+
+        output = captured.getvalue()
+        self.assertIn("Summary of events added:", output)
+        self.assertIn("- Meeting with Alice (2026-09-20 10:00 to 11:00)", output)
+        self.assertIn("- Conference Day (2026-09-22)", output)
+
+    def test_print_events_summary_empty(self):
+        """Test print_events_summary when no events are added."""
+        import io
+        import sys
+
+        from manage_agenda.events import print_events_summary
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            print_events_summary([])
+        finally:
+            sys.stdout = old_stdout
+
+        output = captured.getvalue()
+        self.assertIn("Summary of events added:", output)
+        self.assertIn("No events were added.", output)

@@ -1,3 +1,4 @@
+import logging
 import os
 
 import click
@@ -27,6 +28,8 @@ from .sources import (
     reconcile_ledger_cli,
     restore_deleted_event_cli,
 )
+
+logger = logging.getLogger(__name__)
 
 # Click builds --help text when each command decorator runs, i.e. at import time. The first
 # t() call below is what triggers manage_agenda.i18n's language resolution, early enough that
@@ -228,7 +231,7 @@ def auth(ctx, interactive):
         text=None,
     )
     if verbose:
-        print(t("cli.auth.args_debug", args=args))
+        logger.debug("Args: %s", args)
     api_src = authorize(args)
     if api_src is not None and api_src.getClient():
         print(t("cli.auth.authorized_success"))
@@ -323,8 +326,14 @@ gmail.help = t("cli.gmail.help")
     default=None,
     help=t("cli.select_text_help"),
 )
+@click.option(
+    "-D",
+    "--start-date",
+    default=None,
+    help="First date to search events from (e.g. '2024-01-01'). Defaults to today.",
+)
 @click.pass_context
-def copy(ctx, interactive, source, destination, text):
+def copy(ctx, interactive, source, destination, text, start_date):
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -333,6 +342,7 @@ def copy(ctx, interactive, source, destination, text):
         verbose=verbose,
         destination=destination,
         text=text,
+        start_date=start_date,
     )
 
     copy_events_cli(args)
@@ -367,8 +377,14 @@ copy.help = t("cli.copy.help")
     default=None,
     help=t("cli.select_text_help"),
 )
+@click.option(
+    "-D",
+    "--start-date",
+    default=None,
+    help="First date to search events from (e.g. '2024-01-01'). Defaults to today.",
+)
 @click.pass_context
-def clean(ctx, interactive, source, destination, text):
+def clean(ctx, interactive, source, destination, text, start_date):
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -377,6 +393,7 @@ def clean(ctx, interactive, source, destination, text):
         verbose=verbose,
         destination=destination,
         text=text,
+        start_date=start_date,
     )
 
     clean_events_cli(args)
@@ -405,8 +422,14 @@ clean.help = t("cli.clean.help")
     default=None,
     help=t("cli.select_text_help"),
 )
+@click.option(
+    "-D",
+    "--start-date",
+    default=None,
+    help="First date to search events from (e.g. '2024-01-01'). Defaults to today.",
+)
 @click.pass_context
-def delete(ctx, interactive, source, text):
+def delete(ctx, interactive, source, text, start_date):
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -415,6 +438,7 @@ def delete(ctx, interactive, source, text):
         verbose=verbose,
         destination=None,
         text=text,
+        start_date=start_date,
     )
 
     delete_events_cli(args)
@@ -449,8 +473,14 @@ delete.help = t("cli.delete.help")
     default=None,
     help=t("cli.select_text_help"),
 )
+@click.option(
+    "-D",
+    "--start-date",
+    default=None,
+    help="First date to search events from (e.g. '2024-01-01'). Defaults to today.",
+)
 @click.pass_context
-def move(ctx, interactive, source, destination, text):
+def move(ctx, interactive, source, destination, text, start_date):
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -459,6 +489,7 @@ def move(ctx, interactive, source, destination, text):
         verbose=verbose,
         destination=destination,
         text=text,
+        start_date=start_date,
     )
 
     move_events_cli(args)

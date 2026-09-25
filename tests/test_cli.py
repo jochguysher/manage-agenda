@@ -165,6 +165,20 @@ class TestCliCommands(unittest.TestCase):
         self.assertEqual(result.exit_code, 6, result.output)
         mock_migrate.return_value = 0
         self.assertEqual(self.runner.invoke(self.cli.cli, ["migrate-ledger"]).exit_code, 0)
+    def test_add_non_interactive_summary_output(self):
+        """Test add command in non-interactive mode outputs event summary."""
+        self.mock_process_email_cli.return_value = [
+            {
+                "summary": "Doctor Appointment",
+                "start": {"dateTime": "2026-09-20T10:00:00"},
+                "end": {"dateTime": "2026-09-20T11:00:00"},
+            }
+        ]
+        result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Every line shown goes through the UI port: the scripted UI holds the output.
+        self.assertIn("Summary of events added:", self.ui.output)
+        self.assertIn("- Doctor Appointment (2026-09-20 10:00 to 11:00)", self.ui.output)
 
     def test_add_no_posts(self):
         result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])

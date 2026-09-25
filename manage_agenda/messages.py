@@ -1319,6 +1319,18 @@ TRANSLATIONS = {
         "en": 'Screen',
         "fr": 'Écran',
     },
+    'connections.no_gcalendar_sources': {
+        "en": 'No Google Calendar account is configured.',
+        "fr": "Aucun compte Google Calendar n'est configuré.",
+    },
+    'events.summary_title': {
+        "en": 'Summary of events added:',
+        "fr": 'Résumé des événements ajoutés :',
+    },
+    'events.summary_none': {
+        "en": 'No events were added.',
+        "fr": "Aucun événement n'a été ajouté.",
+    },
     'gui.menu.view': {
         "en": '&View',
         "fr": '&Affichage',

@@ -60,7 +60,7 @@ def authorize(args, rules=None):
         return None
     source_name = rules_all[0]
     source_details = rules.more.get(source_name, {})
-    logger.info(f"Source: {source_name} - {source_details}")
+    logger.info("Source: %s - %s", source_name, source_details)
     return rules.readConfigSrc("", source_name, source_details)
 
 
@@ -209,11 +209,11 @@ def select_api(args, api_type, rules=None, title=""):
 
     sources = rules.selectRule(service, "")
     if not sources:
-        logger.warning(f"No {api_type} sources configured.")
+        logger.warning("No %s sources configured.", api_type)
         return None
     selected_source = sources[0]
     source_details = rules.more.get(selected_source, {})
-    logger.info(f"Source: {selected_source} - {source_details}")
+    logger.info("Source: %s - %s", selected_source, source_details)
     return rules.readConfigSrc("", selected_source, source_details)
 
 
@@ -364,7 +364,7 @@ def select_calendar(calendar_api, title="", args=None):
             raise CalendarError(t("connections.no_calendar_selected"))
 
         calendar_id = chosen["id"]
-        logger.info(f"Selected calendar: {safe_get(chosen, ['summary'])} (ID: {calendar_id})")
+        logger.info("Selected calendar: %s (ID: %s)", safe_get(chosen, ["summary"]), calendar_id)
         return calendar_id
     except (KeyError, IndexError, TypeError) as error:
         raise CalendarError(t("connections.failed_to_select_calendar", error=error)) from error
@@ -395,3 +395,52 @@ def select_calendars(calendar_api, title="", args=None):
         raise
     except Exception as error:
         raise CalendarError(t("connections.unexpected_error_selecting_calendar", error=error)) from error
+
+
+def select_calendar_from_all_rules(args, title="", rules=None):
+    """Choose one writable calendar among every configured Google Calendar account at once:
+    each entry reads "<calendar> (<account>)", so a single question replaces the account
+    choice followed by the calendar choice. (api, calendar_id) of the pick.
+
+    Asked through the UI port, like every other choice; non-interactive runs get the same
+    clear error as select_calendar()."""
+    rules = rules or moduleRules.from_config()
+    rule_names = rules.selectRule("gcalendar", "") or []
+    if not rule_names:
+        raise CalendarError(t("connections.no_gcalendar_sources"))
+
+    choices = []
+    for rule_name in rule_names:
+        api = rules.readConfigSrc("", rule_name, rules.more.get(rule_name, {}))
+        if not api:
+            logger.warning("Could not instantiate API for rule %s, skipping", rule_name)
+            continue
+        try:
+            api.setCalendarList()
+            calendars = api.getCalendarList() or []
+        except Exception as error:
+            logger.warning("Failed to fetch calendars for rule %s: %s", rule_name, error)
+            continue
+        account = rule_name[2] if isinstance(rule_name, tuple) and len(rule_name) > 2 else str(rule_name)
+        writable = [item for item in calendars if "reader" not in item.get("accessRole", "")]
+        try:
+            remember_calendar_names(writable)
+        except OSError as error:
+            logger.warning(f"Could not remember the calendar names: {error}")
+        for calendar in writable:
+            label = f"{safe_get(calendar, ['summary'])} ({account})"
+            choices.append({"label": label, "api": api, "calendar": calendar})
+
+    if not choices:
+        raise CalendarError(t("connections.no_writable_calendars_found"))
+    if not _should_prompt_for_calendar(args):
+        raise CalendarError(t("connections.non_interactive_message"))
+
+    chosen = get_ui().choose_one(
+        choices, title=title or t("connections.select_calendar_title"), identifier="label"
+    )
+    if chosen is None:
+        raise CalendarError(t("connections.no_calendar_selected"))
+    calendar_id = chosen["calendar"]["id"]
+    logger.info("Selected calendar: %s (ID: %s)", safe_get(chosen["calendar"], ["summary"]), calendar_id)
+    return chosen["api"], calendar_id

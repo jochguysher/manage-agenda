@@ -70,7 +70,7 @@ def write_file(filename, content, enabled=False, base_dir=None):
         # if it contains '..' components that could traverse up the directory
         # tree
         if os.path.isabs(normalized_filename) or '..' in normalized_filename.split(os.sep):
-            logger.error(f"Invalid filename: {filename} - contains path traversal attempts")
+            logger.error("Invalid filename: %s - contains path traversal attempts", filename)
             return False
 
         # Construct the full path using os.path.join for safety
@@ -85,12 +85,12 @@ def write_file(filename, content, enabled=False, base_dir=None):
             # Ensure the resolved file path is within the resolved default
             # directory
             if not full_path_real.startswith(default_dir_real + os.sep) and full_path_real != default_dir_real:
-                logger.error(f"Invalid filename: {filename} - resolves outside allowed directory")
+                logger.error("Invalid filename: %s - resolves outside allowed directory", filename)
                 return False
         except OSError:
             # If realpath fails (e.g., path doesn't exist), we can't do the security check,
             # but we can still proceed with the original path check if we're careful
-            logger.warning(f"Could not resolve real paths for security check: {filename}")
+            logger.warning("Could not resolve real paths for security check: %s", filename)
             # We'll continue anyway, but this is less secure
 
         # Ensure the directory exists
@@ -106,7 +106,7 @@ def write_file(filename, content, enabled=False, base_dir=None):
         except OSError as dir_error:
             # If directory creation fails, we log it but continue to try opening the file
             # This allows tests with fake directories to work while still providing security
-            logger.warning(f"Could not create directory for {filename}: {dir_error}")
+            logger.warning("Could not create directory for %s: %s", filename, dir_error)
 
         with open(full_path, "w") as file:
             file.write(content)
@@ -119,7 +119,7 @@ def write_file(filename, content, enabled=False, base_dir=None):
         logger.info(f"File written: {filename}")
         return True
     except Exception as e:
-        logger.error(f"Error writing file {filename}: {e}")
+        logger.error("Error writing file %s: %s", filename, e)
         return False
 
 

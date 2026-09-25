@@ -161,7 +161,7 @@ class Config:
 
         if issues:
             for issue in issues:
-                logger.warning(f"Configuration issue: {issue}")
+                logger.warning("Configuration issue: %s", issue)
             return False
 
         return True
