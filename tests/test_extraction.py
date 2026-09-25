@@ -1,14 +1,38 @@
 import datetime
 import sys
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import googleapiclient.errors
 
 from manage_agenda.extraction import (
     add_message_to_event_description,
     create_event_dict,
+    deterministic_event_id,
     extract_json,
+    get_event_from_llm_with_retry,
 )
 from manage_agenda.sources import Args
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures" / "llm_responses"
+
+
+def _not_found_error():
+    return googleapiclient.errors.HttpError(SimpleNamespace(status=404, reason=""), b"{}")
+
+
+def _mock_api_dst_with_no_existing_events():
+    """A publishPost-mocking api_dst whose pre-insert events().get() existence check always
+    reports "not found", so the deterministic-id collision check in
+    _publish_event_to_calendar lets every insert through (matching these tests' intent of
+    exercising the insert path itself, not the dedup path)."""
+    api_dst = MagicMock()
+    api_dst.getClient.return_value.events.return_value.get.return_value.execute.side_effect = (
+        _not_found_error()
+    )
+    return api_dst
 
 
 class TestExtraction(unittest.TestCase):
@@ -112,14 +136,14 @@ more text"""
 
     @patch("manage_agenda.extraction.get_event_from_llm")
     @patch("manage_agenda.extraction.select_api")
-    @patch("manage_agenda.extraction.select_calendar")
+    @patch("manage_agenda.extraction.select_calendars")
     @patch("manage_agenda.extraction.write_file")
     @patch("manage_agenda.events._validate_event_dates_interactive")
     def test_process_event_with_llm_and_calendar_multiple_events(
         self,
         mock_interactive_confirmation,
         mock_write_file,
-        mock_select_calendar,
+        mock_select_calendars,
         mock_select_api,
         mock_get_event_from_llm,
     ):
@@ -149,9 +173,9 @@ more text"""
 
         mock_get_event_from_llm.return_value = ((event1, event2), (event1, event2), 1.0)
 
-        mock_api_dst = MagicMock()
+        mock_api_dst = _mock_api_dst_with_no_existing_events()
         mock_select_api.return_value = mock_api_dst
-        mock_select_calendar.return_value = "calendar_id"
+        mock_select_calendars.return_value = ["calendar_id"]
         mock_interactive_confirmation.side_effect = lambda args, ev: ev
         mock_api_dst.publishPost.side_effect = ["result1", "result2"]
 
@@ -173,16 +197,124 @@ more text"""
         self.assertEqual(mock_write_file.call_count, 8)
         self.assertEqual(mock_api_dst.publishPost.call_count, 2)
 
+    @patch("manage_agenda.extraction.get_event_from_llm")
+    @patch("manage_agenda.extraction.select_api")
+    @patch("manage_agenda.extraction.select_calendars")
+    @patch("manage_agenda.extraction.write_file")
+    @patch("manage_agenda.events._validate_event_dates_interactive")
+    def test_one_event_is_published_to_every_selected_calendar(
+        self,
+        mock_interactive_confirmation,
+        mock_write_file,
+        mock_select_calendars,
+        mock_select_api,
+        mock_get_event_from_llm,
+    ):
+        """One event, two selected calendars: publishPost is called once per calendar, and
+        each result is tracked with its own calendar_id/event_id (feeding the deletion-
+        detection ledger from an earlier feature - it needs to see both refs, not just one)."""
+        from manage_agenda.extraction import _process_event_with_llm_and_calendar
+
+        args = Args(
+            interactive=False, delete=False, source="gemini", verbose=False, destination="", text=""
+        )
+        mock_model = MagicMock()
+        event = {
+            "summary": "Standup",
+            "start": {"dateTime": "2024-01-01T10:00:00"},
+            "end": {"dateTime": "2024-01-01T11:00:00"},
+        }
+        mock_get_event_from_llm.return_value = ((event,), (event,), 1.0)
+
+        mock_api_dst = _mock_api_dst_with_no_existing_events()
+        mock_select_api.return_value = mock_api_dst
+        mock_select_calendars.return_value = ["cal-1", "cal-2"]
+        mock_interactive_confirmation.side_effect = lambda args, ev: ev
+        mock_api_dst.publishPost.side_effect = [
+            {"success": True, "post_url": "u1", "raw_response": {"id": "e1"}},
+            {"success": True, "post_url": "u2", "raw_response": {"id": "e2"}},
+        ]
+
+        events, results = _process_event_with_llm_and_calendar(
+            args,
+            mock_model,
+            content_text="Standup invite",
+            reference_date_time="2024-01-01T00:00:00",
+            post_identifier="post_123",
+            subject_for_print="Test Subject",
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(mock_api_dst.publishPost.call_count, 2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual({r["calendar_id"] for r in results}, {"cal-1", "cal-2"})
+        # The deterministic id is derived from post_identifier/generation/event_index, not
+        # calendar-scoped (Google's uniqueness constraint is per-calendar, verified in Phase
+        # 1) - so both calendars get the SAME event_id here, distinguished by calendar_id.
+        expected_event_id = deterministic_event_id("post_123", 0, 1)
+        self.assertEqual({r["event_id"] for r in results}, {expected_event_id})
+
+    @patch("manage_agenda.extraction.get_event_from_llm")
+    @patch("manage_agenda.extraction.select_api")
+    @patch("manage_agenda.extraction.select_calendars")
+    @patch("manage_agenda.extraction.write_file")
+    @patch("manage_agenda.events._validate_event_dates_interactive")
+    def test_a_failure_on_any_selected_calendar_fails_the_whole_event(
+        self,
+        mock_interactive_confirmation,
+        mock_write_file,
+        mock_select_calendars,
+        mock_select_api,
+        mock_get_event_from_llm,
+    ):
+        """If the first calendar succeeds but the second fails, the message must stay pending
+        (CalendarError) rather than being marked handled with only a partial write - retrying
+        it is safe because the same identity/generation/event_index recompute the same
+        deterministic id, so the event already created on the first calendar is found by the
+        pre-insert events().get() check and reported as a duplicate rather than re-inserted."""
+        from manage_agenda.exceptions import CalendarError
+        from manage_agenda.extraction import _process_event_with_llm_and_calendar
+
+        args = Args(
+            interactive=False, delete=False, source="gemini", verbose=False, destination="", text=""
+        )
+        mock_model = MagicMock()
+        event = {
+            "summary": "Standup",
+            "start": {"dateTime": "2024-01-01T10:00:00"},
+            "end": {"dateTime": "2024-01-01T11:00:00"},
+        }
+        mock_get_event_from_llm.return_value = ((event,), (event,), 1.0)
+
+        mock_api_dst = _mock_api_dst_with_no_existing_events()
+        mock_select_api.return_value = mock_api_dst
+        mock_select_calendars.return_value = ["cal-1", "cal-2"]
+        mock_interactive_confirmation.side_effect = lambda args, ev: ev
+        mock_api_dst.publishPost.side_effect = [
+            {"success": True, "post_url": "u1", "raw_response": {"id": "e1"}},
+            {"success": False, "error_message": "quota"},
+        ]
+
+        with self.assertRaises(CalendarError):
+            _process_event_with_llm_and_calendar(
+                args,
+                mock_model,
+                content_text="Standup invite",
+                reference_date_time="2024-01-01T00:00:00",
+                post_identifier="post_123",
+                subject_for_print="Test Subject",
+            )
+
     @patch("manage_agenda.extraction._extract_event_with_llm_retry")
     @patch("manage_agenda.extraction.select_api")
-    @patch("manage_agenda.extraction.select_calendar")
+    @patch("manage_agenda.extraction.select_calendars")
     @patch("manage_agenda.extraction.write_file")
     @patch("manage_agenda.events._validate_event_dates_interactive")
     def test_process_event_with_llm_and_calendar_file_output(
         self,
         mock_interactive_confirmation,
         mock_write_file,
-        mock_select_calendar,
+        mock_select_calendars,
         mock_select_api,
         mock_extract_event_with_llm_retry,
     ):
@@ -222,5 +354,216 @@ more text"""
         self.assertEqual(results, ["post_123_1_times.json"])
 
         mock_select_api.assert_not_called()
-        mock_select_calendar.assert_not_called()
+        mock_select_calendars.assert_not_called()
         mock_write_file.assert_called()
+
+        # The actual `-o file` result: written unconditionally (enabled=True) under
+        # config.output_dir(), never under msg_txt_dir()/log/ - see base.write_file's and
+        # purge_expired_log_files's docstrings (docs/investigation-limite1.md).
+        from manage_agenda.config import output_dir
+
+        output_calls = [
+            call for call in mock_write_file.call_args_list if call.kwargs.get("base_dir")
+        ]
+        self.assertEqual(len(output_calls), 1)
+        self.assertEqual(output_calls[0].kwargs["base_dir"], output_dir())
+        self.assertTrue(output_calls[0].kwargs.get("enabled"))
+        self.assertTrue(output_calls[0].args[0].endswith("_1_times.json"))
+        self.assertNotIn("log/", output_calls[0].args[0])
+
+
+class TestCalendarBusyAcrossMultipleCalendars(unittest.TestCase):
+    """A room-visit slot must avoid conflicts on every calendar the event will be written to,
+    not just the first one - otherwise a visit could double-book a calendar select_calendars()
+    added later in the list."""
+
+    def test_busy_intervals_are_aggregated_across_all_selected_calendars(self):
+        from types import SimpleNamespace
+
+        from manage_agenda.extraction import _calendar_busy
+
+        responses = {
+            "cal-1": {
+                "items": [
+                    {
+                        "start": {"dateTime": "2024-01-01T09:00:00+00:00"},
+                        "end": {"dateTime": "2024-01-01T10:00:00+00:00"},
+                    }
+                ]
+            },
+            "cal-2": {
+                "items": [
+                    {
+                        "start": {"dateTime": "2024-01-01T14:00:00+00:00"},
+                        "end": {"dateTime": "2024-01-01T15:00:00+00:00"},
+                    }
+                ]
+            },
+        }
+
+        def list_events(**kwargs):
+            response = MagicMock()
+            response.execute.return_value = responses[kwargs["calendarId"]]
+            return response
+
+        api_dst = MagicMock()
+        api_dst.getClient.return_value.events.return_value.list.side_effect = list_events
+        constraints = SimpleNamespace(horizon_days=7)
+
+        busy = _calendar_busy(api_dst, ["cal-1", "cal-2"], constraints)
+
+        self.assertEqual(len(busy), 2)
+
+    def test_a_failing_calendar_does_not_prevent_reading_the_others(self):
+        from types import SimpleNamespace
+
+        from manage_agenda.extraction import _calendar_busy
+
+        def list_events(**kwargs):
+            if kwargs["calendarId"] == "cal-broken":
+                raise RuntimeError("boom")
+            response = MagicMock()
+            response.execute.return_value = {
+                "items": [
+                    {
+                        "start": {"dateTime": "2024-01-01T09:00:00+00:00"},
+                        "end": {"dateTime": "2024-01-01T10:00:00+00:00"},
+                    }
+                ]
+            }
+            return response
+
+        api_dst = MagicMock()
+        api_dst.getClient.return_value.events.return_value.list.side_effect = list_events
+        constraints = SimpleNamespace(horizon_days=7)
+
+        busy = _calendar_busy(api_dst, ["cal-broken", "cal-ok"], constraints)
+
+        self.assertEqual(len(busy), 1)
+
+
+class TestMultiEventRetryPreservesDistinctDates(unittest.TestCase):
+    """Regression test for the "all extracted events share one date" bug.
+
+    get_event_from_llm_with_retry used to always make a second, independent
+    LLM call to "confirm" a first successful extraction (event_old started
+    empty, so the first result was always judged unstable), then
+    unconditionally REPLACE the first result with whatever that second call
+    returned - no merge, no validation. A correct multi-event extraction from
+    call 1 was silently discarded if call 2 (same prompt, fresh
+    non-deterministic generation) returned something worse, e.g. a single
+    collapsed event.
+
+    The fix: accept a successful extraction immediately, with no redundant
+    confirmation call.
+    """
+
+    def setUp(self):
+        self.multi_event_response = (FIXTURES_DIR / "multiple_events.txt").read_text(
+            encoding="utf-8"
+        )
+        patcher = patch("manage_agenda.extraction.write_file")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _model_with_responses(self, responses):
+        model = MagicMock()
+        model.model_name = "fixture"
+        model.generate_text.side_effect = responses
+        return model
+
+    def test_successful_multi_event_extraction_is_not_overwritten(self):
+        """A single-event response queued after the good multi-event one must
+        never be reached: the first, correct extraction is final."""
+        single_event_would_collapse_it = (
+            '{"summary": "", "start": {"dateTime": "2030-02-10", "timeZone": ""},'
+            ' "end": {"dateTime": "", "timeZone": ""}}'
+        )
+        model = self._model_with_responses(
+            [self.multi_event_response, single_event_would_collapse_it]
+        )
+        args = Args(interactive=False, verbose=False)
+
+        event, _, _ = get_event_from_llm_with_retry(model, "prompt", "post_multi", args)
+
+        self.assertEqual(
+            model.generate_text.call_count,
+            1,
+            "A redundant confirmation call was made after a successful extraction.",
+        )
+        self.assertIsInstance(event, (list, tuple))
+        self.assertEqual(len(event), 2)
+        self.assertEqual(
+            [item["start"]["dateTime"] for item in event],
+            ["2030-02-10", "2030-03-11"],
+        )
+
+
+class TestMessageContext(unittest.TestCase):
+    """extraction.message_context(): what review_event() shows about the source message."""
+
+    def test_names_the_message_with_its_local_date_and_time(self):
+        from manage_agenda.extraction import message_context
+
+        text = "From: Christine <c@x.org>\nSubject: Visite\nMessage: ...\nMessage date: 2026-09-24\n"
+        when = datetime.datetime(2026, 9, 24, 14, 33, tzinfo=datetime.timezone.utc)
+        context = message_context(text, "m1", "Visite", when)
+        self.assertEqual(context["identifier"], "m1")
+        self.assertEqual(context["subject"], "Visite")
+        self.assertEqual(context["sender"], "Christine <c@x.org>")
+        self.assertEqual(context["date"], when.astimezone().strftime("%Y-%m-%d %H:%M"))
+
+    def test_survives_missing_pieces(self):
+        from manage_agenda.extraction import message_context
+
+        context = message_context("", None, None, None)
+        self.assertEqual(context, {"identifier": "", "subject": "", "sender": "", "date": ""})
+        naive = datetime.datetime(2026, 9, 24, 9, 5)
+        self.assertEqual(message_context("", "x", " s ", naive)["date"], "2026-09-24 09:05")
+        self.assertEqual(message_context("", "x", "s", "2026-09-24")["date"], "2026-09-24")
+
+
+class TestEventNature(unittest.TestCase):
+    def test_a_planned_cleaning_is_recognised_by_its_private_properties(self):
+        from manage_agenda.extraction import event_nature
+
+        cleaning = {
+            "summary": "NDU - Salle 1",
+            "extendedProperties": {
+                "private": {"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-09-27", "occupied_to": "2026-10-03"}
+            },
+        }
+        self.assertEqual(
+            event_nature(cleaning),
+            {"kind": "cleaning", "room": "Salle 1", "occupied_from": "2026-09-27", "occupied_to": "2026-10-03"},
+        )
+        self.assertEqual(event_nature({"summary": "extracted"}), {})
+        self.assertEqual(event_nature({"extendedProperties": {"private": {"ai_model_used": "m"}}}), {})
+        self.assertEqual(event_nature(None), {})
+
+
+class TestParseLlmJson(unittest.TestCase):
+    """The model's answer is JSON (true/false/null) - or, from some models, a Python literal."""
+
+    def test_json_booleans_and_null_are_read(self):
+        from manage_agenda.extraction import parse_llm_json
+
+        text = (
+            'Voici :\n{"kind": "room_occupancy", "rooms": [{"room": "salle 1 et 2", "occupations": '
+            '[{"start": "2026-09-27T08:00", "end": "2026-09-28T00:00", "clean": false, "clean_before": null}]}]}\nfin'
+        )
+        payload = parse_llm_json(text)
+        occupation = payload["rooms"][0]["occupations"][0]
+        self.assertIs(occupation["clean"], False)
+        self.assertIsNone(occupation["clean_before"])
+
+    def test_a_python_literal_still_works(self):
+        from manage_agenda.extraction import parse_llm_json
+
+        self.assertEqual(parse_llm_json("{'summary': 'x', 'clean': True}"), {"summary": "x", "clean": True})
+
+    def test_garbage_raises_a_value_error(self):
+        from manage_agenda.extraction import parse_llm_json
+
+        with self.assertRaises((ValueError, SyntaxError)):
+            parse_llm_json("{not json at all")

@@ -1,0 +1,382 @@
+"""The main window: a sidebar of screens, the log panel, the status bar with Cancel, and
+the slot that turns the worker's UI requests into dialogs."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QSize, Qt, Slot
+from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDockWidget,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from manage_agenda.gui import dialogs
+from manage_agenda.gui.bridge import Bridge, UIRequest
+from manage_agenda.gui.jobs import JobRunner
+from manage_agenda.gui.log_panel import LogPanel, LogSummary
+from manage_agenda.gui.persist import gui_settings, save_theme, saved_theme
+from manage_agenda.gui.screens.accounts import AccountsScreen
+from manage_agenda.gui.screens.add import AddScreen
+from manage_agenda.gui.screens.calendar_ops import CalendarOpsScreen
+from manage_agenda.gui.screens.evaluate import EvaluateScreen
+from manage_agenda.gui.screens.home import HomeScreen
+from manage_agenda.gui.screens.install import InstallDialog
+from manage_agenda.gui.screens.ledger import LedgerScreen
+from manage_agenda.gui.screens.lists import ListsScreen
+from manage_agenda.gui.screens.settings import SettingsScreen
+from manage_agenda.gui.theme import THEMES, apply_theme
+from manage_agenda.gui.widgets import AutoNamed
+from manage_agenda.i18n import t
+
+# The sidebar in three groups: the task, its configuration, the tools around it. The
+# Google authorization lives on the Accounts screen; the browser install is a Tools menu
+# entry (a dialog), so neither takes a row.
+NAV_GROUPS = (
+    ("gui.nav.group_task", (HomeScreen,)),
+    ("gui.nav.group_config", (AccountsScreen, SettingsScreen)),
+    ("gui.nav.group_tools", (CalendarOpsScreen, LedgerScreen, EvaluateScreen, ListsScreen)),
+)
+# Pages without a sidebar row: the advanced form of the task, reached from Home's
+# "Advanced options…" and left through its own Back button; the sidebar stays on Home.
+HIDDEN_SCREENS = (AddScreen,)
+SCREEN_CLASSES = tuple(cls for _key, classes in NAV_GROUPS for cls in classes) + HIDDEN_SCREENS
+
+CLOSE_WAIT_MS = 5000
+NAV_ROW_HEIGHT = 34
+NAV_HEADER_HEIGHT = 30
+NAV_PADDING = 12  # the theme's 6px top and bottom
+SIDEBAR_WIDTH = 210
+LOG_DOCK_HEIGHT = 170
+PROGRESS_WIDTH = 120
+
+
+def _scrollable(screen):
+    """The screen in a scroll area: a window too short for the page scrolls it instead of
+    squeezing its widgets against the log panel."""
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.viewport().setAutoFillBackground(False)
+    area.setWidget(screen)
+    return area
+
+
+class MainWindow(AutoNamed, QMainWindow):
+    """Its own widgets and menus are named `main_<attribute>` (AutoNamed); `nav`, `logDock`
+    and `logPanel` keep their historical names (theme selectors, saved-state key)."""
+
+    def name_prefix(self):
+        return "main"
+
+    def __init__(self, verbose=False, parent=None):
+        super().__init__(parent)
+        self.verbose = verbose
+        self.setWindowTitle(t("gui.window_title"))
+        self.resize(1100, 760)
+
+        self.bridge = Bridge(self)
+        self.runner = JobRunner(self.bridge, self)
+        self._active_dialog: QDialog | None = None
+
+        self.log_panel = LogPanel(self)
+        self.log_dock = QDockWidget(t("gui.log_panel_title"), self)
+        self.log_dock.setObjectName("logDock")  # saveState() needs a name
+        self.log_dock.setWidget(self.log_panel)
+        self.log_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
+        self.resizeDocks([self.log_dock], [LOG_DOCK_HEIGHT], Qt.Orientation.Vertical)
+        self.log_action = self.log_dock.toggleViewAction()
+        self.log_action.setShortcut("Ctrl+L")
+        self.view_menu = self.menuBar().addMenu(t("gui.menu.view"))
+        self.view_menu.addAction(self.log_action)
+        self.view_menu.addSeparator()
+        self._build_theme_menu()
+        self.tools_menu = self.menuBar().addMenu(t("gui.menu.tools"))
+        self.install_action = QAction(t("gui.tools.install"), self)
+        self.install_action.setObjectName("install_browser")
+        self.install_action.triggered.connect(self.install_browser)
+        self.tools_menu.addAction(self.install_action)
+
+        self.nav = QListWidget(self)
+        self.nav.setObjectName("nav")  # styled by gui/theme.py
+        self.nav.setAccessibleName(t("gui.nav.accessible"))
+        self.nav.setSpacing(1)
+        self.stack = QStackedWidget(self)
+        self.screens = []
+        self.nav_rows = {}  # sidebar row -> index in self.screens (headers have none)
+        self.screen_rows = {}  # index in self.screens -> sidebar row
+        for group_key, screen_classes in NAV_GROUPS:
+            header = QListWidgetItem(t(group_key))
+            header.setFlags(Qt.ItemFlag.NoItemFlags)  # neither selectable nor focusable
+            header.setSizeHint(QSize(0, NAV_HEADER_HEIGHT))
+            self.nav.addItem(header)
+            for screen_class in screen_classes:
+                screen = screen_class(self.runner, self)
+                self.screens.append(screen)
+                item = QListWidgetItem(screen.title())
+                # The theme pads the rows; the row height has to follow (a stylesheet's
+                # padding does not reach the item's size hint).
+                item.setSizeHint(QSize(0, NAV_ROW_HEIGHT))
+                self.nav.addItem(item)
+                self.nav_rows[self.nav.count() - 1] = len(self.screens) - 1
+                self.screen_rows[len(self.screens) - 1] = self.nav.count() - 1
+                self.stack.addWidget(_scrollable(screen))
+        for screen_class in HIDDEN_SCREENS:
+            screen = screen_class(self.runner, self)
+            self.screens.append(screen)
+            self.stack.addWidget(_scrollable(screen))
+        # The sidebar shows all its rows; the log summary takes the rest of the column.
+        self.nav.setFixedHeight(self._nav_height())
+        self.log_summary = LogSummary(self)
+        self.side_column = QWidget(self)
+        self.side_column.setFixedWidth(SIDEBAR_WIDTH)
+        column = QVBoxLayout(self.side_column)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.nav)
+        column.addWidget(self.log_summary, 1)
+        central = QWidget(self)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.side_column)
+        layout.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
+
+        self.status_label = QLabel("", self)
+        # An indeterminate bar while a job runs: the only sign of activity besides the log.
+        self.job_progress = QProgressBar(self)
+        self.job_progress.setRange(0, 0)
+        self.job_progress.setTextVisible(False)
+        self.job_progress.setFixedWidth(PROGRESS_WIDTH)
+        self.job_progress.hide()
+        self.cancel_button = QPushButton(t("gui.cancel"), self)
+        self.cancel_button.setToolTip(t("gui.cancel_tooltip"))
+        self.cancel_button.setAccessibleName(t("gui.cancel"))
+        self.cancel_button.setAccessibleDescription(t("gui.cancel_tooltip"))
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()  # shown with the progress bar, while a job runs
+        self.statusBar().addWidget(self.status_label, 1)
+        self.statusBar().addPermanentWidget(self.job_progress)
+        self.statusBar().addPermanentWidget(self.cancel_button)
+
+        self.bridge.request_ready.connect(self._on_ui_request, Qt.ConnectionType.QueuedConnection)
+        self.bridge.echo_line.connect(self.log_panel.append_line, Qt.ConnectionType.QueuedConnection)
+        self.bridge.log_record.connect(
+            self.log_panel.append_record, Qt.ConnectionType.QueuedConnection
+        )
+        self.bridge.echo_line.connect(self.log_summary.append_line, Qt.ConnectionType.QueuedConnection)
+        self.bridge.log_record.connect(
+            self.log_summary.append_record, Qt.ConnectionType.QueuedConnection
+        )
+        self.log_summary.details_button.clicked.connect(self.log_action.trigger)
+        self.runner.started.connect(self._on_job_started)
+        self.runner.finished.connect(self._on_job_finished)
+        self.runner.failed.connect(self._on_job_failed)
+        self.runner.cancelled.connect(self._on_job_cancelled)
+        self.cancel_button.clicked.connect(self.cancel_job)
+        self.nav.currentRowChanged.connect(self._show_screen)
+        # A click on the row already current (Home, while its advanced page is shown) must
+        # bring the page back too: currentRowChanged does not fire then.
+        self.nav.itemClicked.connect(lambda item: self._show_screen(self.nav.row(item)))
+        self.screen(HomeScreen).open_screen.connect(self.show_screen)
+        self.screen(AddScreen).back.connect(lambda: self.show_screen(HomeScreen))
+        self.nav.setCurrentRow(self.screen_rows[0])
+        self.restore_window_state()
+
+    def _nav_height(self):
+        """The height showing every sidebar row (the theme's padding included)."""
+        rows = sum(self.nav.item(row).sizeHint().height() + 2 * self.nav.spacing() for row in range(self.nav.count()))
+        return rows + 2 * self.nav.frameWidth() + NAV_PADDING
+
+    def log_line(self, text):
+        """A line of ours (not the worker's) in both views of the log."""
+        self.log_panel.append_line(text)
+        self.log_summary.append_line(text)
+
+    def show_screen(self, screen_class):
+        """Show `screen_class`: through its sidebar row when it has one (which refreshes
+        it), else directly, the sidebar staying on Home."""
+        index = self.screens.index(self.screen(screen_class))
+        row = self.screen_rows.get(index)
+        if row is not None:
+            self.nav.setCurrentRow(row)
+            self._show_screen(row)  # a no-op for the sidebar when the row was current already
+            return
+        self.nav.blockSignals(True)
+        try:
+            self.nav.setCurrentRow(self.screen_rows[0])
+        finally:
+            self.nav.blockSignals(False)
+        self.stack.setCurrentIndex(index)
+        self.screens[index].refresh()
+
+    def install_browser(self):
+        """Tools › Install the browser…: the dialog, which submits the download."""
+        dialog = InstallDialog(self.runner, self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    # --- the theme: View › Theme, one exclusive action per mode ---
+
+    def _build_theme_menu(self):
+        self.theme_menu = self.view_menu.addMenu(t("gui.menu.theme"))
+        self.theme_group = QActionGroup(self)
+        self.theme_group.setExclusive(True)
+        self.theme_actions = {}
+        current = saved_theme()
+        for mode in THEMES:
+            action = QAction(t(f"gui.theme.{mode}"), self)
+            action.setObjectName(f"theme_{mode}")
+            action.setCheckable(True)
+            action.setChecked(mode == current)
+            action.triggered.connect(lambda _checked=False, mode=mode: self.choose_theme(mode))
+            self.theme_group.addAction(action)
+            self.theme_menu.addAction(action)
+            self.theme_actions[mode] = action
+
+    def choose_theme(self, mode):
+        """Apply theme `mode` to the running application and remember it in gui.ini."""
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, mode)
+        save_theme(mode)
+        self.theme_actions[mode].setChecked(True)
+
+    # --- window geometry and the log panel, kept between sessions ---
+
+    def restore_window_state(self):
+        settings = gui_settings()
+        geometry = settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        state = settings.value("state")
+        if state is not None:
+            self.restoreState(state)
+
+    def save_window_state(self):
+        settings = gui_settings()
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("state", self.saveState())
+        settings.sync()
+
+    def _show_screen(self, row):
+        index = self.nav_rows.get(row)
+        if index is not None:
+            self.stack.setCurrentIndex(index)
+            self.screens[index].refresh()
+
+    def screen(self, screen_class):
+        """The instance of `screen_class`, for tests and shortcuts."""
+        for screen in self.screens:
+            if isinstance(screen, screen_class):
+                return screen
+        raise KeyError(screen_class.__name__)
+
+    # --- prompts from the worker ---
+
+    @Slot(object)
+    def _on_ui_request(self, request: UIRequest):
+        if request.cancelled or request.done.is_set():
+            return
+        home = self.screen(HomeScreen)
+        if request.kind == "review_event" and home.accepts_review():
+            # A run started from the home screen gets its proposals there, inline; the slot
+            # returns and the worker stays blocked until the home answers or cancels.
+            self.show_screen(HomeScreen)
+            home.present_review(request)
+            return
+        dialog = dialogs.build(request, self)
+        self._active_dialog = dialog
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                request.answer(dialog.value())
+            else:
+                request.cancel()
+        finally:
+            self._active_dialog = None
+            dialog.deleteLater()
+
+    # --- job state ---
+
+    def cancel_job(self):
+        self.runner.cancel()
+        if self._active_dialog is not None:
+            self._active_dialog.reject()
+        self.screen(HomeScreen).cancel_review()
+
+    def _on_job_started(self, name):
+        self.status_label.setText(t("gui.job_started", name=name))
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.show()
+        self.job_progress.show()
+        self.log_line(f"=== {name} ===")
+
+    def _job_over(self):
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()
+        self.job_progress.hide()
+
+    def _on_job_finished(self, result):
+        self._job_over()
+        if isinstance(result, int) and not isinstance(result, bool) and result != 0:
+            self.status_label.setText(t("gui.job_finished_with_code", code=result))
+        else:
+            self.status_label.setText(t("gui.job_finished"))
+
+    def _on_job_failed(self, summary, trace):
+        self._job_over()
+        self.status_label.setText(t("gui.job_failed", error=summary))
+        self.log_line(trace)
+        box = QMessageBox(QMessageBox.Icon.Critical, t("gui.job_failed_title"), summary, parent=self)
+        box.setDetailedText(trace)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.open()
+
+    def _on_job_cancelled(self):
+        self._job_over()
+        self.status_label.setText(t("gui.job_cancelled"))
+
+    def closeEvent(self, event):
+        if self.runner.is_busy():
+            answer = QMessageBox.question(
+                self,
+                t("gui.window_title"),
+                t("gui.close_while_running"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.cancel_job()
+            if not self.runner.wait(CLOSE_WAIT_MS):
+                # The worker is inside a call that cannot be interrupted (a model request,
+                # a mailbox fetch, the browser consent). Destroying the window would destroy
+                # the live QThread, which Qt treats as fatal - so the window stays open;
+                # closing again once the call has returned works.
+                self.status_label.setText(t("gui.close_job_still_running"))
+                self.log_line(t("gui.close_job_still_running"))
+                event.ignore()
+                return
+        self.save_window_state()
+        event.accept()

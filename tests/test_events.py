@@ -8,6 +8,11 @@ from manage_agenda.sources import Args
 
 class TestEvents(unittest.TestCase):
     def test_adjust_event_times_both_present(self):
+        # A naive dateTime (no explicit timeZone) is localized via Config.DEFAULT_TIMEZONE,
+        # pinned to "Europe/Berlin" for the whole suite by conftest.py (set in the
+        # environment before manage_agenda.config is ever imported - see its comment) rather
+        # than patched per test here, so these expected values assume that pin, not whatever
+        # DEFAULT_TIMEZONE the host's real .env happens to set.
         event = {
             "start": {"dateTime": "2024-01-01T10:00:00"},
             "end": {"dateTime": "2024-01-01T11:00:00"},
@@ -41,7 +46,7 @@ class TestEvents(unittest.TestCase):
 
     @patch("manage_agenda.events.select_events_by_user_input", return_value=[])
     @patch("manage_agenda.events.display_posts")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar-id")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("manage_agenda.events.connections.select_api")
     def test_update_event_status_uses_calendar_posts(
         self,
@@ -56,6 +61,7 @@ class TestEvents(unittest.TestCase):
         api_cal.getPosts.return_value = events
         api_cal.getPostTitle.return_value = "Event"
         mock_select_api.return_value = api_cal
+        mock_select_calendar.return_value = (api_cal, "calendar-id")
 
         update_event_status_cli(args)
 
@@ -94,7 +100,7 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(result["start"]["timeZone"], "UTC")
 
     @patch("manage_agenda.events.connections.select_api")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("builtins.input", side_effect=["meeting", "0", "calendar2"])
     def test_copy_events_cli_basic(self, mock_input, mock_select_cal, mock_select_api):
         """Test copy_events_cli basic flow."""
@@ -122,13 +128,14 @@ class TestEvents(unittest.TestCase):
         mock_api.getPostTitle.return_value = "Team meeting"
         mock_api.getPosts.return_value = mock_events["items"]
         mock_select_api.return_value = mock_api
+        mock_select_cal.return_value = (mock_api, "calendar1")
 
         copy_events_cli(args)
 
         mock_client.events().insert.assert_called()
 
     @patch("manage_agenda.events.connections.select_api")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("builtins.input", side_effect=["", "0"])
     def test_delete_events_cli_basic(self, mock_input, mock_select_cal, mock_select_api):
         """Test delete_events_cli basic flow."""
@@ -156,13 +163,14 @@ class TestEvents(unittest.TestCase):
         mock_api.getPostTitle.return_value = "Old meeting"
         mock_api.getPosts.return_value = mock_events["items"]
         mock_select_api.return_value = mock_api
+        mock_select_cal.return_value = (mock_api, "calendar1")
 
         delete_events_cli(args)
 
         mock_client.events().delete.assert_called()
 
     @patch("manage_agenda.events.connections.select_api")
-    @patch("manage_agenda.events.select_calendar", return_value="calendar1")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
     @patch("builtins.input", side_effect=["", "0", "calendar2"])
     def test_move_events_cli_basic(self, mock_input, mock_select_cal, mock_select_api):
         """Test move_events_cli basic flow."""
@@ -190,12 +198,96 @@ class TestEvents(unittest.TestCase):
         mock_api.getPostTitle.return_value = "Moving meeting"
         mock_api.getPosts.return_value = mock_events["items"]
         mock_select_api.return_value = mock_api
+        mock_select_cal.return_value = (mock_api, "calendar1")
 
         move_events_cli(args)
 
         mock_client.events().insert.assert_called()
         mock_client.events().delete.assert_called()
 
+
+class TestUpdateEventStatusThroughThePort(unittest.TestCase):
+    """update_event_status_cli asks through the UI port, and no longer needs a text filter
+    to run non-interactively."""
+
+    def _api(self):
+        api = MagicMock()
+        api.getPosts.return_value = [
+            {"id": "e1", "summary": "Busy one", "transparency": "opaque"},
+            {"id": "e2", "summary": "Free one", "transparency": "transparent"},
+            {"id": "e3", "summary": "Busy two"},
+        ]
+        api.getPostTitle.side_effect = lambda event: event.get("summary")
+        return api
+
+    @patch("manage_agenda.events.display_posts")
+    @patch("manage_agenda.events.connections.select_api")
+    def test_non_interactive_without_text_offers_every_busy_event(self, mock_select_api, _display):
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        api = self._api()
+        mock_select_api.return_value = api
+        args = Args(interactive=False, source="cal-1", text=None)
+
+        with use_ui(ScriptedUI([("select_events", [1])])) as ui:
+            update_event_status_cli(args)
+
+        # Only "busy" (opaque, or unset) events are offered: e1 and e3.
+        offered = ui.calls[0].payload["events"]
+        self.assertEqual([event["id"] for event in offered], ["e1", "e3"])
+        self.assertEqual(ui.calls[0].payload["labels"], ["Busy one", "Busy two"])
+        update = api.getClient.return_value.events.return_value.update
+        update.assert_called_once()
+        self.assertEqual(update.call_args.kwargs["calendarId"], "cal-1")
+        self.assertEqual(update.call_args.kwargs["body"]["id"], "e3")
+        self.assertEqual(update.call_args.kwargs["body"]["transparency"], "transparent")
+
+    @patch("manage_agenda.events.display_posts")
+    @patch("manage_agenda.events.connections.select_api")
+    def test_interactive_asks_for_the_text_filter_first(self, mock_select_api, _display):
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        mock_select_api.return_value = self._api()
+        args = Args(interactive=True, source="cal-1", text=None)
+
+        with use_ui(ScriptedUI([("ask_text", "two"), ("select_events", [])])) as ui:
+            update_event_status_cli(args)
+
+        self.assertEqual([call.kind for call in ui.calls], ["ask_text", "select_events"])
+        self.assertEqual([e["id"] for e in ui.calls[1].payload["events"]], ["e3"])
+
+
+class TestCalendarOperationsThroughThePort(unittest.TestCase):
+    @patch("manage_agenda.events.display_posts")
+    @patch("manage_agenda.events.connections.select_api")
+    @patch("manage_agenda.events.select_calendar_from_all_rules")
+    def test_clean_asks_the_operation_through_choose_action(
+        self, _select_cal, mock_select_api, _display
+    ):
+        from manage_agenda.events import clean_events_cli
+        from manage_agenda.ui import use_ui
+        from manage_agenda.ui.fake import ScriptedUI
+
+        api = MagicMock()
+        api.getPosts.return_value = [
+            {"id": "e1", "summary": "Old meeting", "start": {"dateTime": "2024-01-15T10:00:00"}, "end": {"dateTime": "2024-01-15T11:00:00"}}
+        ]
+        api.getPostTitle.return_value = "Old meeting"
+        mock_select_api.return_value = api
+        _select_cal.return_value = (api, "calendar1")
+        args = Args(interactive=True)
+
+        answers = [("ask_text", ""), ("select_events", "all"), ("choose_action", "1")]
+        with use_ui(ScriptedUI(answers)) as ui:
+            clean_events_cli(args)
+
+        self.assertEqual([call.kind for call in ui.calls], ["ask_text", "select_events", "choose_action"])
+        self.assertEqual([key for key, _label in ui.calls[2].payload["actions"]], ["0", "1", "2"])
+        # "1" is copy: an insert on the destination, no delete on the source.
+        api.getClient.return_value.events.return_value.insert.assert_called_once()
+        api.getClient.return_value.events.return_value.delete.assert_not_called()
     def test_parse_datetime_value(self):
         """Test _parse_datetime_value handles datetimes, dates, and strings."""
         from manage_agenda.events import _parse_datetime_value
@@ -261,6 +353,7 @@ class TestEvents(unittest.TestCase):
         """Test print_events_summary outputs summary to stdout."""
         import io
         import sys
+
         from manage_agenda.events import print_events_summary
 
         events = [
@@ -293,6 +386,7 @@ class TestEvents(unittest.TestCase):
         """Test print_events_summary when no events are added."""
         import io
         import sys
+
         from manage_agenda.events import print_events_summary
 
         captured = io.StringIO()

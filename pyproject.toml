@@ -19,6 +19,8 @@ dependencies = [
     "beautifulsoup4",
     "playwright",
     "pytest-playwright",
+    "pyyaml",
+    "questionary",
 ]
 
 [build-system]
@@ -26,7 +28,9 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["manage_agenda"]
+# An explicit list, no discovery: a subpackage left out here ships in an editable install
+# but not in the non-editable `pip install '.[test]'` CI runs.
+packages = ["manage_agenda", "manage_agenda.ui", "manage_agenda.gui", "manage_agenda.gui.screens"]
 
 [project.urls]
 Homepage = "https://github.com/fernand0/manage-agenda"
@@ -37,21 +41,18 @@ CI = "https://github.com/fernand0/manage-agenda/actions"
 [project.scripts]
 manage-agenda = "manage_agenda.cli:cli"
 
+[project.gui-scripts]
+manage-agenda-gui = "manage_agenda.gui.app:main"
+
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov", "pytest-mock"]
-dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "black", "isort", "ruff", "bandit"]
+# The desktop window (`manage-agenda gui`). PySide6 is LGPL; it is only imported by
+# manage_agenda.gui, so every other command works without it.
+gui = ["PySide6>=6.8"]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
 
-[tool.uv]
-dev-dependencies = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "black", "isort", "ruff", "bandit"]
-
-[tool.black]
-line-length = 100
-target-version = ['py310', 'py311', 'py312']
-include = '\.pyi?$'
-
-[tool.isort]
-profile = "black"
-line_length = 100
+[dependency-groups]
+dev = ["pytest", "pytest-cov", "pytest-mock", "pre-commit", "ruff", "bandit"]
 
 [tool.ruff]
 line-length = 100
@@ -68,7 +69,7 @@ select = [
     "UP",  # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by black)
+    "E501",  # line too long (not enforced: no formatter in the toolchain since black was dropped)
     "B008",  # do not perform function calls in argument defaults
     "C901",  # too complex
 ]

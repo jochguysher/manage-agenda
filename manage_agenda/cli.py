@@ -1,11 +1,15 @@
 import logging
-import sys
-from runpy import run_module
+import os
 
 import click
 
-from .base import setup_logging
-from .connections import authorize
+from .base import BROWSERS, install_playwright_browser, setup_logging
+from .connections import (
+    authorize,
+    complete_desktop_oauth,
+    credential_path,
+    describe_auth_failure,
+)
 from .evaluation import evaluate_models
 from .events import (
     clean_events_cli,
@@ -14,11 +18,22 @@ from .events import (
     move_events_cli,
     update_event_status_cli,
 )
+from .i18n import t
 from .sources import (
     Args,
     add_events_cli,
     list_folder,
+    list_restorable_identities_cli,
+    migrate_ledger_cli,
+    reconcile_ledger_cli,
+    restore_deleted_event_cli,
 )
+
+logger = logging.getLogger(__name__)
+
+# Click builds --help text when each command decorator runs, i.e. at import time. The first
+# t() call below is what triggers manage_agenda.i18n's language resolution, early enough that
+# --help output is translated along with everything printed at runtime.
 
 
 @click.group()
@@ -28,21 +43,25 @@ from .sources import (
     "--verbose",
     is_flag=True,
     default=False,
-    help="Enable verbose output.",
+    help=t("cli.verbose_help"),
 )
 @click.pass_context
 def cli(ctx, verbose):
-    """An app for adding entries to my calendar"""
     ctx.ensure_object(dict)
     ctx.obj["VERBOSE"] = verbose
     setup_logging(verbose)
 
 
+cli.help = t("cli.app_help")
+
+
 @cli.group()
 @click.pass_context
 def llm(ctx):
-    """LLM related operations"""
     pass
+
+
+llm.help = t("cli.llm_group_help")
 
 
 @llm.command()
@@ -52,19 +71,18 @@ def llm(ctx):
     "type_",
     type=click.Choice(["email", "web", "txt"]),
     default="txt",
-    help="Type of evaluation to run (email, web, txt)",
+    help=t("cli.evaluate.type_help"),
 )
 @click.option(
     "-o",
     "--output",
     type=click.Choice(["calendar", "file"]),
     default="file",
-    help="Output destination: calendar or file",
+    help=t("cli.output_help"),
 )
 @click.argument("prompt", required=False)
 @click.pass_context
 def evaluate(ctx, type_, output, prompt):
-    """Evaluate different LLM models"""
     if prompt:
         print(prompt)
     args = Args(
@@ -80,64 +98,117 @@ def evaluate(ctx, type_, output, prompt):
     evaluate_models(args, prompt=prompt, eval_type=type_ if not prompt else None)
 
 
+evaluate.help = t("cli.evaluate.help")
+
+
 @cli.command()
 @click.option(
     "-i",
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.option(
     "-a",
     "--ai",
-    default="ollama",
-    help="Select LLM",
+    default=None,
+    help=t("cli.add.ai_help"),
+)
+@click.option(
+    "-m",
+    "--model",
+    default=None,
+    help=t("cli.add.model_help"),
 )
 @click.option(
     "-f",
     "--force-refresh",
     is_flag=True,
     default=False,
-    help="Force refresh web content to bypass cache",
+    help=t("cli.add.force_refresh_help"),
 )
 @click.option(
     "-s",
     "--source",
     type=click.Choice(["email", "gmail", "imap", "web", "text"]),
     default=None,
-    help="Source of data: email, gmail, imap, web, or text files",
+    help=t("cli.add.source_help"),
 )
 @click.option(
     "-d",
     "--destination",
     default=None,
-    help="Select destination calendar",
+    help=t("cli.add.destination_help"),
 )
 @click.option(
     "-o",
     "--output",
     type=click.Choice(["calendar", "file"]),
     default="calendar",
-    help="Output destination: calendar or file",
+    help=t("cli.output_help"),
+)
+@click.option(
+    "--rule",
+    type=click.Choice(["auto", "review"]),
+    default=None,
+    help=t("cli.add.rule_help"),
+)
+@click.option(
+    "--reconfigure",
+    is_flag=True,
+    default=False,
+    help=t("cli.add.reconfigure_help"),
+)
+@click.option(
+    "--dry-run-ledger",
+    "dry_run_ledger",
+    is_flag=True,
+    default=False,
+    help=t("cli.add.dry_run_ledger_help"),
+)
+@click.option(
+    "--debug-log-extractions",
+    "debug_log_extractions",
+    is_flag=True,
+    default=False,
+    help=t("cli.add.debug_log_extractions_help"),
+)
+@click.option(
+    "--debug-log-retention-days",
+    "debug_log_retention_days",
+    type=int,
+    default=7,
+    help=t("cli.add.debug_log_retention_days_help"),
 )
 @click.pass_context
-def add(ctx, interactive, source, ai, force_refresh, destination, output):
-    """Add entries to the calendar."""
+def add(
+    ctx, interactive, source, ai, model, force_refresh, destination, output, rule, reconfigure,
+    dry_run_ledger, debug_log_extractions, debug_log_retention_days,
+):
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
         delete=None,
         source=source,
         ai=ai,
+        model=model,
         verbose=verbose,
         destination=destination,
         text=None,
         output=output,
         force_refresh=force_refresh,
+        rule=rule,
+        reconfigure=reconfigure,
+        dry_run_ledger=dry_run_ledger,
+        debug_log_extractions=debug_log_extractions,
+        debug_log_retention_days=debug_log_retention_days,
     )
 
     add_events_cli(args)
+
+
+add.help = t("cli.add.help")
 
 
 @cli.command()
@@ -146,11 +217,10 @@ def add(ctx, interactive, source, ai, force_refresh, destination, output):
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.pass_context
 def auth(ctx, interactive):
-    """Auth related operations"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -161,33 +231,23 @@ def auth(ctx, interactive):
         text=None,
     )
     if verbose:
-        logging.debug("Args: %s", args)
+        logger.debug("Args: %s", args)
     api_src = authorize(args)
-    if not api_src.getClient():
-        msg = (
-            "1. Enable the Gcalendar API:\n"
-            "   Go to the Google Cloud Console. https://console.cloud.google.com/\n"
-            "   If you don't have a project, create one.\n"
-            '   Search for "Gmail API" in the API Library. \n'
-            "   Enable the Gmail API. \n"
-            "2. Create Credentials: \n"
-            '   In the Google Cloud Console, go to "APIs & Services" > "Credentials". \n'
-            '   Click "Create credentials" and choose "OAuth client ID".  \n'
-            "   You might be asked to configure the consent screen first. \n"
-            '   If so, click "Configure consent screen", choose "External",\n'
-            "     give your app a name, and save.\n"
-            '   Back on the "Create credentials" page, select "Web application\n" '
-            "     as the Application type. \n"
-            "   Give your OAuth 2.0 client a name. \n"
-            '   Add http://localhost:8080 to "Authorized JavaScript origins". \n'
-            '   Add http://localhost:8080/oauth2callback to "Authorized redirect URIs". \n'
-            '   Click "Create". \n'
-            "   Download the resulting JSON file (this is your credentials.json file). \n"
-            f"  and rename (or make a link) to: {api_src.confName((api_src.getServer(), api_src.getNick()))}\n"
-        )
-        print(msg)
-    else:
-        print("This account has been correctly authorized")
+    if api_src is not None and api_src.getClient():
+        print(t("cli.auth.authorized_success"))
+        return
+
+    print(describe_auth_failure(api_src))
+    if api_src is not None and os.path.isfile(credential_path(api_src)):
+        print(t("cli.auth.opening_browser"))
+        if complete_desktop_oauth(api_src):
+            print(t("cli.auth.authorized_success"))
+            return
+        return
+    print(t("cli.auth.create_oauth_client_instructions"))
+
+
+auth.help = t("cli.auth.help")
 
 
 @cli.command()
@@ -196,11 +256,10 @@ def auth(ctx, interactive):
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.pass_context
 def gcalendar(ctx, interactive):
-    """List events from Google Calendar"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -213,17 +272,19 @@ def gcalendar(ctx, interactive):
     list_folder(args, "gcalendar")
 
 
+gcalendar.help = t("cli.gcalendar.help")
+
+
 @cli.command()
 @click.option(
     "-i",
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.pass_context
 def gmail(ctx, interactive):
-    """List emails from Gmail"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -236,31 +297,34 @@ def gmail(ctx, interactive):
     list_folder(args, "gmail")
 
 
+gmail.help = t("cli.gmail.help")
+
+
 @cli.command()
 @click.option(
     "-i",
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.option(
     "-s",
     "--source",
     default=None,
-    help="Select source calendar",
+    help=t("cli.select_source_calendar_help"),
 )
 @click.option(
     "-d",
     "--destination",
     default=None,
-    help="Select destination calendar",
+    help=t("cli.select_destination_calendar_help"),
 )
 @click.option(
     "-t",
     "--text",
     default=None,
-    help="Select text in title",
+    help=t("cli.select_text_help"),
 )
 @click.option(
     "-D",
@@ -270,7 +334,6 @@ def gmail(ctx, interactive):
 )
 @click.pass_context
 def copy(ctx, interactive, source, destination, text, start_date):
-    """Copy entries from one calendar to another"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -285,31 +348,34 @@ def copy(ctx, interactive, source, destination, text, start_date):
     copy_events_cli(args)
 
 
+copy.help = t("cli.copy.help")
+
+
 @cli.command()
 @click.option(
     "-i",
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.option(
     "-s",
     "--source",
     default=None,
-    help="Select source calendar",
+    help=t("cli.select_source_calendar_help"),
 )
 @click.option(
     "-d",
     "--destination",
     default=None,
-    help="Select destination calendar",
+    help=t("cli.select_destination_calendar_help"),
 )
 @click.option(
     "-t",
     "--text",
     default=None,
-    help="Select text in title",
+    help=t("cli.select_text_help"),
 )
 @click.option(
     "-D",
@@ -319,7 +385,6 @@ def copy(ctx, interactive, source, destination, text, start_date):
 )
 @click.pass_context
 def clean(ctx, interactive, source, destination, text, start_date):
-    """Clean calendar entries (select between copy or delete)"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -334,25 +399,28 @@ def clean(ctx, interactive, source, destination, text, start_date):
     clean_events_cli(args)
 
 
+clean.help = t("cli.clean.help")
+
+
 @cli.command()
 @click.option(
     "-i",
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.option(
     "-s",
     "--source",
     default=None,
-    help="Select source calendar",
+    help=t("cli.select_source_calendar_help"),
 )
 @click.option(
     "-t",
     "--text",
     default=None,
-    help="Select text in title",
+    help=t("cli.select_text_help"),
 )
 @click.option(
     "-D",
@@ -362,7 +430,6 @@ def clean(ctx, interactive, source, destination, text, start_date):
 )
 @click.pass_context
 def delete(ctx, interactive, source, text, start_date):
-    """Delete entries from a calendar"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -377,31 +444,34 @@ def delete(ctx, interactive, source, text, start_date):
     delete_events_cli(args)
 
 
+delete.help = t("cli.delete.help")
+
+
 @cli.command()
 @click.option(
     "-i",
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.option(
     "-s",
     "--source",
     default=None,
-    help="Select source calendar",
+    help=t("cli.select_source_calendar_help"),
 )
 @click.option(
     "-d",
     "--destination",
     default=None,
-    help="Select destination calendar",
+    help=t("cli.select_destination_calendar_help"),
 )
 @click.option(
     "-t",
     "--text",
     default=None,
-    help="Select text in title",
+    help=t("cli.select_text_help"),
 )
 @click.option(
     "-D",
@@ -411,7 +481,6 @@ def delete(ctx, interactive, source, text, start_date):
 )
 @click.pass_context
 def move(ctx, interactive, source, destination, text, start_date):
-    """Move entries from one calendar to another"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -426,29 +495,31 @@ def move(ctx, interactive, source, destination, text, start_date):
     move_events_cli(args)
 
 
+move.help = t("cli.move.help")
+
+
 @cli.command()
 @click.option(
     "-i",
     "--interactive",
     is_flag=True,
     default=False,
-    help="Running in interactive mode",
+    help=t("cli.interactive_help"),
 )
 @click.option(
     "-s",
     "--source",
     default=None,
-    help="Select source calendar",
+    help=t("cli.select_source_calendar_help"),
 )
 @click.option(
     "-t",
     "--text",
     default=None,
-    help="Select text in title",
+    help=t("cli.select_text_help"),
 )
 @click.pass_context
 def update_status(ctx, interactive, source, text):
-    """Update event status from busy to available"""
     verbose = ctx.obj["VERBOSE"]
     args = Args(
         interactive=interactive,
@@ -461,7 +532,120 @@ def update_status(ctx, interactive, source, text):
 
     update_event_status_cli(args)
 
-BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
+
+update_status.help = t("cli.update_status.help")
+
+
+@cli.command()
+@click.argument("identity", required=False)
+@click.option(
+    "--list",
+    "list_only",
+    is_flag=True,
+    default=False,
+    help=t("cli.restore.list_help"),
+)
+@click.option(
+    "-s",
+    "--source",
+    default=None,
+    help=t("cli.select_source_calendar_help"),
+)
+@click.pass_context
+def restore(ctx, identity, list_only, source):
+    if list_only:
+        list_restorable_identities_cli()
+        return
+    if not identity:
+        print(t("cli.restore.identity_required"))
+        return
+    verbose = ctx.obj["VERBOSE"]
+    args = Args(
+        interactive=False,
+        delete=None,
+        source=source,
+        verbose=verbose,
+        destination=None,
+        text=None,
+    )
+
+    restore_deleted_event_cli(args, identity)
+
+
+restore.help = t("cli.restore.help")
+
+
+@cli.command(name="migrate-ledger")
+@click.option(
+    "-i",
+    "--interactive",
+    is_flag=True,
+    default=False,
+    help=t("cli.ledger_account_interactive_help"),
+)
+@click.option(
+    "--dry-run-ledger",
+    "dry_run_ledger",
+    is_flag=True,
+    default=False,
+    help=t("cli.migrate_ledger.dry_run_ledger_help"),
+)
+@click.pass_context
+def migrate_ledger(ctx, interactive, dry_run_ledger):
+    verbose = ctx.obj["VERBOSE"]
+    args = Args(
+        interactive=interactive,
+        delete=None,
+        source=None,
+        verbose=verbose,
+        destination=None,
+        text=None,
+        dry_run_ledger=dry_run_ledger,
+    )
+
+    code = migrate_ledger_cli(args)
+    if code:
+        ctx.exit(code)
+
+
+migrate_ledger.help = t("cli.migrate_ledger.help")
+
+
+@cli.command()
+@click.option(
+    "-i",
+    "--interactive",
+    is_flag=True,
+    default=False,
+    help=t("cli.ledger_account_interactive_help"),
+)
+@click.option(
+    "--dry-run-ledger",
+    "dry_run_ledger",
+    is_flag=True,
+    default=False,
+    help=t("cli.reconcile.dry_run_ledger_help"),
+)
+@click.pass_context
+def reconcile(ctx, interactive, dry_run_ledger):
+    verbose = ctx.obj["VERBOSE"]
+    args = Args(
+        interactive=interactive,
+        delete=None,
+        source=None,
+        verbose=verbose,
+        destination=None,
+        text=None,
+        dry_run_ledger=dry_run_ledger,
+    )
+
+    code = reconcile_ledger_cli(args)
+    if code:
+        ctx.exit(code)
+
+
+reconcile.help = t("cli.reconcile.help")
+
 
 @cli.command()
 @click.option(
@@ -469,19 +653,30 @@ BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
     "-b",
     default="firefox",
     type=click.Choice(BROWSERS, case_sensitive=False),
-    help="Which browser to install",
+    help=t("cli.install.browser_help"),
 )
-def install(browser):
-    """
-    Install the Playwright browser needed by this tool.
+@click.pass_context
+def install(ctx, browser):
+    code = install_playwright_browser(browser)
+    if code:
+        print(t("cli.install.failed", code=code))
+        ctx.exit(code)
 
-    Usage:
 
-        manage-agenda install
+install.help = t("cli.install.help")
 
-    Or for browsers other than the Firefox default:
 
-        manage-agenda install -b chromium
-    """
-    sys.argv = ["playwright", "install", browser]
-    run_module("playwright", run_name="__main__")
+@cli.command()
+@click.pass_context
+def gui(ctx):
+    # PySide6 is an optional extra (`pip install 'manage-agenda[gui]'`): imported here, and
+    # only here, so every other command works without it.
+    try:
+        from manage_agenda.gui.app import run
+    except ImportError as error:
+        print(t("cli.gui.not_installed", error=error))
+        ctx.exit(1)
+    ctx.exit(run(verbose=ctx.obj["VERBOSE"]))
+
+
+gui.help = t("cli.gui.help")

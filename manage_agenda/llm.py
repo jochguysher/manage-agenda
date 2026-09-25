@@ -1,8 +1,26 @@
 import configparser
 import logging
 import os
+import subprocess
+import time
 import types
 
+from socialModules.configMod import CONFIGDIR
+
+from manage_agenda.exceptions import LLMError
+from manage_agenda.i18n import t
+from manage_agenda.ui import echo, get_ui, label_for, select_one
+
+logger = logging.getLogger(__name__)
+
+# How long OllamaClient waits for a freshly spawned `ollama serve` to answer before giving up:
+# OLLAMA_START_ATTEMPTS polls, OLLAMA_START_DELAY_SECONDS apart. Module-level so a test can
+# shrink them; the old code looped forever, respawning the server on every failed poll.
+OLLAMA_START_ATTEMPTS = 10
+OLLAMA_START_DELAY_SECONDS = 1.0
+
+# Optional providers: each import below falls back to a stub when the SDK isn't installed,
+# so they sit after the unconditional imports (E402 applies to plain imports only).
 try:
     from google import genai
 except Exception:
@@ -32,8 +50,6 @@ except Exception:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("mistralai is not installed")
 
-from socialModules.configMod import CONFIGDIR, select_from_list
-
 
 # This shouln't go here?
 def load_config(config_file):
@@ -49,7 +65,7 @@ def load_config(config_file):
     if os.path.exists(config_file):
         config.read(config_file)
     else:
-        logging.error("Configuration file not found: %s", config_file)
+        logger.error("Configuration file not found: %s", config_file)
         raise FileNotFoundError(f"Config file not found: {config_file}")
     return config
 
@@ -90,27 +106,51 @@ class OllamaClient(LLMClient):
 
         iss = isinstance(model_name, int)
         if not iss and not model_name:
-            models = None
-            while not models:
-                try:
-                    models = self.list_models()
-                except Exception:
-                    import subprocess
-
-                    subprocess.Popen(
-                        ["ollama", "serve"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-
-            _, self.model_name = select_from_list(
-                models, identifier="model", title="Available models"
+            models = self._models_or_start_server()
+            chosen = get_ui().choose_one(
+                models, identifier="model", title=t("llm.available_models")
             )
+            if chosen is None:
+                raise LLMError(t("llm.no_model_selected"))
+            self.model_name = label_for(chosen, "model")
         else:
             if isinstance(model_name, int):
                 self.model_name = self.list_models()[0].model
             else:
                 self.model_name = model_name
+
+    @classmethod
+    def _models_or_start_server(cls):
+        """The installed models, starting `ollama serve` once when the first listing fails
+        and polling a bounded number of times for it to come up - LLMError past that, so a
+        missing binary or a server that never answers stops the flow instead of hanging it."""
+        try:
+            models = cls.list_models()
+        except Exception as error:
+            logger.info(f"Ollama not reachable ({error}); starting `ollama serve`.")
+            echo(t("llm.starting_ollama"))
+            try:
+                subprocess.Popen(
+                    ["ollama", "serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as spawn_error:
+                raise LLMError(t("llm.ollama_unreachable", error=spawn_error)) from spawn_error
+            models = None
+            last_error = error
+            for _attempt in range(OLLAMA_START_ATTEMPTS):
+                time.sleep(OLLAMA_START_DELAY_SECONDS)
+                try:
+                    models = cls.list_models()
+                    break
+                except Exception as retry_error:
+                    last_error = retry_error
+            if models is None:
+                raise LLMError(t("llm.ollama_unreachable", error=last_error)) from last_error
+        if not models:
+            raise LLMError(t("llm.no_ollama_models"))
+        return models
 
     def generate_text(self, prompt):
         try:
@@ -126,11 +166,11 @@ class OllamaClient(LLMClient):
             # curl http://localhost:11434/api/generate -d '{"model": "llama3.2", "keep_alive": 0}'
             return response.message.content
         except Exception as e:
-            logging.error("Error generating text with Ollama: %s", e)
+            logger.error("Error generating text with Ollama: %s", e)
             if "model requires more system memory" in str(e) or "out of memory" in str(e).lower():
-                logging.error("Ollama model %s requires more memory than available: %s", self.model_name, e)
+                logger.error("Ollama model %s requires more memory than available: %s", self.model_name, e)
                 return "Memory"
-            return None
+            raise LLMError(str(e)) from e
 
     @staticmethod
     def list_models():
@@ -147,15 +187,18 @@ class GeminiClient(LLMClient):
 
         self.client = genai.Client(api_key=self.api_key)
         if not model_name:
-            # names = [el.name for el in genai.list_models()]
-            models = self.list_models()
-            sel, name = select_from_list(
+            # Only the Gemini models (what select_from_list's selector="gemini" filtered).
+            models = [m for m in self.list_models() if "gemini" in label_for(m, "name")]
+            chosen = get_ui().choose_one(
                 models,
                 identifier="name",
-                selector="gemini",
+                title=t("llm.available_models"),
                 default="models/gemini-2.0-flash",
             )
-            logging.debug("Selected model: %s", name)
+            if chosen is None:
+                raise LLMError(t("llm.no_model_selected"))
+            name = label_for(chosen, "name")
+            logger.debug("Selected model: %s", name)
             self.model_name = name.split("/")[1]
         else:
             self.model_name = model_name
@@ -171,8 +214,8 @@ class GeminiClient(LLMClient):
                     )
             return response.text
         except Exception as e:
-            logging.error("Error generating text with Gemini: %s", e)
-            return None
+            logger.error("Error generating text with Gemini: %s", e)
+            raise LLMError(str(e)) from e
 
     #@staticmethod
     def list_models(self):
@@ -188,12 +231,19 @@ class MistralClient(LLMClient):
         super().__init__(name_class)
 
         self.client = Mistral(api_key=self.api_key)
+        if model_name:
+            self.model_name = model_name
         if not self.model_name:
-            # names = [el.id for el in self.list_models(self).data]
             models = self.list_models(self).data
-            sel, name = select_from_list(models, identifier="id", default="mistral-small-latest")
-            # sel = select_from_list(names, default="mistral-small-latest")
-            self.model_name = name
+            chosen = get_ui().choose_one(
+                models,
+                identifier="id",
+                title=t("llm.available_models"),
+                default="mistral-small-latest",
+            )
+            if chosen is None:
+                raise LLMError(t("llm.no_model_selected"))
+            self.model_name = label_for(chosen, "id")
 
     def generate_text(self, prompt):
         try:
@@ -202,40 +252,83 @@ class MistralClient(LLMClient):
             )
             return response.choices[0].message.content
         except Exception as e:
-            logging.error("Error generating text with Mistral: %s", e)
-            return None
+            logger.error("Error generating text with Mistral: %s", e)
+            raise LLMError(str(e)) from e
 
     @staticmethod
     def list_models(self):
         return self.client.models.list()
 
 
-def select_llm(args):
-    """Selects and initializes the appropriate LLM client."""
-    if args.interactive:
-        llm_options = ["ollama", "gemini", "mistral"]
-        sel, ai = select_from_list(llm_options, title="Select model provider", default="ollama")
+DEFAULT_MODEL_BY_PROVIDER = {
+    "ollama": "granite4:latest",
+    "gemini": "gemini-3.8-flash",
+    "mistral": "mistral-small-latest",
+}
+
+
+def select_llm(args, config_path=None):
+    """Selects and initializes the appropriate LLM client.
+
+    Precedence: -a/--ai and -m/--model flags (one-off, never saved) > saved user config >
+    interactive wizard > a hardcoded default provider/model, same as before this feature
+    existed. --reconfigure re-opens the wizard even when a config is already saved; whatever
+    it picks is saved for next time, exactly like the very first interactive selection is.
+    """
+    from manage_agenda.user_config import load_user_config, update_user_config
+
+    saved = load_user_config(config_path)
+    reconfigure = getattr(args, "reconfigure", False)
+    explicit_provider = getattr(args, "ai", None)
+    explicit_model = getattr(args, "model", None)
+    prompted = False
+
+    if explicit_provider:
+        ai = explicit_provider
+    elif not reconfigure and saved.get("provider"):
+        ai = saved["provider"]
+    elif args.interactive or reconfigure:
+        ai = select_one(
+            ["ollama", "gemini", "mistral"], title=t("llm.select_provider_title"), default="ollama"
+        )
+        prompted = True
     else:
-        ai = getattr(args, "ai", None) or "gemini"
-    print(f"Selected AI: {ai}")
+        ai = "ollama"
+    echo(t("llm.selected_ai", ai=ai))
+
+    if explicit_model:
+        model_name = explicit_model
+    elif not reconfigure and not explicit_provider and saved.get("provider") == ai:
+        model_name = saved.get("model")
+    else:
+        model_name = None
+
+    ask_for_model = not model_name and (args.interactive or reconfigure)
+    if ask_for_model:
+        prompted = True
 
     if ai == "ollama":
-        if args.interactive:
+        if ask_for_model:
             model = None
             while not model:
                 model = OllamaClient()
         else:
-            model = OllamaClient("granite4:latest")
-        return model
+            model = OllamaClient(model_name or DEFAULT_MODEL_BY_PROVIDER["ollama"])
     elif ai == "gemini":
-        if args.interactive:
+        if ask_for_model:
             model = GeminiClient()
         else:
-            model = GeminiClient("gemini-2.5-flash")
-        return model
+            model = GeminiClient(model_name or DEFAULT_MODEL_BY_PROVIDER["gemini"])
     elif ai == "mistral":
-        model = MistralClient()
-        return model
+        if ask_for_model:
+            model = MistralClient()
+        else:
+            model = MistralClient(model_name or DEFAULT_MODEL_BY_PROVIDER["mistral"])
     else:
-        logging.error("Invalid LLM source: %s", ai)
+        logger.error("Invalid LLM source: %s", ai)
         return None
+
+    if prompted and not explicit_provider and not explicit_model:
+        update_user_config({"provider": ai, "model": model.model_name}, config_path)
+
+    return model

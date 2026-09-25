@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
+logger = logging.getLogger(__name__)
+
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "manage_agenda")
 
 
@@ -118,7 +120,7 @@ def reduce_html(url, post, force_refresh=False):
         force_refresh: If True, bypass cache comparison and return full content
     """
     if not post or not post.strip():
-        logging.warning("Empty content received for %s", url)
+        logger.warning("Empty content received for %s", url)
         return None
 
     if not os.path.exists(CACHE_DIR):
@@ -130,20 +132,20 @@ def reduce_html(url, post, force_refresh=False):
     cached_file_path = os.path.join(CACHE_DIR, safe_filename)
 
     new_html = post
-    logging.debug("Post: %s", post)
+    logger.debug("Post: %s", post)
 
     soup = BeautifulSoup(new_html, "html.parser")
 
     # Detect error pages
     if is_error_content(soup):
-        logging.warning("Error page detected for %s", url)
+        logger.warning("Error page detected for %s", url)
         return None
 
     # Extract relevant script content before they are decomposed
     # extra_script_data = extract_relevant_script_content(soup)
 
     if force_refresh:
-        logging.info("Force refresh enabled. Returning full content after cleaning...")
+        logger.info("Force refresh enabled. Returning full content after cleaning...")
         # Save the new HTML to the cache
         with open(cached_file_path, "w", encoding="utf-8") as f:
             f.write(new_html)
@@ -155,7 +157,7 @@ def reduce_html(url, post, force_refresh=False):
             meta.decompose()
         result = soup.get_text(separator="\n", strip=True)
     elif os.path.exists(cached_file_path):
-        logging.info("URL found in cache. Comparing...")
+        logger.info("URL found in cache. Comparing...")
         with open(cached_file_path, encoding="utf-8") as f:
             old_html = f.read()
 
@@ -234,7 +236,7 @@ def reduce_html(url, post, force_refresh=False):
             f.write(new_html)
 
     else:
-        logging.info("URL not found in cache. Downloading and storing it...")
+        logger.info("URL not found in cache. Downloading and storing it...")
         # Save the new HTML to the cache
         with open(cached_file_path, "w", encoding="utf-8") as f:
             f.write(new_html)
@@ -255,9 +257,11 @@ def reduce_html(url, post, force_refresh=False):
         elif len(words) == 1 and any(char.isdigit() for char in words[0]):
             newResult = newResult + "\n" + line
 
-    logging.debug("Orig: %s", result)
+    # Whole-page dumps: debug diagnostics, not the interface - they went to stdout on every
+    # URL, which a GUI's log panel could not absorb. The log file gets them at DEBUG (-v).
+    logger.debug("Orig: %s", result)
     result = newResult
-    logging.debug("Res: %s", result)
+    logger.debug("Res: %s", result)
 
     # if extra_script_data:
     #     result = f"{result}\n\n--- Extra Data Found in Scripts ---\n{extra_script_data}"

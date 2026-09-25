@@ -9,23 +9,40 @@ from socialModules.moduleContent import display_posts
 
 from manage_agenda import connections
 from manage_agenda.config import config
-from manage_agenda.connections import select_calendar
+from manage_agenda.connections import select_calendar_from_all_rules
+from manage_agenda.i18n import t
+from manage_agenda.ui import echo, get_ui
+
+logger = logging.getLogger(__name__)
 
 # Constants for date confirmation and interactive date/time modification.
-DATE_CONFIRM_PROMPT = (
-    "Are the dates correct? "
-    "Ye(s), (r)etry with LLM, "
-    "(Y)ear, (M)onth, (D)ay, (h)our, m(i)nute, (f)ull date/time: "
-)
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-DATETIME_INPUT_PROMPT = "Enter new {field} time (YYYY-MM-DD HH:MM:SS) or leave empty: "
 
 
-try:
-    DEFAULT_NAIVE_TIMEZONE = pytz.timezone(config.DEFAULT_TIMEZONE)
-except pytz.exceptions.UnknownTimeZoneError:
-    logging.error("Invalid timezone '%s' in config. Falling back to UTC.", config.DEFAULT_TIMEZONE)
-    DEFAULT_NAIVE_TIMEZONE = pytz.utc
+def _default_naive_timezone():
+    """The pytz timezone used to localize a naive event start/end time (no explicit
+    timeZone) - resolved fresh on EVERY call from config.DEFAULT_TIMEZONE, never cached as a
+    module-level constant.
+
+    This used to be a `DEFAULT_NAIVE_TIMEZONE = pytz.timezone(config.DEFAULT_TIMEZONE)`
+    constant computed once at import time - the same baked-at-import pattern behind the
+    ledger/config-path pollution bug fixed elsewhere in this redesign (see
+    docs/investigation-limite1.md §10), just for a timezone instead of a path. It surfaced as
+    three test_events.py failures (test_adjust_event_times_*) that looked like unrelated
+    flakiness: the constant silently read whatever DEFAULT_TIMEZONE the local .env happened
+    to set (America/Toronto, UTC-5 in January) instead of the Europe/Berlin (UTC+1) the tests
+    assumed - a 6-hour discrepancy - because nothing isolates that env var in tests and the
+    constant, once baked, ignored the timezone test_config.py's own patch.object(Config,
+    "DEFAULT_TIMEZONE", ...) calls elsewhere set for their own purposes. Bounded-purge
+    entries stamp their event_end from Calendar's own live event, not from this function, but
+    an event manage-agenda CREATES from a naive datetime is stamped via this - so a wrong
+    default timezone here does eventually skew purge timing by the same offset, once that
+    event's own end date is later read back."""
+    try:
+        return pytz.timezone(config.DEFAULT_TIMEZONE)
+    except pytz.exceptions.UnknownTimeZoneError:
+        logger.error("Invalid timezone '%s' in config. Falling back to UTC.", config.DEFAULT_TIMEZONE)
+        return pytz.utc
 
 
 def filter_events_by_title(api_cal, events, text_filter):
@@ -45,40 +62,6 @@ def filter_events_by_title(api_cal, events, text_filter):
     return filtered_events
 
 
-def _get_datetime_input(field_name):
-    """Get datetime input from user with a consistent prompt."""
-    return input(DATETIME_INPUT_PROMPT.format(field=field_name))
-
-
-def _process_full_datetime_modification(event):
-    """Process full date/time modification (confirmation == 'f')."""
-    new_start_str = _get_datetime_input("start")
-    if new_start_str:
-        event.setdefault("start", {})["dateTime"] = new_start_str
-        try:
-            start_dt = datetime.datetime.strptime(new_start_str, DATETIME_FORMAT)
-            end_dt = start_dt + timedelta(minutes=45)
-            new_end_str_default = end_dt.strftime(DATETIME_FORMAT)
-
-            modify_end_time = input(
-                f"Default end time will be {new_end_str_default}. Do you want to modify it? (y/n): "
-            ).lower()
-            if modify_end_time == "y":
-                new_end_str = _get_datetime_input("end")
-            else:
-                new_end_str = new_end_str_default
-        except ValueError:
-            print("Invalid start time format. Please use YYYY-MM-DD HH:MM:SS.")
-            new_end_str = ""
-    else:
-        new_end_str = _get_datetime_input("end")
-
-    if new_end_str:
-        event.setdefault("end", {})["dateTime"] = new_end_str
-
-    return event
-
-
 def _parse_datetime_to_utc(dt_str, tz_name=None):
     """Parse a datetime string, localize it if naive, and convert it to UTC."""
     if not dt_str:
@@ -95,7 +78,7 @@ def _parse_datetime_to_utc(dt_str, tz_name=None):
         try:
             dt_obj = datetime.datetime.strptime(normalized_str, DATETIME_FORMAT)
         except ValueError as parse_err:
-            logging.error("Invalid datetime format: '%s'. Error: %s", dt_str, parse_err)
+            logger.error("Invalid datetime format: '%s'. Error: %s", dt_str, parse_err)
             return None
 
     if dt_obj.tzinfo is None:
@@ -104,13 +87,13 @@ def _parse_datetime_to_utc(dt_str, tz_name=None):
                 local_tz = pytz.timezone(tz_name)
                 dt_obj = local_tz.localize(dt_obj)
             except pytz.exceptions.UnknownTimeZoneError:
-                logging.warning(
+                logger.warning(
                     f"Unknown timezone '{tz_name}'. "
                     f"Using default timezone: {config.DEFAULT_TIMEZONE}"
                 )
-                dt_obj = DEFAULT_NAIVE_TIMEZONE.localize(dt_obj)
+                dt_obj = _default_naive_timezone().localize(dt_obj)
         else:
-            dt_obj = DEFAULT_NAIVE_TIMEZONE.localize(dt_obj)
+            dt_obj = _default_naive_timezone().localize(dt_obj)
 
     return dt_obj.astimezone(pytz.utc)
 
@@ -124,11 +107,11 @@ def _parse_event_times(event):
 
     current_start = _parse_datetime_to_utc(start_str, start_tz)
     if start_str and current_start is None:
-        logging.warning("Could not parse start time, using empty value")
+        logger.warning("Could not parse start time, using empty value")
 
     current_end = _parse_datetime_to_utc(end_str, end_tz)
     if end_str and current_end is None:
-        logging.warning("Could not parse end time, using empty value")
+        logger.warning("Could not parse end time, using empty value")
 
     return current_start, current_end
 
@@ -163,7 +146,7 @@ def adjust_event_times(event):
         end["timeZone"] = "UTC"
 
     if start_dt and end_dt and end_dt <= start_dt:
-        print("Validation Warning: End time is not after start time. Adjusting end time.")
+        echo(t("events.end_not_after_start_warning"))
         end_dt = start_dt + timedelta(minutes=30)
         end["dateTime"] = end_dt.isoformat()
         end["timeZone"] = "UTC"
@@ -186,7 +169,7 @@ def _ensure_valid_event_timezones(event, fallback_tz="UTC"):
         try:
             pytz.timezone(tz_name)
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"Invalid timezone '{tz_name}' for event {when}; using fallback '{fallback_tz}'."
             )
             field["timeZone"] = fallback_tz
@@ -194,63 +177,17 @@ def _ensure_valid_event_timezones(event, fallback_tz="UTC"):
     return event
 
 
-def _process_individual_component_modification(event, confirmation, current_start, current_end):
-    """Process an individual year, month, day, hour, or minute modification."""
-    component_map = {"y": "year", "m": "month", "d": "day", "h": "hour", "i": "minute"}
-    component = component_map.get(confirmation)
+def _validate_event_dates_interactive(event, post_identifier=None, context=None):
+    """Let the user confirm or correct an extracted event's dates, through the UI port.
 
-    for time_key, event_key, current_time in [
-        ("start", "start", current_start),
-        ("end", "end", current_end),
-    ]:
-        if current_time and component:
-            new_time = _modify_single_component(current_time, component, time_key)
-            event.setdefault(event_key, {})["dateTime"] = new_time.isoformat()
-
-    return event
-
-
-def _process_date_modification(event, confirmation, current_start, current_end):
-    """Modify an event date according to the interactive confirmation choice."""
-    if confirmation == "f":
-        event = _process_full_datetime_modification(event)
-    elif confirmation in ["m", "d", "h", "y", "i"]:
-        event = _process_individual_component_modification(
-            event, confirmation, current_start, current_end
-        )
-
-    event = adjust_event_times(event)
-
-    start_time = safe_get(event, ["start", "dateTime"])
-    end_time = safe_get(event, ["end", "dateTime"])
-    print("--- Updated Event Times ---")
-    print(f"Start: {_format_datetime_for_display(start_time)}")
-    print(f"End: {_format_datetime_for_display(end_time)}")
-    print("---------------------------")
-
-    return event
-
-
-def _validate_event_dates_interactive(event, post_identifier=None):
-    """Interactively confirm and correct event dates."""
-    errors = []
-    is_valid = True
+    Returns (event, is_valid, errors) like the non-interactive twin: is_valid is False when
+    the user asked for the LLM to be run again ("retry"), which the caller honours by
+    re-extracting. The terminal menu (s/r/y/m/d/h/i/f) lives in
+    manage_agenda.ui.console.ConsoleUI.review_event; a GUI shows a form instead. `context`
+    (extraction.message_context()) names the source message next to the event."""
     label = f"[{post_identifier}] " if post_identifier else ""
-
-    confirmed = False
-    while not confirmed:
-        current_start, current_end = _parse_event_times(event)
-        confirmation = input(f"{label}{DATE_CONFIRM_PROMPT}").lower()
-
-        if confirmation == "r":
-            is_valid = False
-            confirmed = True
-        elif confirmation in ("s", ""):
-            confirmed = True
-        else:
-            event = _process_date_modification(event, confirmation, current_start, current_end)
-
-    return event, is_valid, errors
+    event, decision = get_ui().review_event(event, label=label, context=context)
+    return event, decision != "retry", []
 
 
 def _validate_event_dates_non_interactive(event, post_identifier=None):
@@ -261,7 +198,7 @@ def _validate_event_dates_non_interactive(event, post_identifier=None):
 
     current_start, current_end = _parse_event_times(event)
     if current_start is None or current_end is None:
-        errors.append(f"{label}Event is missing valid start or end dateTime")
+        errors.append(t("events.missing_start_or_end_datetime", label=label))
 
     now = datetime.datetime.now(datetime.timezone.utc)
     reasonable_past = now - timedelta(days=730)
@@ -272,57 +209,33 @@ def _validate_event_dates_non_interactive(event, post_identifier=None):
             continue
         if dt < reasonable_past:
             warnings.append(
-                f"{label}Event {field_name} time ({dt.strftime(DATETIME_FORMAT)}) "
-                f"is unreasonably far in the past (> 2 years)"
+                t(
+                    "events.time_far_in_the_past",
+                    label=label,
+                    field_name=field_name,
+                    formatted_time=dt.strftime(DATETIME_FORMAT),
+                )
             )
         if dt > reasonable_future:
             warnings.append(
-                f"{label}Event {field_name} time ({dt.strftime(DATETIME_FORMAT)}) "
-                f"is unreasonably far in the future (> 5 years)"
+                t(
+                    "events.time_far_in_the_future",
+                    label=label,
+                    field_name=field_name,
+                    formatted_time=dt.strftime(DATETIME_FORMAT),
+                )
             )
 
     for warning in warnings:
-        print(f"WARNING: {warning}")
+        echo(t("events.warning_prefix", warning=warning))
 
     return event, len(errors) == 0, errors
-
-
-def _modify_single_component(dt, component, time_label):
-    """Modify one datetime component based on interactive input."""
-    print(f"\nModifying {component} for {time_label} time:")
-    print(f"Current: {dt}")
-
-    value_str = input(f"New {component} ({getattr(dt, component)}): ").strip()
-    if value_str:
-        try:
-            new_value = int(value_str)
-            if component == "year":
-                new_dt = dt.replace(year=new_value)
-            elif component == "month":
-                new_dt = dt.replace(month=new_value)
-            elif component == "day":
-                new_dt = dt.replace(day=new_value)
-            elif component == "hour":
-                new_dt = dt.replace(hour=new_value)
-            elif component == "minute":
-                new_dt = dt.replace(minute=new_value)
-            else:
-                print(f"Unknown component: {component}. Keeping original time.")
-                return dt
-
-            print(f"New {time_label} time: {new_dt}")
-            return new_dt
-        except ValueError as error:
-            print(f"Invalid value: {error}. Keeping original time.")
-            return dt
-
-    return dt
 
 
 def _format_datetime_for_display(dt_value):
     """Format a datetime value for display in the local timezone."""
     if dt_value is None or dt_value == "":
-        return "N/A"
+        return t("events.not_available")
 
     if isinstance(dt_value, datetime.datetime):
         if dt_value.tzinfo is None:
@@ -357,7 +270,7 @@ def copy_action(api_cal, event, my_calendar, my_calendar_dst):
         my_event["location"] = event["location"]
 
     my_calendar_dst.getClient().events().insert(calendarId=my_calendar, body=my_event).execute()
-    print(f"Copied event: {my_event['summary']}")
+    echo(t("events.copied_event", summary=my_event["summary"]))
 
 
 def copy_events_cli(args):
@@ -377,50 +290,16 @@ def select_events_by_user_input(api_cal, events_list, action_verb="copy"):
     Returns:
         List of selected events
     """
-    print(f"Select events to {action_verb}:")
-    display_posts(api_cal, events_list)
-
-    print(f"{len(events_list)}) All")
-
-    selection = input(
-        f"Which event(s) to {action_verb}? (comma-separated numbers, text to match, or 'all') "
+    # The terminal (ConsoleUI.select_events) lists the events with display_posts and reads
+    # numbers, "all" or title text; a GUI shows a checkable table. Both get the same labels.
+    labels = [api_cal.getPostTitle(event) or "" for event in events_list]
+    return get_ui().select_events(
+        events_list,
+        labels,
+        title=t("events.select_events_to", action_verb=action_verb),
+        prompt_text=t("events.which_events_prompt", action_verb=action_verb),
+        render=lambda: display_posts(api_cal, events_list),
     )
-
-    selected_events = []
-    if selection.lower() == "all" or selection == str(len(events_list)):
-        selected_events = events_list
-    else:
-        # First, try to parse as numbers (original functionality)
-        try:
-            indices = [int(i.strip()) for i in selection.split(",")]
-            # Check if all indices are valid (within range)
-            all_valid = all(0 <= idx < len(events_list) for idx in indices)
-
-            if all_valid:
-                # All numbers are valid indices, use number-based selection
-                for i in indices:
-                    if 0 <= i < len(events_list):
-                        selected_events.append(events_list[i])
-            else:
-                # At least one number is out of range, treat as text-based selection
-                search_terms = selection.split(",")
-                for term in search_terms:
-                    term = term.strip().lower()
-                    for i, event in enumerate(events_list):
-                        event_title = api_cal.getPostTitle(event).lower()
-                        if term in event_title and events_list[i] not in selected_events:
-                            selected_events.append(events_list[i])
-        except ValueError:
-            # If parsing as integers fails, treat as text-based selection
-            search_terms = selection.split(",")
-            for term in search_terms:
-                term = term.strip().lower()
-                for i, event in enumerate(events_list):
-                    event_title = api_cal.getPostTitle(event).lower()
-                    if term in event_title and events_list[i] not in selected_events:
-                        selected_events.append(events_list[i])
-
-    return selected_events
 
 
 def process_calendar_events(
@@ -440,11 +319,14 @@ def process_calendar_events(
         None
     """
     # Initialize API and calendar
-    api_cal = connections.select_api(args, "gcalendar", rules=None, title="Select Rule")
+
     if getattr(args, "source", None):
+        api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
         selected_calendar = args.source
     else:
-        selected_calendar = select_calendar(api_cal, title="Select calendar", args=args)
+        api_cal, selected_calendar = select_calendar_from_all_rules(
+            args, title=t("events.select_calendar_title")
+        )
 
     # Set the active calendar using socialModules method
     api_cal.setActive(selected_calendar)
@@ -456,7 +338,7 @@ def process_calendar_events(
         if parsed is not None:
             today = parsed.astimezone(datetime.timezone.utc)
         else:
-            logging.warning("Could not parse start_date '%s', falling back to today.", start_date_str)
+            logger.warning("Could not parse start_date '%s', falling back to today.", start_date_str)
             today = datetime.datetime.now(datetime.timezone.utc)
     else:
         today = datetime.datetime.now(datetime.timezone.utc)
@@ -478,7 +360,7 @@ def process_calendar_events(
         future_events = []
         for post in all_posts:
             post_date = api_cal.getPostDate(post)
-            logging.debug("Date: %s", post_date)
+            logger.debug("Date: %s", post_date)
 
             if not isinstance(post_date, str):
                 if isinstance(post, dict):
@@ -499,31 +381,33 @@ def process_calendar_events(
             if post_date and post_date >= today:
                 future_events.append(post)
 
-    print("Upcoming events (up to 20):")
+    echo(t("events.upcoming_events_title"))
     for event in future_events[:20]:
-        print(f"- {api_cal.getPostTitle(event)} ({api_cal.getPostDate(event)})")
+        echo(t("events.event_line", title=api_cal.getPostTitle(event), date=api_cal.getPostDate(event)))
 
     text_filter = args.text
     if args.interactive and not text_filter:
-        text_filter = input("Text to filter by (leave empty for no filter): ")
+        text_filter = get_ui().ask_text(t("events.text_filter_prompt"))
 
     # Use the helper function to filter events by title
     filtered_events = filter_events_by_title(api_cal, future_events, text_filter)
 
     if not filtered_events:
-        print("No events found matching the criteria.")
+        echo(t("events.no_events_found"))
         return
 
     selected_events = select_events_by_user_input(api_cal, filtered_events, action_verb)
 
     if "clean" in action_func.__name__:
-        actions = ["Delete", "Copy", "Move"]
-        msg = "Select operation:"
+        actions = [t("events.action_delete"), t("events.action_copy"), t("events.action_move")]
+        msg = t("events.select_operation_title")
         for i, act in enumerate(actions):
             msg = f"{msg}\n{i}) {act}"
         msg = f"{msg}\n"
 
-        action_sel = input(msg)
+        action_sel = get_ui().choose_action(
+            [("0", actions[0]), ("1", actions[1]), ("2", actions[2])], msg
+        )
         destination_needed = True
         if action_sel == "1":  # Copy
             action_verb = "copy"
@@ -538,14 +422,15 @@ def process_calendar_events(
 
     # Handle destination calendar if needed
     if destination_needed:
-        my_calendar_dst = connections.select_api(
-            args, "gcalendar", rules=None, title="Select rule"
-        )
+
         if getattr(args, "destination", None):
+            my_calendar_dst = connections.select_api(
+                args, "gcalendar", rules=None, title=t("events.select_rule_lower_title")
+            )
             my_calendar = args.destination
         else:
-            my_calendar = select_calendar(
-                my_calendar_dst, title="Select destination calendar", args=args
+            my_calendar_dst, my_calendar = select_calendar_from_all_rules(
+                args, title=t("events.select_destination_calendar")
             )
     else:
         my_calendar = None
@@ -561,7 +446,7 @@ def delete_action(api_cal, event, my_calendar, my_calendar_dst):
     api_cal.getClient().events().delete(
         calendarId=api_cal.getActive(), eventId=event["id"]
     ).execute()
-    print(f"Deleted event: {event['summary']}")
+    echo(t("events.deleted_event", summary=event["summary"]))
 
 
 def delete_events_cli(args):
@@ -581,11 +466,11 @@ def move_action(api_cal, event, my_calendar, my_calendar_dst):
         my_event["location"] = event["location"]
 
     my_calendar_dst.getClient().events().insert(calendarId=my_calendar, body=my_event).execute()
-    print(f"Copied event: {my_event['summary']}")
+    echo(t("events.copied_event", summary=my_event["summary"]))
     api_cal.getClient().events().delete(
         calendarId=api_cal.getActive(), eventId=event["id"]
     ).execute()
-    print(f"Deleted event: {event['summary']}")
+    echo(t("events.deleted_event", summary=event["summary"]))
 
 
 def move_events_cli(args):
@@ -595,12 +480,12 @@ def move_events_cli(args):
 
 def update_event_status_cli(args):
     """Update event status from busy to available for selected events."""
-    api_cal = connections.select_api(args, "gcalendar", rules=None, title="Select Rule")
 
     if args.source:
+        api_cal = connections.select_api(args, "gcalendar", rules=None, title=t("events.select_rule_title"))
         my_calendar = args.source
     else:
-        my_calendar = select_calendar(api_cal)
+        api_cal, my_calendar = select_calendar_from_all_rules(args, title=t("events.select_calendar_title"))
 
     api_cal.setActive(my_calendar)
     api_cal.setPosts(max_results=None, event_types="default", show_active=False)
@@ -610,26 +495,28 @@ def update_event_status_cli(args):
         events,
         format_post=lambda event: (
             f"[{event.get('transparency', 'opaque')}] "
-            f"{api_cal.getPostTitle(event) or 'No Title'}"
+            f"{api_cal.getPostTitle(event) or t('events.no_title')}"
         ),
         limit=20,
-        title="Upcoming events (up to 20):",
+        title=t("events.upcoming_events_title"),
     )
 
     text_filter = args.text
     if args.interactive and not text_filter:
-        text_filter = input("Text to filter by (leave empty for no filter): ")
+        text_filter = get_ui().ask_text(t("events.text_filter_prompt"))
 
     events_to_update = []
     for event in events:
-        title = api_cal.getPostTitle(event) or "No Title"
-        if text_filter in title:
+        title = api_cal.getPostTitle(event) or t("events.no_title")
+        # No filter (neither -i nor --text) means every event, as filter_events_by_title
+        # does; `None in title` used to raise TypeError here.
+        if not text_filter or text_filter in title:
             # Only include events that are currently "busy" (opaque)
             if event.get("transparency", "opaque") == "opaque":
                 events_to_update.append(event)
 
     if not events_to_update:
-        print("No busy events found matching the criteria.")
+        echo(t("events.no_busy_events_found"))
         return
 
     selected_events = select_events_by_user_input(api_cal, events_to_update, "update")
@@ -643,8 +530,8 @@ def update_event_status_cli(args):
             calendarId=my_calendar, eventId=event["id"], body=event
         ).execute()
 
-        title = api_cal.getPostTitle(event) or "No Title"
-        print(f"Updated event status to available: {title}")
+        title = api_cal.getPostTitle(event) or t("events.no_title")
+        echo(t("events.updated_status_available", title=title))
 
 
 def clean_events_cli(args):
@@ -766,14 +653,14 @@ def _get_event_sort_key(event):
 
 def print_events_summary(events):
     """Print a summary list of added events to standard output, sorted by start date."""
-    output_lines = ["Summary of events added:"]
+    output_lines = [t("events.summary_title")]
     if events:
         sorted_events = sorted(events, key=_get_event_sort_key)
         for event in sorted_events:
             output_lines.append(format_event_summary(event))
     else:
-        output_lines.append("No events were added.")
+        output_lines.append(t("events.summary_none"))
     for line in output_lines:
-        print(line)
+        echo(line)
     return output_lines
 

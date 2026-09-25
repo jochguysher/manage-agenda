@@ -32,14 +32,12 @@ Thank you for your interest in contributing to manage-agenda! This document prov
 
 ## Code Quality Standards
 
-### Formatting
-- **Black**: Code formatter (line length: 100)
-- **isort**: Import sorting
-- Run: `black . && isort .`
-
-### Linting
-- **Ruff**: Fast Python linter
+### Linting and import sorting
+- **Ruff**: linter, and import sorting through its `I` rules (line length: 100). It is the
+  only code-style tool: the pre-commit hook and the CI `lint` job run the same `ruff check`,
+  at the version pinned in `uv.lock`.
 - Run: `ruff check . --fix`
+- Install the hook once: `pre-commit install`
 
 ### Security
 - **Bandit**: Security issue scanner
@@ -170,7 +168,9 @@ def function_name(param1: str, param2: int) -> bool:
 manage-agenda/
 ├── manage_agenda/          # Main package
 │   ├── __init__.py
+│   ├── accounts.py        # Editor of socialModules' .rssBlogs / .rssImap (the Accounts screen)
 │   ├── cli.py             # CLI commands
+│   ├── compat.py          # Run-time shims on socialModules (IMAP port from .rssImap)
 │   ├── config.py          # Configuration management
 │   ├── exceptions.py      # Custom exceptions
 │   ├── base.py            # Base utilities
@@ -178,8 +178,28 @@ manage-agenda/
 │   ├── evaluation.py      # LLM evaluation workflows
 │   ├── events.py          # Calendar event operations
 │   ├── extraction.py      # LLM event extraction
+│   ├── gui/               # The desktop window (optional extra "gui", PySide6)
+│   │   ├── app.py         # run()/main(): create the window, attach the log handler
+│   │   ├── bridge.py      # QtUI: the UI port for a flow in a worker thread
+│   │   ├── jobs.py        # JobRunner: one core flow at a time in a QThread
+│   │   ├── dialogs.py     # One dialog per prompt kind
+│   │   ├── main_window.py # Sidebar of screens, log panel, status bar, Cancel
+│   │   ├── persist.py     # gui.ini: window geometry, log panel, the home's last choices
+│   │   ├── review_form.py # The editable event form (review dialog and the home's proposal)
+│   │   ├── theme.py       # Fusion + a palette-derived stylesheet (light and dark)
+│   │   ├── widgets.py     # Account and calendar pickers, form/hint/primary helpers
+│   │   └── screens/       # Home (the task), one screen per family of commands, Accounts (with the Google authorization), Settings; install.py is the Tools › Install dialog
+│   ├── i18n.py            # t(): interface language resolution
+│   ├── interactive.py     # questionary lists (console only, see "The UI port")
 │   ├── llm.py             # LLM provider clients and selection
+│   ├── messages.py        # en/fr message catalogue
+│   ├── scheduling.py      # Availability; cleanings planned after room occupations
 │   ├── sources.py         # Source ingestion workflows
+│   ├── ui/                # The UI port (see below)
+│   │   ├── __init__.py    # UI protocol, get_ui()/set_ui()/use_ui(), echo()
+│   │   ├── console.py     # ConsoleUI: the terminal implementation
+│   │   └── fake.py        # ScriptedUI: answers from a queue, for tests
+│   ├── user_config.py     # config.yaml (saved provider/model/calendars)
 │   └── web.py             # Web scraping
 ├── tests/                 # Test suite
 ├── .env.example          # Environment template
@@ -187,6 +207,83 @@ manage-agenda/
 ├── pyproject.toml        # Project configuration
 └── README.md
 ```
+
+A new subpackage must be added to `[tool.setuptools] packages` in `pyproject.toml`: the
+list is explicit, and a package left out of it is silently missing from the non-editable
+install CI uses.
+
+## The UI port
+
+Library code (everything under `manage_agenda/` except `cli.py`) never reads the terminal
+or writes to stdout directly. Every question goes through the current UI object, and every
+line shown to the user goes through `echo`:
+
+```python
+from manage_agenda.ui import echo, get_ui
+
+if get_ui().confirm(t("sources.confirm_remove_label")):
+    ...
+chosen = get_ui().choose_one(options, title=t("..."), identifier="summary")
+echo(t("extraction.calendar_event_created"))
+```
+
+`manage_agenda.ui.UI` lists the prompt kinds (`choose_one`, `choose_many`, `choose_action`,
+`confirm`, `ask_text`, `ask_multiline`, `review_event`, `select_events`, `echo`).
+`ConsoleUI`, the default, reproduces the classic terminal behaviour, so the CLI does not
+change; a GUI answers the same questions with dialogs. Any implementation may raise
+`manage_agenda.exceptions.UserCancelled` (a `BaseException`, like `KeyboardInterrupt`) when
+the user backs out - never catch it in library code.
+
+Rules, enforced by `tests/test_no_stdin_in_library.py` (an AST walk over the package):
+
+- no `input()`, `click.prompt()`, `click.confirm()`, socialModules' `select_from_list()` or
+  `rules.selectRuleInteractive()` outside `manage_agenda/ui/console.py`;
+- no import of `manage_agenda.interactive` outside `manage_agenda/ui/console.py`; library
+  code uses `manage_agenda.ui.select_one` / `select_many`, which dispatch to the current UI;
+- no `questionary` outside `interactive.py`.
+
+In tests, install a `ScriptedUI` with the answers the flow will ask for, then assert on what
+it asked:
+
+```python
+from manage_agenda.ui import use_ui
+from manage_agenda.ui.fake import ScriptedUI
+
+with use_ui(ScriptedUI([("confirm", True), ("choose_one", 0)])) as ui:
+    process_something(args)
+assert [call.kind for call in ui.calls] == ["confirm", "choose_one"]
+```
+
+pytest-style tests can take the `scripted_ui` fixture instead (it also checks every queued
+answer was consumed). `ScriptedUI(lenient=True)` answers unqueued prompts with a neutral
+default (first option, nothing, no) for tests that do not care about the prompts.
+
+## The desktop window
+
+`manage_agenda/gui/` is only imported by the `gui` command and the `manage-agenda-gui`
+script, so nothing else needs PySide6. Rules for GUI code:
+
+- a screen never calls core code on the GUI thread: it builds an `Args` and submits the
+  same `*_cli` function `cli.py` calls to the job runner (`Screen.submit`); the worker's
+  prompts become dialogs through `QtUI` and `MainWindow._on_ui_request`;
+- every string goes through `t()` with `en` and `fr` entries (keys `gui.*`);
+- no import-time side effects (no `QApplication`, no paths, no handlers); the look comes
+  from `theme.py` (two explicit palettes, light and dark, or the platform's; `apply_theme(app,
+  mode)` is called by `app.run()` and by View › Theme only) and from the `role` / `primary` /
+  `folded` properties `widgets.py` sets - not from per-widget `setStyleSheet` calls;
+- every widget or action a screen, dialog or form keeps as a public attribute gets an object
+  name automatically once built (`widgets.AutoNamed`): `<prefix>_<attribute>`, the prefix being
+  the screen's nav key (`home_run_button`), the prompt kind for a dialog (`review_event_summary`)
+  or `main` for the window. Keep interactive widgets as attributes, in snake_case, so Qt Pilot
+  and the tests can target them; `tests/gui/test_object_names.py` fails on an unnamed one. The
+  names `nav`, `screenTitle`, `logDock` and `logPanel` predate the rule and stay (theme
+  selectors, saved-state key);
+- the Accounts screen is the one screen that writes files from the GUI thread: it goes
+  through `manage_agenda.accounts`, which only edits local configuration and takes an
+  explicit `directory` so a test never reaches the real `~/.mySocial`;
+- tests live in `tests/gui/`, are skipped without PySide6 and run offscreen:
+  `QT_QPA_PLATFORM=offscreen python -m pytest tests/gui`. Install the toolkit with
+  `uv sync --extra gui --extra dev`.
 
 ## Getting Help
 

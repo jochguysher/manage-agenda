@@ -22,7 +22,7 @@ class TestConfig(unittest.TestCase):
         with (
             patch.object(Config, "DEFAULT_TIMEZONE", "Invalid/Timezone"),
             patch.object(Config, "LOG_LEVEL", "INFO"),
-            patch("logging.warning") as mock_warning,
+            patch("manage_agenda.config.logger.warning") as mock_warning,
         ):
             result = Config.validate()
             self.assertFalse(result)
@@ -33,7 +33,7 @@ class TestConfig(unittest.TestCase):
         with (
             patch.object(Config, "DEFAULT_TIMEZONE", "Europe/Berlin"),
             patch.object(Config, "LOG_LEVEL", "INVALID"),
-            patch("logging.warning") as mock_warning,
+            patch("manage_agenda.config.logger.warning") as mock_warning,
         ):
             result = Config.validate()
             self.assertFalse(result)
@@ -55,14 +55,14 @@ class TestConfig(unittest.TestCase):
 
     def test_get_api_key_not_configured(self):
         """Test getting API key for unconfigured service."""
-        with patch.object(Config, "GEMINI_API_KEY", None), patch("logging.warning") as mock_warning:
+        with patch.object(Config, "GEMINI_API_KEY", None), patch("manage_agenda.config.logger.warning") as mock_warning:
             key = Config.get_api_key("gemini")
             self.assertIsNone(key)
             mock_warning.assert_called_with("No API key configured for gemini")
 
     def test_get_api_key_unknown_service(self):
         """Test getting API key for unknown service."""
-        with patch("logging.warning") as mock_warning:
+        with patch("manage_agenda.config.logger.warning") as mock_warning:
             key = Config.get_api_key("unknown_service")
             self.assertIsNone(key)
             mock_warning.assert_called()

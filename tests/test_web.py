@@ -153,7 +153,7 @@ class TestReduceHtml(unittest.TestCase):
         # Cache dir should be created
         self.assertTrue(os.path.exists(self.temp_cache))
 
-    @patch("manage_agenda.web.logging.info")
+    @patch("manage_agenda.web.logger.info")
     def test_reduce_html_prints_cache_messages(self, mock_logging_info):
         """Test that reduce_html logs appropriate messages."""
         url = "https://example.com/msg"

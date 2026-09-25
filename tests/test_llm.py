@@ -1,6 +1,6 @@
 import sys
 import unittest
-from collections import namedtuple
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.append(".")
@@ -12,6 +12,10 @@ from manage_agenda.llm import (
     OllamaClient,
     load_config,
 )
+from manage_agenda.sources import Args
+from manage_agenda.ui import use_ui
+from manage_agenda.ui.fake import ScriptedUI
+from manage_agenda.user_config import load_user_config, save_user_config
 
 
 class TestLoadConfig(unittest.TestCase):
@@ -53,26 +57,78 @@ class TestLLMClient(unittest.TestCase):
 
 
 class TestOllamaClient(unittest.TestCase):
-    @patch("manage_agenda.llm.select_from_list")
     @patch("manage_agenda.llm.OllamaClient.list_models")
-    def test_ollama_init_with_model_name(self, mock_list_models, mock_select):
+    def test_ollama_init_with_model_name(self, mock_list_models):
         """Test OllamaClient initialization with model name."""
-        client = OllamaClient(model_name="llama2")
+        with use_ui(ScriptedUI()) as ui:
+            client = OllamaClient(model_name="llama2")
         self.assertEqual(client.model_name, "llama2")
         mock_list_models.assert_not_called()
-        mock_select.assert_not_called()
+        self.assertEqual(ui.calls, [])
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "llama2"))
     @patch("manage_agenda.llm.OllamaClient.list_models")
-    def test_ollama_init_without_model_name(self, mock_list_models, mock_select):
+    def test_ollama_init_without_model_name(self, mock_list_models):
         """Test OllamaClient initialization without model name."""
         mock_list_models.return_value = [{"model": "llama2"}, {"model": "mistral"}]
 
-        client = OllamaClient(model_name="")
+        with use_ui(ScriptedUI([("choose_one", 0)])) as ui:
+            client = OllamaClient(model_name="")
 
         mock_list_models.assert_called_once()
-        mock_select.assert_called_once()
-        self.assertIsNotNone(client.model_name)
+        self.assertEqual([call.kind for call in ui.calls], ["choose_one"])
+        self.assertEqual(ui.calls[0].payload["identifier"], "model")
+        self.assertEqual(client.model_name, "llama2")
+
+    @patch("manage_agenda.llm.OllamaClient.list_models")
+    def test_ollama_nothing_chosen_is_an_llm_error(self, mock_list_models):
+        mock_list_models.return_value = [{"model": "llama2"}]
+        from manage_agenda.exceptions import LLMError
+
+        with use_ui(ScriptedUI([("choose_one", None)])), self.assertRaises(LLMError):
+            OllamaClient(model_name="")
+
+    @patch("manage_agenda.llm.time.sleep")
+    @patch("manage_agenda.llm.subprocess.Popen")
+    @patch("manage_agenda.llm.OllamaClient.list_models")
+    def test_ollama_start_is_bounded(self, mock_list_models, mock_popen, mock_sleep):
+        """A server that never answers: `ollama serve` is spawned once, polled
+        OLLAMA_START_ATTEMPTS times, then LLMError - the old loop respawned forever."""
+        from manage_agenda import llm
+        from manage_agenda.exceptions import LLMError
+
+        mock_list_models.side_effect = ConnectionError("refused")
+        with patch.object(llm, "OLLAMA_START_ATTEMPTS", 3), use_ui(ScriptedUI()) as ui:
+            with self.assertRaises(LLMError):
+                OllamaClient(model_name="")
+
+        mock_popen.assert_called_once()
+        self.assertEqual(mock_popen.call_args.args[0], ["ollama", "serve"])
+        self.assertEqual(mock_sleep.call_count, 3)
+        self.assertEqual(mock_list_models.call_count, 4)  # the first try plus 3 polls
+        self.assertEqual([call.kind for call in ui.calls], [])
+
+    @patch("manage_agenda.llm.time.sleep")
+    @patch("manage_agenda.llm.subprocess.Popen")
+    @patch("manage_agenda.llm.OllamaClient.list_models")
+    def test_ollama_start_succeeds_once_the_server_answers(
+        self, mock_list_models, mock_popen, mock_sleep
+    ):
+        models = [{"model": "llama2"}]
+        mock_list_models.side_effect = [ConnectionError("refused"), ConnectionError("x"), models]
+
+        with use_ui(ScriptedUI([("choose_one", 0)])):
+            client = OllamaClient(model_name="")
+
+        mock_popen.assert_called_once()
+        self.assertEqual(client.model_name, "llama2")
+
+    @patch("manage_agenda.llm.subprocess.Popen", side_effect=FileNotFoundError("no ollama"))
+    @patch("manage_agenda.llm.OllamaClient.list_models", side_effect=ConnectionError("refused"))
+    def test_ollama_binary_missing_is_an_llm_error(self, mock_list_models, mock_popen):
+        from manage_agenda.exceptions import LLMError
+
+        with use_ui(ScriptedUI()), self.assertRaises(LLMError):
+            OllamaClient(model_name="")
 
     @patch("manage_agenda.llm.chat")
     def test_ollama_generate_text_success(self, mock_chat):
@@ -90,10 +146,11 @@ class TestOllamaClient(unittest.TestCase):
     @patch("manage_agenda.llm.chat", side_effect=Exception("API Error"))
     def test_ollama_generate_text_error(self, mock_chat):
         """Test OllamaClient generate_text error handling."""
-        client = OllamaClient(model_name="llama2")
-        result = client.generate_text("test prompt")
+        from manage_agenda.exceptions import LLMError
 
-        self.assertIsNone(result)
+        client = OllamaClient(model_name="llama2")
+        with self.assertRaises(LLMError):
+            client.generate_text("test prompt")
 
     @patch("manage_agenda.llm.ollama.list")
     def test_ollama_list_models(self, mock_list):
@@ -125,7 +182,6 @@ class TestGeminiClient(unittest.TestCase):
         mock_genai_client.assert_called_once_with(api_key="fake_api_key")
 
     @patch("manage_agenda.llm.genai.Client")
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "models/gemini-pro"))
     @patch("manage_agenda.llm.GeminiClient.list_models")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
@@ -134,7 +190,6 @@ class TestGeminiClient(unittest.TestCase):
         mock_exists,
         mock_load_config,
         mock_list_models,
-        mock_select,
         mock_genai_client,
     ):
         """Test GeminiClient initialization without model name."""
@@ -145,10 +200,15 @@ class TestGeminiClient(unittest.TestCase):
 
         mock_model_obj = MagicMock()
         mock_model_obj.name = "models/gemini-pro"
-        mock_list_models.return_value = [mock_model_obj]
+        other_model = MagicMock()
+        other_model.name = "models/embedding-001"
+        mock_list_models.return_value = [other_model, mock_model_obj]
 
-        client = GeminiClient(model_name="")
+        with use_ui(ScriptedUI([("choose_one", 0)])) as ui:
+            client = GeminiClient(model_name="")
 
+        # Only the gemini models are offered (what select_from_list's selector did).
+        self.assertEqual(ui.calls[0].payload["options"], [mock_model_obj])
         self.assertEqual(client.model_name, "gemini-pro")
 
     @patch("manage_agenda.llm.genai.Client")
@@ -190,10 +250,11 @@ class TestGeminiClient(unittest.TestCase):
         mock_client_instance.models.generate_content.side_effect = Exception("API Error")
         mock_genai_client.return_value = mock_client_instance
 
-        client = GeminiClient(model_name="gemini-pro")
-        result = client.generate_text("test prompt")
+        from manage_agenda.exceptions import LLMError
 
-        self.assertIsNone(result)
+        client = GeminiClient(model_name="gemini-pro")
+        with self.assertRaises(LLMError):
+            client.generate_text("test prompt")
 
     @patch("manage_agenda.llm.genai.Client")
     @patch("manage_agenda.llm.load_config")
@@ -221,11 +282,10 @@ class TestGeminiClient(unittest.TestCase):
 
 
 class TestMistralClient(unittest.TestCase):
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "mistral-small"))
     @patch("manage_agenda.llm.Mistral")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
-    def test_mistral_init(self, mock_exists, mock_load_config, mock_mistral, mock_select):
+    def test_mistral_init(self, mock_exists, mock_load_config, mock_mistral):
         """Test MistralClient initialization."""
         mock_config = MagicMock()
         mock_config.sections.return_value = ["section1"]
@@ -241,12 +301,51 @@ class TestMistralClient(unittest.TestCase):
 
         _ = MistralClient(model_name="mistral-small")
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "mistral-small"))
+    @patch("manage_agenda.llm.Mistral")
+    @patch("manage_agenda.llm.load_config")
+    @patch("os.path.exists", return_value=True)
+    def test_mistral_init_without_model_name_prompts(
+        self, mock_exists, mock_load_config, mock_mistral
+    ):
+        mock_config = MagicMock()
+        mock_config.sections.return_value = ["section1"]
+        mock_config.get.return_value = "fake_api_key"
+        mock_load_config.return_value = mock_config
+        mock_models = MagicMock()
+        mock_models.data = [MagicMock(id="mistral-small"), MagicMock(id="mistral-large")]
+        mock_mistral.return_value.models.list.return_value = mock_models
+
+        with use_ui(ScriptedUI([("choose_one", 1)])) as ui:
+            client = MistralClient(model_name="")
+
+        self.assertEqual(ui.calls[0].payload["identifier"], "id")
+        self.assertEqual(client.model_name, "mistral-large")
+
+    @patch("manage_agenda.llm.Mistral")
+    @patch("manage_agenda.llm.load_config")
+    @patch("os.path.exists", return_value=True)
+    def test_mistral_with_a_model_name_does_not_prompt(
+        self, mock_exists, mock_load_config, mock_mistral
+    ):
+        """A given model_name used to be silently ignored (self.model_name was never set from
+        it before the "do we need to prompt" check), so MistralClient always prompted even
+        when told exactly which model to use."""
+        mock_config = MagicMock()
+        mock_config.sections.return_value = ["section1"]
+        mock_config.get.return_value = "fake_api_key"
+        mock_load_config.return_value = mock_config
+
+        with use_ui(ScriptedUI()) as ui:
+            client = MistralClient(model_name="mistral-small-latest")
+
+        self.assertEqual(ui.calls, [])
+        self.assertEqual(client.model_name, "mistral-small-latest")
+
     @patch("manage_agenda.llm.Mistral")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
     def test_mistral_generate_text_success(
-        self, mock_exists, mock_load_config, mock_mistral_class, mock_select
+        self, mock_exists, mock_load_config, mock_mistral_class
     ):
         """Test MistralClient generate_text success."""
         mock_config = MagicMock()
@@ -271,12 +370,11 @@ class TestMistralClient(unittest.TestCase):
 
         self.assertEqual(result, "Mistral response")
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "mistral-small"))
     @patch("manage_agenda.llm.Mistral")
     @patch("manage_agenda.llm.load_config")
     @patch("os.path.exists", return_value=True)
     def test_mistral_generate_text_error(
-        self, mock_exists, mock_load_config, mock_mistral_class, mock_select
+        self, mock_exists, mock_load_config, mock_mistral_class
     ):
         """Test MistralClient generate_text error handling."""
         mock_config = MagicMock()
@@ -293,140 +391,145 @@ class TestMistralClient(unittest.TestCase):
         mock_models.data = [MagicMock(id="mistral-small")]
         mock_mistral.models.list.return_value = mock_models
 
-        client = MistralClient(model_name="mistral-small")
-        result = client.generate_text("test prompt")
+        from manage_agenda.exceptions import LLMError
 
-        self.assertIsNone(result)
+        client = MistralClient(model_name="mistral-small")
+        with self.assertRaises(LLMError):
+            client.generate_text("test prompt")
 
 
 class TestSelectLlm(unittest.TestCase):
+    """select_llm's precedence: -a/-m flags > saved config > interactive wizard > hardcoded
+    default. config_path is always overridden here so these tests never touch the real
+    ~/.config/manage-agenda/config.yaml (binding that path at import time, or defaulting to
+    it silently in tests, would make results depend on whatever happens to be on this machine).
+    """
+
     def setUp(self):
-        self.Args = namedtuple(
-            "args",
-            ["interactive", "delete", "source", "verbose", "destination", "text"],
-        )
+        self.config_path = Path("/tmp") / (self.id().replace(".", "_") + "_config.yaml")
+        self.config_path.unlink(missing_ok=True)
+        self.addCleanup(lambda: self.config_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: Path(str(self.config_path) + ".tmp").unlink(missing_ok=True))
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(0, "ollama"))
+    @patch("manage_agenda.llm.select_one", return_value="ollama")
     @patch("manage_agenda.llm.OllamaClient")
-    def test_select_llm_interactive_ollama(self, mock_ollama_client, mock_sfl):
+    def test_interactive_with_nothing_saved_prompts_and_saves(self, mock_ollama_client, mock_select_one):
         from manage_agenda.llm import select_llm
 
-        args = self.Args(
-            interactive=True,
-            delete=False,
-            source="any",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
-        mock_ollama_client.assert_called_once()
+        mock_ollama_client.return_value.model_name = "granite4:latest"
+        args = Args(interactive=True)
+
+        model = select_llm(args, config_path=self.config_path)
+
+        mock_select_one.assert_called_once()
+        mock_ollama_client.assert_called_once_with()
         self.assertEqual(model, mock_ollama_client.return_value)
+        saved = load_user_config(self.config_path)
+        self.assertEqual(saved, {"provider": "ollama", "model": "granite4:latest"})
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(2, "mistral"))
+    @patch("manage_agenda.llm.select_one", return_value="mistral")
     @patch("manage_agenda.llm.MistralClient")
-    def test_select_llm_interactive_mistral(self, mock_mistral_client, mock_sfl):
+    def test_interactive_mistral_is_saved_too(self, mock_mistral_client, mock_select_one):
         from manage_agenda.llm import select_llm
 
-        args = self.Args(
-            interactive=True,
-            delete=False,
-            source="any",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
-        mock_mistral_client.assert_called_once()
+        mock_mistral_client.return_value.model_name = "mistral-small-latest"
+        args = Args(interactive=True)
+
+        model = select_llm(args, config_path=self.config_path)
+
+        mock_mistral_client.assert_called_once_with()
         self.assertEqual(model, mock_mistral_client.return_value)
+        self.assertEqual(load_user_config(self.config_path)["provider"], "mistral")
 
-    @patch("manage_agenda.llm.select_from_list", return_value=(1, "gemini"))
+    @patch("manage_agenda.llm.select_one")
     @patch("manage_agenda.llm.GeminiClient")
-    def test_select_llm_interactive_gemini_explicit(self, mock_gemini_client, mock_sfl):
-        from manage_agenda.llm import select_llm
-
-        args = self.Args(
-            interactive=True,
-            delete=False,
-            source="any",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
-        mock_gemini_client.assert_called_once()
-        self.assertEqual(model, mock_gemini_client.return_value)
-
-    @patch("manage_agenda.llm.select_from_list", return_value=(1, "gemini"))
-    @patch("manage_agenda.llm.GeminiClient")
-    def test_select_llm_interactive_gemini_default(self, mock_gemini_client, mock_sfl):
-        from manage_agenda.llm import select_llm
-
-        args = self.Args(
-            interactive=True,
-            delete=False,
-            source="any",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
-        mock_gemini_client.assert_called_once()
-        self.assertEqual(model, mock_gemini_client.return_value)
-
-    @patch("manage_agenda.llm.OllamaClient")
-    @patch("manage_agenda.llm.MistralClient")
-    @patch("manage_agenda.llm.GeminiClient")
-    def test_select_llm_non_interactive_always_gemini(
-        self, mock_gemini_client, mock_mistral_client, mock_ollama_client
+    def test_saved_config_is_reused_without_prompting_even_when_interactive(
+        self, mock_gemini_client, mock_select_one
     ):
         from manage_agenda.llm import select_llm
 
-        args = self.Args(
-            interactive=False,
-            delete=False,
-            source="gemini",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
-        mock_gemini_client.assert_called_with("gemini-2.5-flash")
+        save_user_config({"provider": "gemini", "model": "gemini-2.0-flash"}, self.config_path)
+        args = Args(interactive=True)
+
+        model = select_llm(args, config_path=self.config_path)
+
+        mock_select_one.assert_not_called()
+        mock_gemini_client.assert_called_once_with("gemini-2.0-flash")
         self.assertEqual(model, mock_gemini_client.return_value)
 
-        args = self.Args(
-            interactive=False,
-            delete=False,
-            source="ollama",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
+    @patch("manage_agenda.llm.select_one")
+    @patch("manage_agenda.llm.GeminiClient")
+    def test_explicit_flags_override_saved_config_without_touching_it(
+        self, mock_gemini_client, mock_select_one
+    ):
+        from manage_agenda.llm import select_llm
 
-        args = self.Args(
-            interactive=False,
-            delete=False,
-            source="mistral",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
+        save_user_config({"provider": "ollama", "model": "granite4:latest"}, self.config_path)
+        args = Args(interactive=False, ai="gemini", model="gemini-2.5-pro")
 
-        args = self.Args(
-            interactive=False,
-            delete=False,
-            source="invalid",
-            verbose=False,
-            destination="",
-            text="",
-        )
-        model = select_llm(args)
+        model = select_llm(args, config_path=self.config_path)
 
-        self.assertEqual(mock_gemini_client.call_count, 4)
-        mock_mistral_client.assert_not_called()
-        mock_ollama_client.assert_not_called()
+        mock_select_one.assert_not_called()
+        mock_gemini_client.assert_called_once_with("gemini-2.5-pro")
+        self.assertEqual(model, mock_gemini_client.return_value)
+        # The flag override must not have overwritten the saved config.
+        self.assertEqual(load_user_config(self.config_path)["provider"], "ollama")
+
+    @patch("manage_agenda.llm.select_one")
+    @patch("manage_agenda.llm.OllamaClient")
+    def test_non_interactive_with_nothing_saved_and_no_flags_uses_hardcoded_default(
+        self, mock_ollama_client, mock_select_one
+    ):
+        from manage_agenda.llm import select_llm
+
+        args = Args(interactive=False)
+
+        select_llm(args, config_path=self.config_path)
+
+        mock_select_one.assert_not_called()
+        mock_ollama_client.assert_called_once_with("granite4:latest")
+        self.assertEqual(load_user_config(self.config_path), {})
+
+    @patch("manage_agenda.llm.select_one", return_value="mistral")
+    @patch("manage_agenda.llm.MistralClient")
+    def test_reconfigure_re_prompts_even_with_a_saved_config_and_overwrites_it(
+        self, mock_mistral_client, mock_select_one
+    ):
+        from manage_agenda.llm import select_llm
+
+        mock_mistral_client.return_value.model_name = "mistral-small-latest"
+        save_user_config({"provider": "ollama", "model": "granite4:latest"}, self.config_path)
+        args = Args(interactive=False, reconfigure=True)
+
+        select_llm(args, config_path=self.config_path)
+
+        mock_select_one.assert_called_once()
+        mock_mistral_client.assert_called_once_with()
+        self.assertEqual(load_user_config(self.config_path)["provider"], "mistral")
+
+    @patch("manage_agenda.llm.select_one")
+    @patch("manage_agenda.llm.GeminiClient")
+    def test_model_from_saved_config_is_ignored_when_the_provider_changed(
+        self, mock_gemini_client, mock_select_one
+    ):
+        """The saved model was picked for the saved provider - reusing it under a different,
+        explicitly-requested provider would hand that provider a nonsensical model name."""
+        from manage_agenda.llm import select_llm
+
+        save_user_config({"provider": "ollama", "model": "granite4:latest"}, self.config_path)
+        args = Args(interactive=False, ai="gemini")
+
+        select_llm(args, config_path=self.config_path)
+
+        mock_select_one.assert_not_called()
+        mock_gemini_client.assert_called_once_with("gemini-3.8-flash")
+
+    def test_invalid_provider_logs_and_returns_none(self):
+        from manage_agenda.llm import select_llm
+
+        args = Args(interactive=False, ai="not-a-provider")
+
+        self.assertIsNone(select_llm(args, config_path=self.config_path))
 
 
 if __name__ == "__main__":

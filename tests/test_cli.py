@@ -4,19 +4,20 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
+from manage_agenda.ui import set_ui
+from manage_agenda.ui.fake import ScriptedUI
+
 
 class TestCliCommands(unittest.TestCase):
 
     # Class-level patchers
     mock_module_rules_patcher = patch("manage_agenda.sources.moduleRules")
-    mock_select_from_list_patcher = patch("manage_agenda.sources.select_from_list")
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         # Start class-level patchers
         cls.mock_module_rules_class = cls.mock_module_rules_patcher.start()
-        cls.mock_select_from_list_class = cls.mock_select_from_list_patcher.start()
 
         # Configure class-level mocks
         cls.mock_rules_instance_class = MagicMock()
@@ -25,15 +26,11 @@ class TestCliCommands(unittest.TestCase):
         cls.mock_rules_instance_class.checkRules.return_value = None
         cls.mock_rules_instance_class.selectRule.return_value = ["gmail1"]
         cls.mock_rules_instance_class.readConfigSrc.return_value = MagicMock()
-        cls.mock_rules_instance_class.selectRuleInteractive.return_value = "gmail1"  # Default
-
-        cls.mock_select_from_list_class.return_value = (0, "default_selection") # Default, can be overridden per test
 
     @classmethod
     def tearDownClass(cls):
         # Stop class-level patchers
         cls.mock_module_rules_patcher.stop()
-        cls.mock_select_from_list_patcher.stop()
         super().tearDownClass()
 
     def setUp(self):
@@ -50,19 +47,13 @@ class TestCliCommands(unittest.TestCase):
 
         # Access class-level mocks via self
         self.mock_module_rules = self.mock_module_rules_class
-        self.mock_select_from_list = self.mock_select_from_list_class
         self.mock_rules_instance = self.mock_rules_instance_class
-        # Reset call history on the class-level mocks so each test starts fresh.
-        # This prevents previous tests from affecting assert_called_once checks.
-        try:
-            self.mock_select_from_list.reset_mock()
-        except Exception:
-            pass
-        self.mock_rules_instance = self.mock_rules_instance_class
-        try:
-            self.mock_rules_instance.selectRuleInteractive.reset_mock()
-        except Exception:
-            pass
+
+        # Every prompt a command makes is answered by this scripted UI: leniently (first
+        # option, nothing, no) unless a test queues a specific answer. conftest's reset_ui
+        # fixture puts the console UI back after each test.
+        self.ui = ScriptedUI(lenient=True)
+        set_ui(self.ui)
 
 
         # Individual patches that apply per test method
@@ -128,6 +119,52 @@ class TestCliCommands(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.mock_process_email_cli.assert_called_once() # Now using self.mock_process_email_cli
 
+    def test_add_dry_run_ledger_flag_reaches_process_email_cli(self):
+        result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail", "--dry-run-ledger"])
+        self.assertEqual(result.exit_code, 0)
+        self.mock_process_email_cli.assert_called_once()
+        called_args = self.mock_process_email_cli.call_args.args[0]
+        self.assertTrue(called_args.dry_run_ledger)
+
+    def test_add_without_dry_run_ledger_flag_defaults_to_false(self):
+        result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])
+        self.assertEqual(result.exit_code, 0)
+        called_args = self.mock_process_email_cli.call_args.args[0]
+        self.assertFalse(called_args.dry_run_ledger)
+
+    @patch("manage_agenda.cli.reconcile_ledger_cli")
+    def test_reconcile_passes_dry_run_ledger_and_interactive(self, mock_reconcile):
+        mock_reconcile.return_value = 0
+        result = self.runner.invoke(self.cli.cli, ["reconcile", "-i", "--dry-run-ledger"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_reconcile.assert_called_once()
+        called_args = mock_reconcile.call_args.args[0]
+        self.assertTrue(called_args.dry_run_ledger)
+        self.assertTrue(called_args.interactive)
+
+    @patch("manage_agenda.cli.reconcile_ledger_cli")
+    def test_reconcile_defaults_to_a_real_non_interactive_pass(self, mock_reconcile):
+        mock_reconcile.return_value = 0
+        result = self.runner.invoke(self.cli.cli, ["reconcile"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        called_args = mock_reconcile.call_args.args[0]
+        self.assertFalse(called_args.dry_run_ledger)
+        self.assertFalse(called_args.interactive)
+        self.mock_process_email_cli.assert_not_called()
+
+    @patch("manage_agenda.cli.reconcile_ledger_cli")
+    def test_reconcile_exits_with_the_code_the_pass_returns(self, mock_reconcile):
+        mock_reconcile.return_value = 5
+        result = self.runner.invoke(self.cli.cli, ["reconcile"])
+        self.assertEqual(result.exit_code, 5, result.output)
+
+    @patch("manage_agenda.cli.migrate_ledger_cli")
+    def test_migrate_ledger_exits_with_the_code_the_pass_returns(self, mock_migrate):
+        mock_migrate.return_value = 6
+        result = self.runner.invoke(self.cli.cli, ["migrate-ledger"])
+        self.assertEqual(result.exit_code, 6, result.output)
+        mock_migrate.return_value = 0
+        self.assertEqual(self.runner.invoke(self.cli.cli, ["migrate-ledger"]).exit_code, 0)
     def test_add_non_interactive_summary_output(self):
         """Test add command in non-interactive mode outputs event summary."""
         self.mock_process_email_cli.return_value = [
@@ -138,9 +175,10 @@ class TestCliCommands(unittest.TestCase):
             }
         ]
         result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])
-        self.assertEqual(result.exit_code, 0)
-        self.assertIn("Summary of events added:", result.output)
-        self.assertIn("- Doctor Appointment (2026-09-20 10:00 to 11:00)", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Every line shown goes through the UI port: the scripted UI holds the output.
+        self.assertIn("Summary of events added:", self.ui.output)
+        self.assertIn("- Doctor Appointment (2026-09-20 10:00 to 11:00)", self.ui.output)
 
     def test_add_no_posts(self):
         result = self.runner.invoke(self.cli.cli, ["add", "-s", "gmail"])
@@ -161,23 +199,35 @@ class TestCliCommands(unittest.TestCase):
 
     def test_add_interactive_web(self):
         """Test add command in interactive mode with web source."""
-        self.mock_select_from_list.return_value = (0, ("web/http", "set", "(Enter URLs or leave empty)"))
+        self.ui.queue("choose_one", ("web/http", "set", "(Enter URLs or leave empty)"))
 
         result = self.runner.invoke(self.cli.cli, ["add", "-i", "-s", "web"])
 
-        self.assertEqual(result.exit_code, 0)
-        self.mock_select_from_list.assert_called_once()
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual([call.kind for call in self.ui.calls], ["choose_one"])
+        # Mail accounts first, then the web and text pseudo-sources, in one list.
+        self.assertEqual(self.ui.calls[0].payload["options"][:2], ["gmail1", "imap1"])
         self.mock_process_web_cli.assert_called_once()
 
     def test_add_interactive_email(self):
         """Test add command in interactive mode selecting email source."""
-        self.mock_select_from_list.return_value = (0, "gmail1")
+        self.ui.queue("choose_one", "gmail1")
 
         result = self.runner.invoke(self.cli.cli, ["add", "-i"])
 
-        self.assertEqual(result.exit_code, 0)
-        self.mock_select_from_list.assert_called()
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual([call.kind for call in self.ui.calls], ["choose_one"])
         self.mock_process_email_cli.assert_called_once()
+        self.assertEqual(self.mock_process_email_cli.call_args.kwargs["selected_source"], "gmail1")
+
+    def test_add_interactive_nothing_chosen_processes_nothing(self):
+        self.ui.queue("choose_one", None)
+
+        result = self.runner.invoke(self.cli.cli, ["add", "-i"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.mock_process_email_cli.assert_not_called()
+        self.mock_process_web_cli.assert_not_called()
 
     def test_add_with_destination_and_output(self):
         """Test add command with both --destination and --output options."""
@@ -206,7 +256,8 @@ class TestCliCommands(unittest.TestCase):
         result = self.runner.invoke(self.cli.cli, ["auth"])
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Enable the Gcalendar API", result.output)
+        self.assertIn("Google was not contacted", result.output)
+        self.assertIn("/path/to/config", result.output)
 
     @patch("manage_agenda.cli.authorize")
     def test_auth_verbose(self, mock_authorize):
@@ -277,6 +328,50 @@ class TestCliCommands(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         mock_move.assert_called_once()
+
+    @patch("manage_agenda.cli.restore_deleted_event_cli")
+    def test_restore_command_with_an_identity(self, mock_restore):
+        result = self.runner.invoke(self.cli.cli, ["restore", "msg-1"])
+
+        self.assertEqual(result.exit_code, 0)
+        mock_restore.assert_called_once()
+        self.assertEqual(mock_restore.call_args.args[1], "msg-1")
+
+    @patch("manage_agenda.cli.list_restorable_identities_cli")
+    @patch("manage_agenda.cli.restore_deleted_event_cli")
+    def test_restore_command_list_flag_never_calls_restore(self, mock_restore, mock_list):
+        result = self.runner.invoke(self.cli.cli, ["restore", "--list"])
+
+        self.assertEqual(result.exit_code, 0)
+        mock_list.assert_called_once()
+        mock_restore.assert_not_called()
+
+    @patch("manage_agenda.cli.restore_deleted_event_cli")
+    def test_restore_command_without_an_identity_or_list_does_not_call_restore(self, mock_restore):
+        result = self.runner.invoke(self.cli.cli, ["restore"])
+
+        self.assertEqual(result.exit_code, 0)
+        mock_restore.assert_not_called()
+
+    @patch("manage_agenda.cli.install_playwright_browser", return_value=0)
+    def test_install_runs_playwright_in_a_child_process(self, mock_install):
+        result = self.runner.invoke(self.cli.cli, ["install", "-b", "chromium"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_install.assert_called_once_with("chromium")
+
+    @patch("manage_agenda.cli.install_playwright_browser", return_value=3)
+    def test_install_exits_with_the_child_process_code(self, mock_install):
+        result = self.runner.invoke(self.cli.cli, ["install"])
+        self.assertEqual(result.exit_code, 3)
+        self.assertIn("3", result.output)
+
+    def test_gui_without_pyside6_explains_the_extra_and_exits_1(self):
+        # None in sys.modules makes the import fail whether or not the package exists.
+        blocked = {"PySide6": None, "manage_agenda.gui": None, "manage_agenda.gui.app": None}
+        with patch.dict("sys.modules", blocked):
+            result = self.runner.invoke(self.cli.cli, ["gui"])
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("manage-agenda[gui]", result.output)
 
 
 if __name__ == "__main__":
