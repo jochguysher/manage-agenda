@@ -541,3 +541,29 @@ class TestEventNature(unittest.TestCase):
         self.assertEqual(event_nature({"extendedProperties": {"private": {"ai_model_used": "m"}}}), {})
         self.assertEqual(event_nature(None), {})
 
+
+class TestParseLlmJson(unittest.TestCase):
+    """The model's answer is JSON (true/false/null) - or, from some models, a Python literal."""
+
+    def test_json_booleans_and_null_are_read(self):
+        from manage_agenda.extraction import parse_llm_json
+
+        text = (
+            'Voici :\n{"kind": "room_occupancy", "rooms": [{"room": "salle 1 et 2", "occupations": '
+            '[{"start": "2026-09-27T08:00", "end": "2026-09-28T00:00", "clean": false, "clean_before": null}]}]}\nfin'
+        )
+        payload = parse_llm_json(text)
+        occupation = payload["rooms"][0]["occupations"][0]
+        self.assertIs(occupation["clean"], False)
+        self.assertIsNone(occupation["clean_before"])
+
+    def test_a_python_literal_still_works(self):
+        from manage_agenda.extraction import parse_llm_json
+
+        self.assertEqual(parse_llm_json("{'summary': 'x', 'clean': True}"), {"summary": "x", "clean": True})
+
+    def test_garbage_raises_a_value_error(self):
+        from manage_agenda.extraction import parse_llm_json
+
+        with self.assertRaises((ValueError, SyntaxError)):
+            parse_llm_json("{not json at all")

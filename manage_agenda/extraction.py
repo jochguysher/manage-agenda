@@ -84,6 +84,18 @@ def extract_json(text):
     return text
 
 
+def parse_llm_json(text):
+    """The object a model's answer holds: JSON first (true/false/null are JSON, which
+    ast.literal_eval does not read), then a Python literal for a model that writes one
+    (single quotes, True/None). ValueError (json.JSONDecodeError is one) or SyntaxError
+    when it is neither."""
+    candidate = extract_json(text.replace("\n", " "))
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return ast.literal_eval(candidate)
+
+
 def get_event_from_llm(model, prompt, post_id, verbose=False, debug_log_extractions=False):
     """Get event data from an LLM and parse its calendar JSON response."""
     from manage_agenda.exceptions import LLMError
@@ -120,7 +132,7 @@ def get_event_from_llm(model, prompt, post_id, verbose=False, debug_log_extracti
         if verbose:
             print_first_lines(llm_response, n=None, title=t("extraction.title_reply"))
         try:
-            vcal_json = ast.literal_eval(extract_json(llm_response.replace("\n", " ")))
+            vcal_json = parse_llm_json(llm_response)
             write_file(
                 f"log/{model.model_name}/{post_id}_vcal_extracted.txt",
                 json.dumps(vcal_json),
