@@ -202,13 +202,38 @@ def availability_for(header, config_dir=None):
     return availability_from_section(availability[section_name])
 
 
+MAX_RANGE_DAYS = 62
+
+
+def _date_range(first, last):
+    """Every day from `first` to `last` inclusive (capped, a model can write anything)."""
+    days = []
+    day = first
+    while day <= last and len(days) < MAX_RANGE_DAYS:
+        days.append(day)
+        day += datetime.timedelta(days=1)
+    return days
+
+
 def _occupied_dates(room):
+    """The occupied days of a room: dates, and ranges written as "2026-09-27/2026-10-03",
+    "2026-09-27..2026-10-03" or {"from": ..., "to": ...} - a week announced as one period
+    counts for each of its days."""
     dates = []
     for value in room.get("occupied") or []:
+        if isinstance(value, dict):
+            bounds = [value.get("from") or value.get("start"), value.get("to") or value.get("end")]
+        else:
+            text = str(value).strip()
+            bounds = re.split(r"\s*(?:/|\.\.|\s-\s|\bau\b|\bto\b)\s*", text, maxsplit=1)
         try:
-            dates.append(datetime.date.fromisoformat(str(value)[:10]))
+            parsed = [datetime.date.fromisoformat(str(bound).strip()[:10]) for bound in bounds if bound]
         except ValueError:
             continue
+        if len(parsed) == 2 and parsed[0] <= parsed[1]:
+            dates.extend(_date_range(parsed[0], parsed[1]))
+        elif parsed:
+            dates.append(parsed[0])
     start = room.get("start") or ""
     if start:
         try:
@@ -225,49 +250,119 @@ def _overlaps(slot_start, slot_end, busy):
     return False
 
 
-def propose_visit(room_name, occupied_dates, constraints, busy=None, today=None):
-    """Earliest allowed slot strictly before the next occupation of this room."""
-    today = today or datetime.date.today()
-    busy = busy or []
-    future = sorted(day for day in occupied_dates if day > today)
-    if future:
-        deadline = future[0]
-        limit_note = deadline
-    else:
-        deadline = today + datetime.timedelta(days=constraints.horizon_days)
-        limit_note = None
+def occupation_blocks(dates):
+    """The occupied days grouped into runs of consecutive days: [(first, last), ...]. The
+    legacy payload (`occupied`: a list of days) has no line-by-line instruction; a run is
+    one occupation there."""
+    blocks = []
+    for day in sorted(set(dates)):
+        if blocks and day == blocks[-1][1] + datetime.timedelta(days=1):
+            blocks[-1] = (blocks[-1][0], day)
+        else:
+            blocks.append((day, day))
+    return blocks
+
+
+def _zone(constraints):
+    import pytz
+
     try:
-        import pytz
-
-        zone = pytz.timezone(constraints.timezone)
+        return pytz.timezone(constraints.timezone)
     except Exception:
-        import pytz
+        return pytz.UTC
 
-        zone = pytz.UTC
-    day = today + datetime.timedelta(days=1)
+
+def _parse_when(value, zone, end_of_day=False):
+    """An aware datetime from what the model wrote: "YYYY-MM-DDTHH:MM", "YYYY-MM-DD HH:MM"
+    or a bare date - midnight, or the next midnight for `end_of_day` (an end written as a
+    date covers that whole day). None when unreadable."""
+    text = str(value or "").strip().replace("T", " ")
+    if not text:
+        return None
+    try:
+        day = datetime.date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+    clock = text[10:].strip()
+    if clock:
+        try:
+            when = datetime.datetime.combine(day, datetime.time.fromisoformat(clock[:5]))
+        except ValueError:
+            return None
+    else:
+        when = datetime.datetime.combine(day, datetime.time(0, 0))
+        if end_of_day:
+            when += datetime.timedelta(days=1)
+    return zone.localize(when)
+
+
+def _truthy(value):
+    return str(value).strip().lower() in {"true", "yes", "oui", "1"} if not isinstance(value, bool) else value
+
+
+def room_occupations(room, constraints):
+    """A room's occupations as [{"start", "end", "clean", "deadline"}, ...], aware and in
+    time order. The current payload lists them (`occupations`, one per message line, with
+    the line's instruction: `clean` true only when the line asks for a cleaning, and the
+    limit it gives as `clean_before`); the legacy one lists days (`occupied`), which count
+    as whole days to clean after, run by run."""
+    zone = _zone(constraints)
+    found = []
+    for item in room.get("occupations") or []:
+        if not isinstance(item, dict):
+            continue
+        start = _parse_when(item.get("start"), zone)
+        end = _parse_when(item.get("end"), zone, end_of_day=True)
+        if start is None:
+            continue
+        if end is None:
+            end = zone.localize(datetime.datetime.combine(start.date() + datetime.timedelta(days=1), datetime.time(0, 0)))
+        if end <= start:
+            # "14 h à 2 h du matin": an end before its start is the next day's.
+            end = end + datetime.timedelta(days=1)
+        found.append(
+            {
+                "start": start,
+                "end": end,
+                "clean": _truthy(item.get("clean", False)),
+                "deadline": _parse_when(item.get("clean_before"), zone),
+            }
+        )
+    for first, last in occupation_blocks(_occupied_dates(room)):
+        found.append(
+            {
+                "start": zone.localize(datetime.datetime.combine(first, datetime.time(0, 0))),
+                "end": zone.localize(
+                    datetime.datetime.combine(last + datetime.timedelta(days=1), datetime.time(0, 0))
+                ),
+                "clean": True,
+                "deadline": None,
+            }
+        )
+    found.sort(key=lambda item: (item["start"], item["end"]))
+    return found
+
+
+def _slots_from(earliest, constraints, zone, horizon_days):
+    """The allowed slots from `earliest` on, in order, for horizon_days days."""
+    slot = datetime.timedelta(minutes=constraints.slot_minutes)
+    day = earliest.date()
+    deadline = day + datetime.timedelta(days=horizon_days)
     while day < deadline:
         if day.weekday() in constraints.days:
             for window_start, window_end in constraints.hours:
                 cursor = datetime.datetime.combine(day, window_start)
                 window_stop = datetime.datetime.combine(day, window_end)
-                while cursor + datetime.timedelta(minutes=constraints.slot_minutes) <= window_stop:
-                    slot_end_naive = cursor + datetime.timedelta(minutes=constraints.slot_minutes)
+                while cursor + slot <= window_stop:
                     slot_start = zone.localize(cursor)
-                    slot_end = zone.localize(slot_end_naive)
-                    if not _overlaps(slot_start, slot_end, busy):
-                        return {
-                            "room": room_name,
-                            "start": slot_start,
-                            "end": slot_end,
-                            "before": limit_note,
-                        }
-                    cursor = slot_end_naive
+                    if slot_start >= earliest:
+                        yield slot_start, zone.localize(cursor + slot)
+                    cursor += slot
         day += datetime.timedelta(days=1)
-    return None
 
 
-def visit_title(label, rooms):
-    """ACME - Salle 4, or ACME - Salle 1, 2 when several rooms share one visit."""
+def cleaning_title(label, rooms):
+    """ACME - Salle 4, or ACME - Salle 1, 2 when several rooms share one cleaning."""
     names = []
     for room in rooms:
         text = " ".join(str(room).split())
@@ -295,6 +390,9 @@ def visit_title(label, rooms):
     return body
 
 
+visit_title = cleaning_title  # the former name
+
+
 def _room_label(event):
     for key in ("location", "summary"):
         text = event.get(key) or ""
@@ -308,15 +406,23 @@ def _room_label(event):
     return "Salle"
 
 
-def _event_day(event):
-    start = event.get("start") or {}
-    raw = start.get("dateTime") or start.get("date") or ""
-    text = str(raw)[:10]
-    try:
-        datetime.date.fromisoformat(text)
-    except ValueError:
-        return ""
-    return text
+def _event_days(event):
+    """The days an event copied by the model covers, first to last: a week-long event is a
+    week of occupation, not its first day."""
+    days = []
+    for when in ("start", "end"):
+        field = event.get(when) or {}
+        raw = field.get("dateTime") or field.get("date") or ""
+        try:
+            days.append(datetime.date.fromisoformat(str(raw)[:10]))
+        except ValueError:
+            continue
+    if not days:
+        return []
+    first, last = days[0], days[-1]
+    if last < first:
+        return [first.isoformat()]
+    return [day.isoformat() for day in _date_range(first, last)]
 
 
 def as_occupancy(event):
@@ -329,10 +435,10 @@ def as_occupancy(event):
     for one in events:
         if not isinstance(one, dict) or one.get("kind") == "room_occupancy":
             continue
-        day = _event_day(one)
-        if not day:
+        days = _event_days(one)
+        if not days:
             continue
-        rooms.setdefault(_room_label(one), set()).add(day)
+        rooms.setdefault(_room_label(one), set()).update(days)
     return {
         "kind": "room_occupancy",
         "rooms": [{"room": name, "occupied": sorted(days)} for name, days in rooms.items()],
@@ -348,55 +454,192 @@ def is_occupancy_sender(header, config_dir=None):
     return parser[section].get("kind", "").strip().lower() == "occupancy"
 
 
-def _next_occupation(dates, today, horizon_days):
-    future = sorted(day for day in dates if day > today)
-    if future:
-        return future[0]
-    return today + datetime.timedelta(days=horizon_days)
+CLEANING_KIND = "cleaning"
+_MINUTE = "%Y-%m-%d %H:%M"
 
 
-def plan_room_visits(payload, constraints, busy=None, today=None, sender=""):
-    """A separate visit for each room, on the next free slot before its own occupation."""
-    today = today or datetime.date.today()
-    reserved = list(busy or [])
-    pending = []
+def occupation_text(start, end):
+    """"le 2026-09-28 de 00:00 à 21:30", "du 2026-09-27 au 2026-10-03" for whole days, or
+    "du 2026-05-30 14:00 au 2026-05-31 02:00"."""
+    midnight = datetime.time(0, 0)
+    if start.time() == midnight and end.time() == midnight:
+        last = (end - datetime.timedelta(days=1)).date()
+        if last == start.date():
+            return f"le {start.date().isoformat()}"
+        return f"du {start.date().isoformat()} au {last.isoformat()}"
+    if start.date() == end.date():
+        return f"le {start.date().isoformat()} de {start.strftime('%H:%M')} à {end.strftime('%H:%M')}"
+    return f"du {start.strftime(_MINUTE)} au {end.strftime(_MINUTE)}"
+
+
+def _first_slot(earliest, constraints, zone, busy):
+    """The first allowed slot starting at or after `earliest` that is free of `busy`."""
+    for slot_start, slot_end in _slots_from(earliest, constraints, zone, constraints.horizon_days):
+        if not _overlaps(slot_start, slot_end, busy):
+            return slot_start, slot_end
+    return None
+
+
+def _block(earliest, count, constraints, zone, busy, deadline=None):
+    """`count` consecutive allowed slots (no gap, none busy) starting at or after `earliest`,
+    ending by `deadline` when given: one trip for several rooms. None when there is none."""
+    run = []
+    for slot_start, slot_end in _slots_from(earliest, constraints, zone, constraints.horizon_days):
+        if deadline is not None and slot_end > deadline:
+            return None
+        if _overlaps(slot_start, slot_end, busy):
+            run = []
+            continue
+        if run and slot_start != run[-1][1]:
+            run = []
+        run.append((slot_start, slot_end))
+        if len(run) == count:
+            return run
+    return None
+
+
+def _cleaning_windows(payload, constraints, today, busy):
+    """Every cleaning a message asks for, with the window its start may take: from the
+    first free slot after the occupation (never before the day after `today`) to the last
+    slot before the line's deadline - the first slot alone when the line gives none: a
+    cleaning does not wait for company unless the message allows it to. A cleaning the
+    room's next occupation overtakes is dropped unless a deadline holds it."""
+    zone = _zone(constraints)
+    tomorrow = zone.localize(
+        datetime.datetime.combine(today + datetime.timedelta(days=1), datetime.time(0, 0))
+    )
+    slot = datetime.timedelta(minutes=constraints.slot_minutes)
+    windows = []
     for room in payload.get("rooms") or []:
         name = room.get("room") or "Salle"
-        dates = _occupied_dates(room)
-        pending.append((_next_occupation(dates, today, constraints.horizon_days), name, dates))
-    pending.sort(key=lambda item: (item[0], item[1]))
-    visits = []
-    for _deadline, name, dates in pending:
-        choice = propose_visit(name, dates, constraints, busy=reserved, today=today)
-        if not choice:
-            continue
-        reserved.append((choice["start"], choice["end"]))
-        before = choice["before"]
-        if before:
-            reason = f"avant la prochaine occupation du {before.isoformat()}"
+        occupations = room_occupations(room, constraints)
+        for index, occupation in enumerate(occupations):
+            if not occupation["clean"]:
+                continue
+            deadline = occupation.get("deadline")
+            earliest = max(occupation["end"], tomorrow)
+            first = _first_slot(earliest, constraints, zone, busy)
+            if first is None or (deadline is not None and first[1] > deadline):
+                if deadline is None or deadline <= earliest:
+                    continue
+                # Nothing allowed fits before the deadline: the last slot before it, forced.
+                forced_start = max(earliest, deadline - slot)
+                windows.append(
+                    {"name": name, "occupation": occupation, "start": forced_start, "latest": forced_start, "forced_end": deadline}
+                )
+                continue
+            if deadline is None and any(item["start"] < first[0] for item in occupations[index + 1 :]):
+                continue
+            latest = first[0] if deadline is None else max(first[0], deadline - slot)
+            windows.append({"name": name, "occupation": occupation, "start": first[0], "latest": latest, "forced_end": None})
+    return windows
+
+
+def _group_windows(windows):
+    """Cleanings whose windows overlap share one trip: the greedy grouping of intervals by
+    earliest end, the shared window narrowing as members join."""
+    groups = []
+    for window in sorted(windows, key=lambda item: (item["latest"], item["start"])):
+        for group in groups:
+            low = max(group["start"], window["start"])
+            high = min(group["latest"], window["latest"])
+            if low <= high and not window["forced_end"] and not group["forced"]:
+                group["members"].append(window)
+                group["start"], group["latest"] = low, high
+                break
         else:
-            reason = "aucune occupation à venir n'a été trouvée dans l'horizon configuré"
-        start = choice["start"]
-        end = choice["end"]
-        visits.append(
-            {
-                "summary": visit_title(constraints.label, [name]),
-                "location": name,
-                "description": (
-                    f"Visite proposée {reason}. "
-                    f"Créneau selon les contraintes ({constraints.timezone})."
-                ),
-                "start": {
-                    "dateTime": start.strftime("%Y-%m-%d %H:%M:%S"),
-                    "timeZone": constraints.timezone,
-                },
-                "end": {
-                    "dateTime": end.strftime("%Y-%m-%d %H:%M:%S"),
-                    "timeZone": constraints.timezone,
-                },
-            }
+            groups.append(
+                {"members": [window], "start": window["start"], "latest": window["latest"], "forced": bool(window["forced_end"])}
+            )
+    return groups
+
+
+def _priority(window):
+    far = datetime.datetime.max.replace(tzinfo=window["occupation"]["end"].tzinfo)
+    return (window["occupation"].get("deadline") or far, window["occupation"]["end"])
+
+
+def plan_cleanings(payload, constraints, busy=None, today=None, sender=""):
+    """The cleanings a message asks for, as calendar events. Each occupation whose line asks
+    for a cleaning gets one after it ends, on the configured days and hours, avoiding what
+    the calendar holds; the line's deadline, when given, has priority: the cleaning fits
+    before it, outside the configured hours if it must. Cleanings that can be done on the
+    same trip - their windows overlap - become one event over consecutive slots, the room
+    with the earliest deadline first; a deadline lets a cleaning wait for a later one, a
+    line without one does not. Each event names the occupations it answers (description,
+    private extended properties: kind, room, occupied_from, occupied_to, clean_before)."""
+    today = today or datetime.date.today()
+    zone = _zone(constraints)
+    reserved = list(busy or [])
+    windows = _cleaning_windows(payload, constraints, today, reserved)
+    events = []
+    for group in sorted(_group_windows(windows), key=lambda item: item["start"]):
+        members = sorted(group["members"], key=_priority)
+        deadlines = [m["occupation"]["deadline"] for m in members if m["occupation"].get("deadline")]
+        if group["forced"]:
+            member = members[0]
+            slots = [(member["start"], member["forced_end"])]
+        else:
+            slots = _block(group["start"], len(members), constraints, zone, reserved, deadline=min(deadlines, default=None))
+            if slots is None:
+                # No trip long enough for everyone: each on its own first free slot.
+                slots = []
+                for member in members:
+                    own = _first_slot(member["start"], constraints, zone, reserved)
+                    if own is None:
+                        continue
+                    reserved.append(own)
+                    events.append(_cleaning_event([member], own[0], own[1], constraints, forced=False))
+                continue
+        reserved.extend(slots)
+        events.append(_cleaning_event(members, slots[0][0], slots[-1][1], constraints, forced=group["forced"]))
+    events.sort(key=lambda event: event["start"]["dateTime"])
+    return events
+
+
+def _cleaning_event(members, start, end, constraints, forced):
+    """The calendar event of one trip: its title names every room, its description every
+    occupation answered, in the order the rooms are to be done."""
+    names = [member["name"] for member in members]
+    occupations = [member["occupation"] for member in members]
+    parts = []
+    for name, occupation in zip(names, occupations, strict=True):
+        part = f"{name} {occupation_text(occupation['start'], occupation['end'])}"
+        if occupation.get("deadline") is not None:
+            part += f", à faire avant le {occupation['deadline'].strftime(_MINUTE)}"
+        parts.append(part)
+    if len(parts) == 1:
+        details = f"Entretien proposé après l'occupation de {parts[0]}"
+    else:
+        details = (
+            "Entretien proposé après les occupations de "
+            + " ; ".join(parts)
+            + ", en un seul passage dans cet ordre (mêmes locaux)"
         )
-    return visits
+    if forced:
+        details += " : hors des jours et heures configurés, le délai du message ne laisse pas d'autre créneau."
+    else:
+        details += f" : premier créneau libre selon les jours et heures configurés ({constraints.timezone})."
+    private = {
+        "kind": CLEANING_KIND,
+        "room": ", ".join(names),
+        "occupied_from": min(occupation["start"] for occupation in occupations).strftime(_MINUTE),
+        "occupied_to": max(occupation["end"] for occupation in occupations).strftime(_MINUTE),
+    }
+    deadlines = [occupation["deadline"] for occupation in occupations if occupation.get("deadline")]
+    if deadlines:
+        private["clean_before"] = min(deadlines).strftime(_MINUTE)
+    return {
+        "summary": cleaning_title(constraints.label, names),
+        "location": ", ".join(names),
+        "description": details,
+        "start": {"dateTime": start.strftime("%Y-%m-%d %H:%M:%S"), "timeZone": constraints.timezone},
+        "end": {"dateTime": end.strftime("%Y-%m-%d %H:%M:%S"), "timeZone": constraints.timezone},
+        "extendedProperties": {"private": private},
+    }
+
+
+plan_room_visits = plan_cleanings  # the former name
 
 
 def busy_intervals(events):
