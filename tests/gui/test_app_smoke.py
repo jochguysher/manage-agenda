@@ -138,13 +138,15 @@ def test_a_running_job_shows_progress_and_opens_the_log(qapp, pump):
     window.log_dock.hide()
     gate = threading.Event()
     assert window.job_progress.isHidden() and window.log_dock.isHidden()
+    assert window.cancel_button.isHidden()  # only while a job runs
     assert window.runner.submit("slow", gate.wait)
     assert pump(lambda: not window.job_progress.isHidden())
+    assert not window.cancel_button.isHidden() and window.cancel_button.isEnabled()
     assert not window.log_dock.isHidden()
     assert window.job_progress.minimum() == 0 and window.job_progress.maximum() == 0
     gate.set()
     assert pump(lambda: not window.runner.is_busy())
-    assert window.job_progress.isHidden() and not window.cancel_button.isEnabled()
+    assert window.job_progress.isHidden() and window.cancel_button.isHidden()
     assert window.cancel_button.accessibleName() and window.nav.accessibleName()
     window.close()
 
@@ -159,4 +161,23 @@ def test_every_screen_has_a_mnemonic_on_its_main_button_and_home_takes_the_focus
         assert all("&" in b.text() for b in primaries), (screen.nav_key, [b.text() for b in primaries])
     home = window.screens[0]
     assert home.focusWidget() is home.source
+    window.close()
+
+
+def test_help_lives_in_tooltips_not_on_the_page(qapp):
+    from PySide6.QtWidgets import QLabel
+
+    from manage_agenda.gui.screens.home import HomeScreen
+    from manage_agenda.gui.screens.ledger import LedgerScreen
+    from manage_agenda.i18n import t
+
+    window = MainWindow()
+    home = window.screen(HomeScreen)
+    assert home.review_mode.toolTip() and home.auto_mode.toolTip()
+    assert home.refresh_button.toolTip() == t("gui.home.planned_hint")
+    assert home.planned_message.text() == ""
+    texts = [label.text() for label in home.findChildren(QLabel)]
+    assert t("gui.home.mode_hint") not in texts and t("gui.home.planned_hint") not in texts
+    ledger = window.screen(LedgerScreen)
+    assert ledger.reconcile_button.toolTip() == t("gui.ledger.exit_code_note")
     window.close()

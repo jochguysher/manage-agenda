@@ -142,6 +142,7 @@ class MainWindow(AutoNamed, QMainWindow):
         self.cancel_button.setAccessibleName(t("gui.cancel"))
         self.cancel_button.setAccessibleDescription(t("gui.cancel_tooltip"))
         self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()  # shown with the progress bar, while a job runs
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.job_progress)
         self.statusBar().addPermanentWidget(self.cancel_button)
@@ -255,6 +256,7 @@ class MainWindow(AutoNamed, QMainWindow):
     def _on_job_started(self, name):
         self.status_label.setText(t("gui.job_started", name=name))
         self.cancel_button.setEnabled(True)
+        self.cancel_button.show()
         self.job_progress.show()
         # What the job does is only told in the log: bring it back if it was closed.
         if self.log_dock.isHidden():
@@ -263,6 +265,7 @@ class MainWindow(AutoNamed, QMainWindow):
 
     def _job_over(self):
         self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()
         self.job_progress.hide()
 
     def _on_job_finished(self, result):

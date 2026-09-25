@@ -17,7 +17,7 @@ from manage_agenda.connections import (
     describe_auth_failure,
 )
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import AccountPicker, form_layout, hint_label, load_rules, primary
+from manage_agenda.gui.widgets import AccountPicker, form_layout, load_rules, primary
 from manage_agenda.i18n import t
 from manage_agenda.ui import echo
 
@@ -75,7 +75,7 @@ class AuthScreen(Screen):
         row.addWidget(self.oauth_button)
         row.addStretch(1)
         layout.addLayout(row)
-        layout.addWidget(hint_label(t("gui.auth.browser_note"), self))
+        self.oauth_button.setToolTip(t("gui.auth.browser_note"))
 
         self.status = QPlainTextEdit(self)
         self.status.setReadOnly(True)

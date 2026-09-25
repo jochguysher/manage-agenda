@@ -193,6 +193,9 @@ class HomeScreen(Screen):
         self.review_mode = QRadioButton(t("gui.home.mode_review"), self)
         self.auto_mode = QRadioButton(t("gui.home.mode_auto"), self)
         self.review_mode.setChecked(True)
+        # What each mode does lives in its tooltip, not in a paragraph on the page.
+        self.review_mode.setToolTip(t("gui.home.mode_review_tip"))
+        self.auto_mode.setToolTip(t("gui.home.mode_auto_tip"))
         mode_row.addWidget(self.review_mode)
         mode_row.addWidget(self.auto_mode)
         mode_row.addStretch(1)
@@ -205,7 +208,6 @@ class HomeScreen(Screen):
         set_role(self.mailbox_hint, "error")
         self.mailbox_hint.hide()
         run_layout.addWidget(self.mailbox_hint)
-        run_layout.addWidget(hint_label(t("gui.home.mode_hint"), self))
         row = QHBoxLayout()
         self.run_button = self.register_run_button(primary(QPushButton(t("gui.home.run"), self)))
         self.advanced_button = QPushButton(t("gui.home.open_advanced"), self)
@@ -262,8 +264,10 @@ class HomeScreen(Screen):
         planned_row.addWidget(self.ledger_summary, 1)
         planned_row.addWidget(self.refresh_button)
         planned_layout.addLayout(planned_row)
-        self.planned_message = hint_label(t("gui.home.planned_hint"), self)
+        self.planned_message = hint_label("", self)
         planned_layout.addWidget(self.planned_message)
+        self.table.setToolTip(t("gui.home.planned_hint"))
+        self.refresh_button.setToolTip(t("gui.home.planned_hint"))
         layout.addWidget(planned_box, 1)
 
         self.run_button.clicked.connect(self.run)
@@ -516,7 +520,7 @@ class HomeScreen(Screen):
                 self.table.setItem(index, column, cell(text))
         fit_columns(self.table)
         self.planned_message.setText(
-            t("gui.home.planned_hint") if self.rows else t("gui.home.planned_empty")
+            "" if self.rows else t("gui.home.planned_empty")
         )
 
     def _open_row(self, item):

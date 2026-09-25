@@ -19,7 +19,7 @@ from manage_agenda.events import (
     update_event_status_cli,
 )
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import form_layout, hint_label, primary
+from manage_agenda.gui.widgets import form_layout, primary
 from manage_agenda.i18n import t
 from manage_agenda.sources import Args
 
@@ -54,7 +54,6 @@ class CalendarOpsScreen(Screen):
         form.addRow(t("gui.calendar_ops.destination_calendar"), self.destination)
         form.addRow(t("gui.calendar_ops.text_filter"), self.text)
         layout.addLayout(form)
-        layout.addWidget(hint_label(t("gui.calendar_ops.note"), self))
 
         row = QHBoxLayout()
         self.run_button = self.register_run_button(primary(QPushButton(t("gui.calendar_ops.run"), self)))
@@ -64,6 +63,7 @@ class CalendarOpsScreen(Screen):
         layout.addStretch(1)
 
         self.operation.currentIndexChanged.connect(self._on_operation_changed)
+        self.run_button.setToolTip(t("gui.calendar_ops.note"))
         self.run_button.clicked.connect(self.run)
         for field in (self.source, self.destination, self.text):
             field.returnPressed.connect(self.run_button.click)  # Enter in a field runs

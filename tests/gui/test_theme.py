@@ -63,3 +63,21 @@ def test_apply_theme_installs_fusion_the_palette_and_the_stylesheet(qapp):
     finally:
         qapp.setPalette(previous_palette)
         qapp.setStyleSheet(previous_sheet)
+
+
+def test_system_theme_follows_a_desktop_scheme_change(qapp):
+    previous_palette, previous_sheet = QPalette(qapp.palette()), qapp.styleSheet()
+    try:
+        theme.apply_theme(qapp, "system")
+        assert theme.current_mode() == "system"
+        qapp.setStyleSheet("")
+        theme.on_system_scheme_changed(qapp)
+        assert "QListWidget#nav" in qapp.styleSheet()  # recomputed from the live palette
+
+        theme.apply_theme(qapp, "dark")
+        qapp.setStyleSheet("")
+        theme.on_system_scheme_changed(qapp)
+        assert qapp.styleSheet() == ""  # not "system": the desktop is ignored
+    finally:
+        qapp.setPalette(previous_palette)
+        qapp.setStyleSheet(previous_sheet)

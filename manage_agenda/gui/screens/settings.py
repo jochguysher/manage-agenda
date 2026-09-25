@@ -18,7 +18,6 @@ from manage_agenda.gui.widgets import (
     ElidedLabel,
     fetch_calendars,
     form_layout,
-    hint_label,
     load_rules,
     primary,
     set_role,
@@ -66,6 +65,7 @@ class SettingsScreen(Screen):
         set_role(self.calendar_names, "hint")
         self.calendar_names.hide()
         self.language = QComboBox(self)
+        self.language.setToolTip(t("gui.settings.restart_note"))
         self.language.addItem(t("gui.settings.language_auto"), "")
         for language in SUPPORTED_LANGUAGES:
             self.language.addItem(language, language)
@@ -80,7 +80,6 @@ class SettingsScreen(Screen):
         form.addRow("", self.calendar_names)
         form.addRow(t("gui.settings.language"), self.language)
         layout.addLayout(form)
-        layout.addWidget(hint_label(t("gui.settings.restart_note"), self))
 
         row = QHBoxLayout()
         self.save_button = primary(QPushButton(t("gui.settings.save"), self))

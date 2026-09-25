@@ -2172,6 +2172,14 @@ TRANSLATIONS = {
             'ou ambigus sont ignorés et les événements sont créés tels quels.'
         ),
     },
+    'gui.home.mode_review_tip': {
+        "en": 'Proposals appear below, one at a time: accept it (after correcting it if needed) or ask the model again.',
+        "fr": "Les propositions s'affichent ci-dessous, une à la fois : acceptez (après correction si besoin) ou redemandez au modèle.",
+    },
+    'gui.home.mode_auto_tip': {
+        "en": 'Old or unclear messages are skipped and the events are created as extracted.',
+        "fr": 'Les messages anciens ou ambigus sont ignorés et les événements sont créés tels quels.',
+    },
     'gui.home.destination': {
         "en": 'Destination',
         "fr": 'Destination',

@@ -97,6 +97,9 @@ _ROLES = {
 }
 
 _system_palette: QPalette | None = None
+_current_mode = DEFAULT_THEME
+_custom_palette_set = False
+_following: set = set()  # ids of the applications whose colorSchemeChanged is connected
 
 
 def make_palette(spec):
@@ -258,12 +261,47 @@ QStatusBar::item {{
 """
 
 
+def current_mode():
+    return _current_mode
+
+
 def apply_theme(app, mode=DEFAULT_THEME):
     """Fusion, the palette of theme `mode` and the stylesheet for it, on the application;
-    the style installed. Safe to call again with another mode: the widgets are repolished."""
+    the style installed. Safe to call again with another mode: the widgets are repolished.
+
+    "system" leaves the platform's palette in place as long as no palette of ours was ever
+    set, so a desktop switching between light and dark is followed live (see
+    follow_system()); once "light" or "dark" was applied, going back to "system" restores
+    the palette captured at startup."""
+    global _current_mode, _custom_palette_set
     style = app.setStyle("Fusion")
     system_palette(app)  # captured before our first palette replaces it
-    palette = palette_for(mode, app)
-    app.setPalette(palette)
+    _current_mode = mode if mode in THEMES else DEFAULT_THEME
+    if _current_mode == "system" and not _custom_palette_set:
+        palette = app.palette()
+    else:
+        palette = palette_for(_current_mode, app)
+        app.setPalette(palette)
+        _custom_palette_set = _custom_palette_set or _current_mode != "system"
     app.setStyleSheet(stylesheet(palette))
+    follow_system(app)
     return style
+
+
+def follow_system(app):
+    """Recompute the stylesheet when the desktop changes its colour scheme and the theme is
+    "system": the palette Qt propagates changed, the stylesheet derived from it must too."""
+    hints = app.styleHints()
+    if id(app) in _following or not hasattr(hints, "colorSchemeChanged"):
+        return
+    hints.colorSchemeChanged.connect(lambda _scheme: on_system_scheme_changed(app))
+    _following.add(id(app))
+
+
+def on_system_scheme_changed(app):
+    global _system_palette
+    if _current_mode != "system":
+        return
+    if not _custom_palette_set:
+        _system_palette = QPalette(app.palette())
+    app.setStyleSheet(stylesheet(app.palette()))

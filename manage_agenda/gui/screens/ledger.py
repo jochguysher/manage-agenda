@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import cell, fit_columns, hint_label, primary
+from manage_agenda.gui.widgets import cell, fit_columns, primary
 from manage_agenda.i18n import t
 from manage_agenda.sources import (
     Args,
@@ -46,7 +46,8 @@ class LedgerScreen(Screen):
         row.addWidget(self.migrate_button)
         row.addStretch(1)
         maintenance_layout.addLayout(row)
-        maintenance_layout.addWidget(hint_label(t("gui.ledger.exit_code_note"), self))
+        for button in (self.reconcile_button, self.migrate_button):
+            button.setToolTip(t("gui.ledger.exit_code_note"))
         layout.addWidget(maintenance)
 
         restore = QGroupBox(t("gui.ledger.restore"), self)
