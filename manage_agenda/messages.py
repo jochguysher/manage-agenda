@@ -1323,6 +1323,10 @@ TRANSLATIONS = {
         "en": '&View',
         "fr": '&Affichage',
     },
+    'gui.nav.accessible': {
+        "en": 'Screens',
+        "fr": 'Écrans',
+    },
     'gui.menu.theme': {
         "en": '&Theme',
         "fr": '&Thème',
@@ -1460,8 +1464,8 @@ TRANSLATIONS = {
         "fr": 'Compte',
     },
     'gui.lists.refresh': {
-        "en": 'Fetch',
-        "fr": 'Charger',
+        "en": '&Fetch',
+        "fr": '&Charger',
     },
     'gui.lists.job': {
         "en": 'Listing',
@@ -1492,8 +1496,8 @@ TRANSLATIONS = {
         "fr": 'Compte',
     },
     'gui.auth.check': {
-        "en": 'Check',
-        "fr": 'Vérifier',
+        "en": '&Check',
+        "fr": '&Vérifier',
     },
     'gui.auth.run_oauth': {
         "en": 'Authorize in the browser',
@@ -1625,8 +1629,8 @@ TRANSLATIONS = {
         "fr": 'Rétention des journaux de debug (jours)',
     },
     'gui.add.run': {
-        "en": 'Add events',
-        "fr": 'Ajouter les événements',
+        "en": '&Add events',
+        "fr": 'A&jouter les événements',
     },
     'gui.add.no_source': {
         "en": 'Choose a source first.',
@@ -1681,8 +1685,8 @@ TRANSLATIONS = {
         "fr": "La langue s'applique au prochain démarrage de manage-agenda.",
     },
     'gui.settings.save': {
-        "en": 'Save',
-        "fr": 'Enregistrer',
+        "en": '&Save',
+        "fr": '&Enregistrer',
     },
     'gui.settings.reload': {
         "en": 'Reload',
@@ -1718,8 +1722,8 @@ TRANSLATIONS = {
         "fr": "Le compte, les calendriers, le filtre et les événements sont demandés dans des dialogues s'ils ne sont pas donnés ici, comme `-i` sur le terminal.",
     },
     'gui.calendar_ops.run': {
-        "en": 'Run',
-        "fr": 'Lancer',
+        "en": '&Run',
+        "fr": '&Lancer',
     },
     'gui.calendar_ops.job': {
         "en": 'Calendar {operation}',
@@ -1738,8 +1742,8 @@ TRANSLATIONS = {
         "fr": 'Choisir le compte de calendrier (sinon celui enregistré, ou le seul configuré)',
     },
     'gui.ledger.reconcile': {
-        "en": 'Reconcile',
-        "fr": 'Réconcilier',
+        "en": '&Reconcile',
+        "fr": '&Réconcilier',
     },
     'gui.ledger.migrate': {
         "en": 'Migrate ledger',
@@ -1794,8 +1798,8 @@ TRANSLATIONS = {
         "fr": 'Texte à envoyer à chaque modèle Ollama',
     },
     'gui.evaluate.run': {
-        "en": 'Evaluate',
-        "fr": 'Évaluer',
+        "en": '&Evaluate',
+        "fr": 'É&valuer',
     },
     'gui.evaluate.job': {
         "en": 'Model evaluation',
@@ -1810,8 +1814,8 @@ TRANSLATIONS = {
         "fr": 'Télécharge le moteur de navigateur que Playwright utilise pour les pages web ; la progression va dans le journal.',
     },
     'gui.install.run': {
-        "en": 'Install',
-        "fr": 'Installer',
+        "en": '&Install',
+        "fr": '&Installer',
     },
     'gui.install.job': {
         "en": 'Browser installation',
@@ -1928,8 +1932,8 @@ TRANSLATIONS = {
         "fr": 'Détails',
     },
     'gui.accounts.add': {
-        "en": 'Add…',
-        "fr": 'Ajouter…',
+        "en": '&Add…',
+        "fr": 'A&jouter…',
     },
     'gui.accounts.edit': {
         "en": 'Edit…',
@@ -2173,8 +2177,8 @@ TRANSLATIONS = {
         "fr": 'enregistré ou par défaut',
     },
     'gui.home.run': {
-        "en": 'Scan the mail',
-        "fr": 'Analyser le courrier',
+        "en": '&Scan the mail',
+        "fr": 'Analyser le &courrier',
     },
     'gui.home.open_advanced': {
         "en": 'Advanced…',
@@ -2231,8 +2235,8 @@ TRANSLATIONS = {
         "fr": 'Trouvé dans le message {label}',
     },
     'gui.home.review_accept': {
-        "en": 'Add to the calendar',
-        "fr": 'Ajouter au calendrier',
+        "en": 'Add to the ca&lendar',
+        "fr": 'Ajouter au ca&lendrier',
     },
     'gui.home.review_stop': {
         "en": 'Stop the scan',

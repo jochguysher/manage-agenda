@@ -129,3 +129,34 @@ def test_closing_while_a_job_is_stuck_in_a_call_is_refused(qapp, pump):
     event = QCloseEvent()
     window.closeEvent(event)
     assert event.isAccepted()
+
+
+def test_a_running_job_shows_progress_and_opens_the_log(qapp, pump):
+    import threading
+
+    window = MainWindow()
+    window.log_dock.hide()
+    gate = threading.Event()
+    assert window.job_progress.isHidden() and window.log_dock.isHidden()
+    assert window.runner.submit("slow", gate.wait)
+    assert pump(lambda: not window.job_progress.isHidden())
+    assert not window.log_dock.isHidden()
+    assert window.job_progress.minimum() == 0 and window.job_progress.maximum() == 0
+    gate.set()
+    assert pump(lambda: not window.runner.is_busy())
+    assert window.job_progress.isHidden() and not window.cancel_button.isEnabled()
+    assert window.cancel_button.accessibleName() and window.nav.accessibleName()
+    window.close()
+
+
+def test_every_screen_has_a_mnemonic_on_its_main_button_and_home_takes_the_focus(qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    window = MainWindow()
+    for screen in window.screens:
+        primaries = [b for b in screen.findChildren(QPushButton) if b.property("primary") is True]
+        assert primaries, screen.nav_key
+        assert all("&" in b.text() for b in primaries), (screen.nav_key, [b.text() for b in primaries])
+    home = window.screens[0]
+    assert home.focusWidget() is home.source
+    window.close()

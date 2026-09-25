@@ -65,6 +65,8 @@ class CalendarOpsScreen(Screen):
 
         self.operation.currentIndexChanged.connect(self._on_operation_changed)
         self.run_button.clicked.connect(self.run)
+        for field in (self.source, self.destination, self.text):
+            field.returnPressed.connect(self.run_button.click)  # Enter in a field runs
         self._on_operation_changed(0)
 
     def _entry(self):

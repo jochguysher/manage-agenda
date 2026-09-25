@@ -297,6 +297,8 @@ class HomeScreen(Screen):
         self._update_mailbox_hint()
         self._show_destination()
         self._update_ledger_summary()
+        # The keyboard lands on the first choice of the task, not on the sidebar.
+        self.source.setFocus()
 
     def _update_mailbox_hint(self, *_ignored):
         warning = mailbox_warning(self.rules, self.source.current_key())
@@ -355,6 +357,9 @@ class HomeScreen(Screen):
         fit and its tooltip carries the saved ids in full."""
         self.destination.setText(self._destination_text())
         self.destination.setToolTip(self._destination_text(full=True))
+        # A screen reader gets the ids in full, which the elided text may not show.
+        self.destination.setAccessibleName(t("gui.home.destination"))
+        self.destination.setAccessibleDescription(self._destination_text(full=True))
 
     def _update_ledger_summary(self):
         messages, events, last, _recorded = ledger_stats()

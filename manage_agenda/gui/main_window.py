@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -57,6 +58,7 @@ SCREEN_CLASSES = (
 CLOSE_WAIT_MS = 5000
 NAV_ROW_HEIGHT = 34
 LOG_DOCK_HEIGHT = 170
+PROGRESS_WIDTH = 120
 
 
 def _scrollable(screen):
@@ -106,6 +108,7 @@ class MainWindow(AutoNamed, QMainWindow):
 
         self.nav = QListWidget(self)
         self.nav.setObjectName("nav")  # styled by gui/theme.py
+        self.nav.setAccessibleName(t("gui.nav.accessible"))
         self.nav.setFixedWidth(210)
         self.nav.setSpacing(1)
         self.stack = QStackedWidget(self)
@@ -128,10 +131,19 @@ class MainWindow(AutoNamed, QMainWindow):
         self.setCentralWidget(central)
 
         self.status_label = QLabel("", self)
+        # An indeterminate bar while a job runs: the only sign of activity besides the log.
+        self.job_progress = QProgressBar(self)
+        self.job_progress.setRange(0, 0)
+        self.job_progress.setTextVisible(False)
+        self.job_progress.setFixedWidth(PROGRESS_WIDTH)
+        self.job_progress.hide()
         self.cancel_button = QPushButton(t("gui.cancel"), self)
         self.cancel_button.setToolTip(t("gui.cancel_tooltip"))
+        self.cancel_button.setAccessibleName(t("gui.cancel"))
+        self.cancel_button.setAccessibleDescription(t("gui.cancel_tooltip"))
         self.cancel_button.setEnabled(False)
         self.statusBar().addWidget(self.status_label, 1)
+        self.statusBar().addPermanentWidget(self.job_progress)
         self.statusBar().addPermanentWidget(self.cancel_button)
 
         self.bridge.request_ready.connect(self._on_ui_request, Qt.ConnectionType.QueuedConnection)
@@ -243,17 +255,25 @@ class MainWindow(AutoNamed, QMainWindow):
     def _on_job_started(self, name):
         self.status_label.setText(t("gui.job_started", name=name))
         self.cancel_button.setEnabled(True)
+        self.job_progress.show()
+        # What the job does is only told in the log: bring it back if it was closed.
+        if self.log_dock.isHidden():
+            self.log_dock.show()
         self.log_panel.append_line(f"=== {name} ===")
 
-    def _on_job_finished(self, result):
+    def _job_over(self):
         self.cancel_button.setEnabled(False)
+        self.job_progress.hide()
+
+    def _on_job_finished(self, result):
+        self._job_over()
         if isinstance(result, int) and not isinstance(result, bool) and result != 0:
             self.status_label.setText(t("gui.job_finished_with_code", code=result))
         else:
             self.status_label.setText(t("gui.job_finished"))
 
     def _on_job_failed(self, summary, trace):
-        self.cancel_button.setEnabled(False)
+        self._job_over()
         self.status_label.setText(t("gui.job_failed", error=summary))
         self.log_panel.append_line(trace)
         box = QMessageBox(QMessageBox.Icon.Critical, t("gui.job_failed_title"), summary, parent=self)
@@ -262,7 +282,7 @@ class MainWindow(AutoNamed, QMainWindow):
         box.open()
 
     def _on_job_cancelled(self):
-        self.cancel_button.setEnabled(False)
+        self._job_over()
         self.status_label.setText(t("gui.job_cancelled"))
 
     def closeEvent(self, event):

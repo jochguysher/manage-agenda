@@ -120,3 +120,15 @@ def test_install_submits_the_chosen_browser(qapp, pump):
         screen.run()
         assert pump(lambda: not runner.is_busy())
     installer.assert_called_once_with("chromium")
+
+
+def test_enter_in_a_calendar_ops_field_runs(qapp, pump):
+    runner = JobRunner(Bridge())
+    screen = calendar_ops.CalendarOpsScreen(runner)
+    calls = []
+    fake = tuple((name, lambda args: calls.append(args), needs) for name, _func, needs in calendar_ops.OPERATIONS)
+    with patch.object(calendar_ops, "OPERATIONS", fake):
+        screen.text.setText("x")
+        screen.text.returnPressed.emit()
+        assert pump(lambda: not runner.is_busy())
+    assert len(calls) == 1 and calls[0].text == "x"

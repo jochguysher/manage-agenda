@@ -136,6 +136,8 @@ class AddScreen(Screen):
         self.account.currentIndexChanged.connect(self._update_calendar_summary)
         self.load_calendars_button.clicked.connect(self.load_calendars)
         self.run_button.clicked.connect(self.run)
+        for field in (self.urls, self.files, self.model):
+            field.returnPressed.connect(self.run_button.click)  # Enter in a field runs
         self._on_source_changed(0)
         self._update_calendar_summary()
 

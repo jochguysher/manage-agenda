@@ -285,7 +285,7 @@ Open the desktop window (needs the `gui` extra, see [Desktop window](#desktop-wi
 
 Notes:
 
-- One job runs at a time. **Cancel** stops it at its next question, or right away if it is waiting on one; a call in progress (a model request, a mailbox fetch, the browser consent) finishes on its own, and the window refuses to close until it has. A run cancelled during the event review leaves no ledger entry and marks nothing in the mailbox; one cancelled at the "remove the label?" question still records the event that was already created.
+- One job runs at a time; while it runs the status bar shows a progress indicator and the log panel opens if it was closed. **Cancel** stops it at its next question, or right away if it is waiting on one; a call in progress (a model request, a mailbox fetch, the browser consent) finishes on its own, and the window refuses to close until it has. A run cancelled during the event review leaves no ledger entry and marks nothing in the mailbox; one cancelled at the "remove the label?" question still records the event that was already created.
 - The event review dialog shows and edits times in local time and writes them back in UTC, as the terminal's date corrections end up after normalisation.
 - The window has its own look, the same on every desktop: View › Theme chooses *Light*, *Dark* or *System* (the desktop's colours), applies it at once and remembers it in `gui.ini`.
 - The language follows the same `language` key of `config.yaml` (or the system locale) and applies at the next start.
