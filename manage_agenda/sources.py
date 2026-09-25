@@ -137,7 +137,9 @@ def _get_events_from_calendar(args, api_src, calendar=None):
     "FIXME: maybe a folder argument?"
 
     if calendar:
-        api_src.setCalendar(calendar)
+        # moduleGcalendar lists the calendar it holds as "active" (setApiPosts reads it as
+        # calendarId); there is no setCalendar on it.
+        api_src.setActive(calendar)
     api_src.setPosts()
     posts = api_src.getPosts()
 
