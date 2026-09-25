@@ -65,6 +65,12 @@ uv sync --extra gui        # or: pip install 'manage-agenda[gui]'
 uv run manage-agenda gui   # or the manage-agenda-gui script
 ```
 
+If you installed the command with `uv tool install`, the extra has to go into the tool environment instead:
+
+```bash
+uv tool install --force --editable '.[gui]'   # from the checkout
+```
+
 See [Desktop window](#desktop-window) below for what it does and how it differs from the terminal.
 
 ### Configuration
