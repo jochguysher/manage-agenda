@@ -30,6 +30,7 @@ from manage_agenda.gui.screens.add import AddScreen
 from manage_agenda.gui.screens.auth import AuthScreen
 from manage_agenda.gui.screens.calendar_ops import CalendarOpsScreen
 from manage_agenda.gui.screens.evaluate import EvaluateScreen
+from manage_agenda.gui.screens.home import HomeScreen
 from manage_agenda.gui.screens.install import InstallScreen
 from manage_agenda.gui.screens.ledger import LedgerScreen
 from manage_agenda.gui.screens.lists import ListsScreen
@@ -37,6 +38,7 @@ from manage_agenda.gui.screens.settings import SettingsScreen
 from manage_agenda.i18n import t
 
 SCREEN_CLASSES = (
+    HomeScreen,
     AddScreen,
     CalendarOpsScreen,
     LedgerScreen,
@@ -130,6 +132,7 @@ class MainWindow(QMainWindow):
         self.runner.cancelled.connect(self._on_job_cancelled)
         self.cancel_button.clicked.connect(self.cancel_job)
         self.nav.currentRowChanged.connect(self._show_screen)
+        self.screen(HomeScreen).open_screen.connect(self.show_screen)
         self.nav.setCurrentRow(0)
         self.restore_window_state()
 
@@ -172,6 +175,13 @@ class MainWindow(QMainWindow):
     def _on_ui_request(self, request: UIRequest):
         if request.cancelled or request.done.is_set():
             return
+        home = self.screen(HomeScreen)
+        if request.kind == "review_event" and home.accepts_review():
+            # A run started from the home screen gets its proposals there, inline; the slot
+            # returns and the worker stays blocked until the home answers or cancels.
+            self.show_screen(HomeScreen)
+            home.present_review(request)
+            return
         dialog = dialogs.build(request, self)
         self._active_dialog = dialog
         try:
@@ -189,6 +199,7 @@ class MainWindow(QMainWindow):
         self.runner.cancel()
         if self._active_dialog is not None:
             self._active_dialog.reject()
+        self.screen(HomeScreen).cancel_review()
 
     def _on_job_started(self, name):
         self.status_label.setText(t("gui.job_started", name=name))
