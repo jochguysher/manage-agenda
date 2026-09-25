@@ -3,8 +3,10 @@ that give every screen the same layout and the theme's roles (see gui/theme.py).
 
 from __future__ import annotations
 
+import functools
+
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtGui import QAction, QPainter, QPalette
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -26,6 +28,40 @@ from manage_agenda.connections import _eligible_calendars, missing_calendar_mess
 from manage_agenda.exceptions import CalendarError
 from manage_agenda.i18n import t
 from manage_agenda.ui import label_for
+
+
+def name_children(owner, prefix):
+    """Give every widget or action `owner` keeps as a public attribute, and has no object
+    name yet, the name `<prefix>_<attribute>`: what Qt Pilot and the GUI tests find widgets
+    by. Names already set (the theme's selectors `nav` and `screenTitle`, the dock's state
+    key) are kept."""
+    for attribute, value in list(vars(owner).items()):
+        if attribute.startswith("_") or not isinstance(value, (QWidget, QAction)):
+            continue
+        if not value.objectName():
+            value.setObjectName(f"{prefix}_{attribute}")
+
+
+class AutoNamed:
+    """Mixin for a screen, dialog or form: once a subclass's __init__ has run, name_children()
+    names what it built, with name_prefix() as the prefix. Every level of the hierarchy that
+    defines __init__ is wrapped, so a base class's own widgets are named too."""
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        init = cls.__dict__.get("__init__")
+        if init is None:
+            return
+
+        @functools.wraps(init)
+        def wrapper(self, *args, **kw):
+            init(self, *args, **kw)
+            name_children(self, self.name_prefix())
+
+        cls.__init__ = wrapper
+
+    def name_prefix(self):
+        return self.objectName() or type(self).__name__.lower()
 
 
 def form_layout(parent=None):
@@ -249,7 +285,9 @@ def select_all_none_row(target, parent=None):
     """Select all / none buttons for a checkable list with a set_all(bool) method."""
     row = QHBoxLayout()
     select_all = QPushButton(t("gui.dialog.select_all"), parent)
+    select_all.setObjectName("select_all_button")
     select_none = QPushButton(t("gui.dialog.select_none"), parent)
+    select_none.setObjectName("select_none_button")
     select_all.clicked.connect(lambda: target.set_all(True))
     select_none.clicked.connect(lambda: target.set_all(False))
     row.addWidget(select_all)
@@ -258,7 +296,7 @@ def select_all_none_row(target, parent=None):
     return row
 
 
-class CalendarSelectionDialog(QDialog):
+class CalendarSelectionDialog(AutoNamed, QDialog):
     """An account's calendars to check or uncheck: what the Add screen's "Load calendars…"
     opens once the account is connected. checked_ids() is the choice when accepted."""
 
@@ -275,15 +313,18 @@ class CalendarSelectionDialog(QDialog):
         layout.addWidget(self.picker)
         layout.addLayout(select_all_none_row(self.picker, self))
         buttons = QHBoxLayout()
-        cancel = QPushButton(t("gui.dialog.cancel"), self)
-        ok = primary(QPushButton(t("gui.dialog.ok"), self))
-        cancel.clicked.connect(self.reject)
-        ok.clicked.connect(self.accept)
-        ok.setDefault(True)
+        self.cancel_button = QPushButton(t("gui.dialog.cancel"), self)
+        self.ok_button = primary(QPushButton(t("gui.dialog.ok"), self))
+        self.cancel_button.clicked.connect(self.reject)
+        self.ok_button.clicked.connect(self.accept)
+        self.ok_button.setDefault(True)
         buttons.addStretch(1)
-        buttons.addWidget(cancel)
-        buttons.addWidget(ok)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.ok_button)
         layout.addLayout(buttons)
+
+    def name_prefix(self):
+        return "calendars"
 
     def checked_ids(self):
         return self.picker.checked_ids()

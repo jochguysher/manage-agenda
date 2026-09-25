@@ -223,7 +223,7 @@ class HomeScreen(Screen):
         self.review_box = QGroupBox(t("gui.home.review_box"), self)
         review_layout = QVBoxLayout(self.review_box)
         self.review_label = hint_label("", self)
-        self.review_form = EventReviewForm(self)
+        self.review_form = EventReviewForm(self, prefix="home_review")
         review_layout.addWidget(self.review_label)
         review_layout.addWidget(self.review_form)
         review_buttons = QHBoxLayout()

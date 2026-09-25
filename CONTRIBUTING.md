@@ -271,6 +271,13 @@ script, so nothing else needs PySide6. Rules for GUI code:
   from `theme.py` (two explicit palettes, light and dark, or the platform's; `apply_theme(app,
   mode)` is called by `app.run()` and by View › Theme only) and from the `role` / `primary` /
   `folded` properties `widgets.py` sets - not from per-widget `setStyleSheet` calls;
+- every widget or action a screen, dialog or form keeps as a public attribute gets an object
+  name automatically once built (`widgets.AutoNamed`): `<prefix>_<attribute>`, the prefix being
+  the screen's nav key (`home_run_button`), the prompt kind for a dialog (`review_event_summary`)
+  or `main` for the window. Keep interactive widgets as attributes, in snake_case, so Qt Pilot
+  and the tests can target them; `tests/gui/test_object_names.py` fails on an unnamed one. The
+  names `nav`, `screenTitle`, `logDock` and `logPanel` predate the rule and stay (theme
+  selectors, saved-state key);
 - the Accounts screen is the one screen that writes files from the GUI thread: it goes
   through `manage_agenda.accounts`, which only edits local configuration and takes an
   explicit `directory` so a test never reaches the real `~/.mySocial`;

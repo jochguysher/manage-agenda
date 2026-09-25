@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from manage_agenda.gui.widgets import hint_label
+from manage_agenda.gui.widgets import AutoNamed, hint_label
 from manage_agenda.i18n import t
 
 
-class Screen(QWidget):
+class Screen(AutoNamed, QWidget):
     """A page. Subclasses set `nav_key` (the t() key of their name in the sidebar) and
     `subtitle_key` (the one-line description under it), build their widgets into
     `self.content`, register their Run buttons so they are disabled while a job runs, and
-    never call core code on the GUI thread: they submit() it to the job runner."""
+    never call core code on the GUI thread: they submit() it to the job runner. Every
+    widget kept as an attribute is named `<screen>_<attribute>` once built (AutoNamed)."""
 
     nav_key = "gui.nav.unknown"
     subtitle_key = ""
+
+    def name_prefix(self):
+        """The last part of nav_key: "home" for gui.nav.home."""
+        return self.nav_key.rsplit(".", 1)[-1]
 
     def __init__(self, runner, parent=None):
         super().__init__(parent)

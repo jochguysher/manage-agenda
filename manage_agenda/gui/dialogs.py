@@ -26,19 +26,23 @@ from manage_agenda.gui.review_form import (  # noqa: F401 - to_/from_local_text 
     from_local_text,
     to_local_text,
 )
-from manage_agenda.gui.widgets import hint_label, primary, select_all_none_row
+from manage_agenda.gui.widgets import AutoNamed, hint_label, primary, select_all_none_row
 from manage_agenda.i18n import t
 from manage_agenda.ui import describe_nature, describe_source, label_for
 
 
-class PromptDialog(QDialog):
-    """Base: a modal dialog answering one UIRequest through value()."""
+class PromptDialog(AutoNamed, QDialog):
+    """Base: a modal dialog answering one UIRequest through value(). Its widgets are named
+    `<kind>_<attribute>` (AutoNamed), `kind` being the prompt's: review_event_summary…"""
 
     def __init__(self, request: UIRequest, parent=None):
         super().__init__(parent)
         self.request = request
         self.setModal(True)
         self.setMinimumWidth(420)
+
+    def name_prefix(self):
+        return self.request.kind
 
     def value(self):
         raise NotImplementedError
@@ -53,10 +57,11 @@ class PromptDialog(QDialog):
     def _button_box(self, ok_text=None):
         box = QDialogButtonBox(self)
         ok = box.addButton(ok_text or t("gui.dialog.ok"), QDialogButtonBox.ButtonRole.AcceptRole)
-        box.addButton(t("gui.dialog.cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        cancel = box.addButton(t("gui.dialog.cancel"), QDialogButtonBox.ButtonRole.RejectRole)
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
         ok.setDefault(True)
+        self.button_box, self.ok_button, self.cancel_button = box, ok, cancel
         return box
 
 
@@ -202,12 +207,13 @@ class ChooseActionDialog(PromptDialog):
         self.buttons = {}
         for key, label in request.payload["actions"]:
             button = QPushButton(label, self)
+            button.setObjectName(f"choose_action_{key}")
             button.clicked.connect(lambda _checked=False, key=key: self._choose(key))
             self.buttons[key] = button
             layout.addWidget(button)
-        cancel = QPushButton(t("gui.dialog.cancel"), self)
-        cancel.clicked.connect(self.reject)
-        layout.addWidget(cancel)
+        self.cancel_button = QPushButton(t("gui.dialog.cancel"), self)
+        self.cancel_button.clicked.connect(self.reject)
+        layout.addWidget(self.cancel_button)
 
     def _choose(self, key):
         self._key = key
@@ -255,7 +261,7 @@ class ReviewEventDialog(PromptDialog):
         ):
             if line:
                 layout.addWidget(hint_label(line, self))
-        self.form = EventReviewForm(self)
+        self.form = EventReviewForm(self, prefix="review_event")
         self.form.load(payload["event"])
         layout.addWidget(self.form)
         self.summary, self.location, self.description = (
@@ -268,12 +274,12 @@ class ReviewEventDialog(PromptDialog):
         row = QHBoxLayout()
         self.retry = QPushButton(t("events.review_retry"), self)
         self.accept_button = primary(QPushButton(t("events.review_accept"), self))
-        cancel = QPushButton(t("gui.dialog.cancel"), self)
+        self.cancel_button = QPushButton(t("gui.dialog.cancel"), self)
         self.retry.clicked.connect(self._retry)
         self.accept_button.clicked.connect(self._accept_edits)
-        cancel.clicked.connect(self.reject)
+        self.cancel_button.clicked.connect(self.reject)
         self.accept_button.setDefault(True)
-        row.addWidget(cancel)
+        row.addWidget(self.cancel_button)
         row.addStretch(1)
         row.addWidget(self.retry)
         row.addWidget(self.accept_button)

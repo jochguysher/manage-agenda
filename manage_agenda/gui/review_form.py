@@ -14,7 +14,7 @@ import datetime
 from PySide6.QtWidgets import QLabel, QLineEdit, QPlainTextEdit, QWidget
 
 from manage_agenda.events import DATETIME_FORMAT
-from manage_agenda.gui.widgets import form_layout, set_role
+from manage_agenda.gui.widgets import AutoNamed, form_layout, set_role
 from manage_agenda.i18n import t
 
 DESCRIPTION_HEIGHT = 110
@@ -39,12 +39,15 @@ def from_local_text(text):
     return naive.astimezone().astimezone(datetime.timezone.utc).isoformat()
 
 
-class EventReviewForm(QWidget):
+class EventReviewForm(AutoNamed, QWidget):
     """The fields of one event. load() shows an event dict (kept by reference: apply_edits()
-    writes the edits back into that same dict, which is what the worker gets)."""
+    writes the edits back into that same dict, which is what the worker gets). `prefix`
+    names the fields (`<prefix>_summary`…): the review dialog and the home screen each
+    hold one form, told apart by it."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, prefix="review"):
         super().__init__(parent)
+        self.prefix = prefix
         self.event_data = {}
         self._start_initial = ""
         self._end_initial = ""
@@ -67,6 +70,9 @@ class EventReviewForm(QWidget):
         form.addRow("", hint)
         form.addRow(t("events.review_description"), self.description)
         form.addRow("", self.error)
+
+    def name_prefix(self):
+        return self.prefix
 
     def load(self, event_data):
         self.event_data = event_data

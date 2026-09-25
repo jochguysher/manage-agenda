@@ -38,6 +38,7 @@ from manage_agenda.gui.screens.ledger import LedgerScreen
 from manage_agenda.gui.screens.lists import ListsScreen
 from manage_agenda.gui.screens.settings import SettingsScreen
 from manage_agenda.gui.theme import THEMES, apply_theme
+from manage_agenda.gui.widgets import AutoNamed
 from manage_agenda.i18n import t
 
 SCREEN_CLASSES = (
@@ -69,7 +70,13 @@ def _scrollable(screen):
     return area
 
 
-class MainWindow(QMainWindow):
+class MainWindow(AutoNamed, QMainWindow):
+    """Its own widgets and menus are named `main_<attribute>` (AutoNamed); `nav`, `logDock`
+    and `logPanel` keep their historical names (theme selectors, saved-state key)."""
+
+    def name_prefix(self):
+        return "main"
+
     def __init__(self, verbose=False, parent=None):
         super().__init__(parent)
         self.verbose = verbose

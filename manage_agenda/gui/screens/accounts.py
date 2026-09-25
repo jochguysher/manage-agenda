@@ -32,7 +32,15 @@ from manage_agenda.accounts import (
 )
 from manage_agenda.compat import IMAP_DEFAULT_PORT
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import cell, fit_columns, form_layout, hint_label, primary, set_role
+from manage_agenda.gui.widgets import (
+    AutoNamed,
+    cell,
+    fit_columns,
+    form_layout,
+    hint_label,
+    primary,
+    set_role,
+)
 from manage_agenda.i18n import t
 
 DEFAULT_FOLDER = "INBOX"
@@ -43,9 +51,12 @@ def _flag(value):
     return str(value or "").strip().lower() in {"yes", "true", "1", "include"}
 
 
-class AccountDialog(QDialog):
+class AccountDialog(AutoNamed, QDialog):
     """Add or edit one account. `save(account, password)` runs on Save; an AccountError it
-    raises is shown and the dialog stays open."""
+    raises is shown and the dialog stays open. Its widgets are named `account_<attribute>`."""
+
+    def name_prefix(self):
+        return "account"
 
     def __init__(self, save, account=None, credentials=None, directory=None, parent=None):
         super().__init__(parent)
