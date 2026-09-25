@@ -71,6 +71,7 @@ def test_every_screen_names_its_widgets(qapp):
             "ledger_reconcile_button", "accounts_check_auth_button", "accounts_oauth_button",
             "lists_run_button", "evaluate_run_button", "calendar_ops_run_button",
             "main_cancel_button", "main_theme_menu", "main_tools_menu", "theme_dark", "install_browser",
+            "main_log_summary", "log_details_button", "logSummary",
         ):
             assert window.findChild(object, expected) is not None, expected
         assert window.nav.objectName() == "nav" and window.log_dock.objectName() == "logDock"

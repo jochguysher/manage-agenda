@@ -20,13 +20,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStackedWidget,
+    QVBoxLayout,
     QWidget,
 )
 
 from manage_agenda.gui import dialogs
 from manage_agenda.gui.bridge import Bridge, UIRequest
 from manage_agenda.gui.jobs import JobRunner
-from manage_agenda.gui.log_panel import LogPanel
+from manage_agenda.gui.log_panel import LogPanel, LogSummary
 from manage_agenda.gui.persist import gui_settings, save_theme, saved_theme
 from manage_agenda.gui.screens.accounts import AccountsScreen
 from manage_agenda.gui.screens.add import AddScreen
@@ -57,6 +58,8 @@ SCREEN_CLASSES = tuple(cls for _key, classes in NAV_GROUPS for cls in classes) +
 CLOSE_WAIT_MS = 5000
 NAV_ROW_HEIGHT = 34
 NAV_HEADER_HEIGHT = 30
+NAV_PADDING = 12  # the theme's 6px top and bottom
+SIDEBAR_WIDTH = 210
 LOG_DOCK_HEIGHT = 170
 PROGRESS_WIDTH = 120
 
@@ -114,7 +117,6 @@ class MainWindow(AutoNamed, QMainWindow):
         self.nav = QListWidget(self)
         self.nav.setObjectName("nav")  # styled by gui/theme.py
         self.nav.setAccessibleName(t("gui.nav.accessible"))
-        self.nav.setFixedWidth(210)
         self.nav.setSpacing(1)
         self.stack = QStackedWidget(self)
         self.screens = []
@@ -140,11 +142,21 @@ class MainWindow(AutoNamed, QMainWindow):
             screen = screen_class(self.runner, self)
             self.screens.append(screen)
             self.stack.addWidget(_scrollable(screen))
+        # The sidebar shows all its rows; the log summary takes the rest of the column.
+        self.nav.setFixedHeight(self._nav_height())
+        self.log_summary = LogSummary(self)
+        self.side_column = QWidget(self)
+        self.side_column.setFixedWidth(SIDEBAR_WIDTH)
+        column = QVBoxLayout(self.side_column)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.nav)
+        column.addWidget(self.log_summary, 1)
         central = QWidget(self)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.nav)
+        layout.addWidget(self.side_column)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(central)
 
@@ -170,6 +182,11 @@ class MainWindow(AutoNamed, QMainWindow):
         self.bridge.log_record.connect(
             self.log_panel.append_record, Qt.ConnectionType.QueuedConnection
         )
+        self.bridge.echo_line.connect(self.log_summary.append_line, Qt.ConnectionType.QueuedConnection)
+        self.bridge.log_record.connect(
+            self.log_summary.append_record, Qt.ConnectionType.QueuedConnection
+        )
+        self.log_summary.details_button.clicked.connect(self.log_action.trigger)
         self.runner.started.connect(self._on_job_started)
         self.runner.finished.connect(self._on_job_finished)
         self.runner.failed.connect(self._on_job_failed)
@@ -183,6 +200,16 @@ class MainWindow(AutoNamed, QMainWindow):
         self.screen(AddScreen).back.connect(lambda: self.show_screen(HomeScreen))
         self.nav.setCurrentRow(self.screen_rows[0])
         self.restore_window_state()
+
+    def _nav_height(self):
+        """The height showing every sidebar row (the theme's padding included)."""
+        rows = sum(self.nav.item(row).sizeHint().height() + 2 * self.nav.spacing() for row in range(self.nav.count()))
+        return rows + 2 * self.nav.frameWidth() + NAV_PADDING
+
+    def log_line(self, text):
+        """A line of ours (not the worker's) in both views of the log."""
+        self.log_panel.append_line(text)
+        self.log_summary.append_line(text)
 
     def show_screen(self, screen_class):
         """Show `screen_class`: through its sidebar row when it has one (which refreshes
@@ -302,10 +329,7 @@ class MainWindow(AutoNamed, QMainWindow):
         self.cancel_button.setEnabled(True)
         self.cancel_button.show()
         self.job_progress.show()
-        # What the job does is only told in the log: bring it back if it was closed.
-        if self.log_dock.isHidden():
-            self.log_dock.show()
-        self.log_panel.append_line(f"=== {name} ===")
+        self.log_line(f"=== {name} ===")
 
     def _job_over(self):
         self.cancel_button.setEnabled(False)
@@ -322,7 +346,7 @@ class MainWindow(AutoNamed, QMainWindow):
     def _on_job_failed(self, summary, trace):
         self._job_over()
         self.status_label.setText(t("gui.job_failed", error=summary))
-        self.log_panel.append_line(trace)
+        self.log_line(trace)
         box = QMessageBox(QMessageBox.Icon.Critical, t("gui.job_failed_title"), summary, parent=self)
         box.setDetailedText(trace)
         box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -351,7 +375,7 @@ class MainWindow(AutoNamed, QMainWindow):
                 # the live QThread, which Qt treats as fatal - so the window stays open;
                 # closing again once the call has returned works.
                 self.status_label.setText(t("gui.close_job_still_running"))
-                self.log_panel.append_line(t("gui.close_job_still_running"))
+                self.log_line(t("gui.close_job_still_running"))
                 event.ignore()
                 return
         self.save_window_state()

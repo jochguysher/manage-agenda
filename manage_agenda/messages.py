@@ -1383,6 +1383,14 @@ TRANSLATIONS = {
         "en": 'Model: {model}',
         "fr": 'Modèle : {model}',
     },
+    'gui.log.details': {
+        "en": 'Details…',
+        "fr": 'Détails…',
+    },
+    'gui.log.details_tip': {
+        "en": 'Open or close the full log panel (View › Log, Ctrl+L).',
+        "fr": 'Ouvre ou ferme le panneau complet du journal (Affichage › Journal, Ctrl+L).',
+    },
     'gui.nav.accessible': {
         "en": 'Screens',
         "fr": 'Écrans',

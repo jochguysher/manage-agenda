@@ -27,7 +27,7 @@ class GuiThreadUI:
     ask_text = ask_multiline = review_event = select_events = _refuse
 
     def echo(self, *parts, sep=" ", end="\n", flush=False):
-        self.window.log_panel.append_line(sep.join(str(part) for part in parts))
+        self.window.log_line(sep.join(str(part) for part in parts))
 
 
 def create_window(verbose=False):

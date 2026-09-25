@@ -181,6 +181,15 @@ QListWidget#nav::item {{
     margin: 0 2px;
     border-radius: 6px;
 }}
+QListWidget#logSummary {{
+    background: {window};
+    border: none;
+    outline: 0;
+    font-size: 9pt;
+}}
+QListWidget#logSummary::item {{
+    padding: 1px 2px;
+}}
 QListWidget#nav::item:disabled {{
     color: {hint};
     font-size: 9pt;

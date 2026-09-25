@@ -154,7 +154,8 @@ def test_a_running_job_shows_progress_and_opens_the_log(qapp, pump):
     assert window.runner.submit("slow", gate.wait)
     assert pump(lambda: not window.job_progress.isHidden())
     assert not window.cancel_button.isHidden() and window.cancel_button.isEnabled()
-    assert not window.log_dock.isHidden()
+    assert window.log_dock.isHidden()  # the summary under the sidebar shows the activity
+    assert "=== slow ===" in window.log_summary.lines()
     assert window.job_progress.minimum() == 0 and window.job_progress.maximum() == 0
     gate.set()
     assert pump(lambda: not window.runner.is_busy())
@@ -192,4 +193,34 @@ def test_help_lives_in_tooltips_not_on_the_page(qapp):
     assert t("gui.home.mode_hint") not in texts and t("gui.home.planned_hint") not in texts
     ledger = window.screen(LedgerScreen)
     assert ledger.reconcile_button.toolTip() == t("gui.ledger.exit_code_note")
+    window.close()
+
+
+def test_log_summary_shows_the_facts_short_and_opens_the_details(qapp, pump):
+    window = MainWindow()
+    window.show()
+    summary = window.log_summary
+    assert window.nav.height() >= window.nav.count() * 20  # every row visible, no scrolling
+    window.bridge.echo_line.emit("Processing: a very long subject " + "x" * 200)
+    window.bridge.log_record.emit("12:00:00 WARNING mailbox unreachable", 30)
+    window.bridge.log_record.emit("12:00:01 ERROR boom", 40)
+    window.bridge.log_record.emit("12:00:02 INFO 3 events created", 20)
+    window.bridge.echo_line.emit("")
+    assert pump(lambda: len(summary.lines()) == 4)
+    lines = summary.lines()
+    assert lines[0].startswith("Processing: a very long subject")
+    assert lines[1] == "⚠ mailbox unreachable" and lines[2] == "✖ boom" and lines[3] == "3 events created"
+    assert summary.list.item(0).toolTip().endswith("x" * 200)
+    assert summary.list.item(1).toolTip() == "12:00:00 WARNING mailbox unreachable"
+    assert "12:00:00 WARNING mailbox unreachable" in "\n".join(window.log_panel.lines())
+
+    window.log_dock.hide()
+    summary.details_button.click()
+    assert window.log_dock.isVisible() and window.log_action.isChecked()
+    summary.details_button.click()
+    assert not window.log_dock.isVisible()
+
+    for index in range(summary.MAX_ENTRIES + 5):
+        summary.append_line(f"line {index}")
+    assert len(summary.lines()) == summary.MAX_ENTRIES and summary.lines()[-1] == f"line {summary.MAX_ENTRIES + 4}"
     window.close()
