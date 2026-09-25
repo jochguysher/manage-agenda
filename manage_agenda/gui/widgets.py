@@ -9,13 +9,17 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
     QSizePolicy,
+    QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from manage_agenda.connections import _eligible_calendars, missing_calendar_message
@@ -25,12 +29,66 @@ from manage_agenda.ui import label_for
 
 
 def form_layout(parent=None):
-    """A form whose fields take the available width, with the spacing every screen uses."""
+    """A form whose fields take the available width, with the spacing every screen uses.
+    Every non-fixed field grows: a combo box (Preferred by default) lines up with the line
+    edits under it instead of stopping at its longest entry."""
     form = QFormLayout(parent) if parent is not None else QFormLayout()
-    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
     form.setHorizontalSpacing(12)
     form.setVerticalSpacing(8)
     return form
+
+
+MAX_COLUMN_WIDTH = 360
+
+
+def cell(text):
+    """A read-only table cell whose full text is its tooltip, for what a column elides."""
+    item = QTableWidgetItem(str(text))
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    item.setToolTip(str(text))
+    return item
+
+
+def fit_columns(table, max_width=MAX_COLUMN_WIDTH):
+    """Size a table's columns after filling it: every column but the last to its content,
+    capped at `max_width`, the last one stretched over what is left. The table then never
+    grows wider than its page - resizeColumnsToContents() alone widens a column to a whole
+    file path and pushes the page out of the window."""
+    header = table.horizontalHeader()
+    last = table.columnCount() - 1
+    for column in range(last):
+        header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        table.resizeColumnToContents(column)
+        if table.columnWidth(column) > max_width:
+            table.setColumnWidth(column, max_width)
+    if last >= 0:
+        header.setSectionResizeMode(last, QHeaderView.ResizeMode.Stretch)
+
+
+class CollapsibleBox(QGroupBox):
+    """A group box folded by default: its title is the toggle (a checkable QGroupBox), its
+    `body` holds the widgets and is hidden while the box is folded. For what a screen offers
+    but seldom needs, so the page shows its main action first."""
+
+    def __init__(self, title, parent=None, expanded=False):
+        super().__init__(title, parent)
+        self.body = QWidget(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.body)
+        self.setCheckable(True)
+        self.toggled.connect(self._on_toggled)
+        self.setChecked(expanded)
+        self._on_toggled(expanded)
+
+    def _on_toggled(self, expanded):
+        self.body.setVisible(expanded)
+        # The theme drops the frame of a folded box (`QGroupBox[folded="true"]`): only the
+        # title line stays.
+        self.setProperty("folded", not expanded)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 def set_role(widget, role):

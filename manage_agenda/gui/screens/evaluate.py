@@ -27,7 +27,7 @@ class EvaluateScreen(Screen):
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
         layout = self.content
-        form = form_layout()
+        form = self.form = form_layout()
         self.type = QComboBox(self)
         self.type.addItems(TYPES)
         self.output = QComboBox(self)
@@ -44,9 +44,14 @@ class EvaluateScreen(Screen):
         row.addStretch(1)
         layout.addLayout(row)
         layout.addStretch(1)
-        self.type.currentTextChanged.connect(lambda kind: self.prompt.setEnabled(kind == "prompt"))
-        self.prompt.setEnabled(False)
+        self.type.currentTextChanged.connect(self._on_type_changed)
+        self._on_type_changed(self.type.currentText())
         self.run_button.clicked.connect(self.run)
+
+    def _on_type_changed(self, kind):
+        """The prompt box only exists for the "prompt" type: shown then, not just enabled."""
+        self.prompt.setEnabled(kind == "prompt")
+        self.form.setRowVisible(self.prompt, kind == "prompt")
 
     def build_args(self):
         return Args(interactive=False, output=self.output.currentText())

@@ -1568,6 +1568,10 @@ TRANSLATIONS = {
         "en": 'Calendars: {names}',
         "fr": 'Calendriers : {names}',
     },
+    'gui.add.advanced_options': {
+        "en": 'Advanced options',
+        "fr": 'Options avancées',
+    },
     'gui.add.no_calendar_account': {
         "en": 'No calendar account configured.',
         "fr": 'Aucun compte de calendrier configuré.',

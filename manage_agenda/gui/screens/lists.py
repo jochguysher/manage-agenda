@@ -8,11 +8,17 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QTableWidget,
-    QTableWidgetItem,
 )
 
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import AccountPicker, form_layout, load_rules, primary
+from manage_agenda.gui.widgets import (
+    AccountPicker,
+    cell,
+    fit_columns,
+    form_layout,
+    load_rules,
+    primary,
+)
 from manage_agenda.i18n import t
 from manage_agenda.sources import Args, _get_emails_from_folder, _get_events_from_calendar
 
@@ -59,6 +65,7 @@ class ListsScreen(Screen):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
         self.empty = QLabel("", self)
+        self.empty.setWordWrap(True)
         layout.addWidget(self.empty)
 
         self.service.currentTextChanged.connect(self._on_service_changed)
@@ -103,6 +110,7 @@ class ListsScreen(Screen):
     def fill(self, rows):
         self.table.setRowCount(len(rows))
         for index, (title, date) in enumerate(rows):
-            self.table.setItem(index, 0, QTableWidgetItem(title))
-            self.table.setItem(index, 1, QTableWidgetItem(date))
+            self.table.setItem(index, 0, cell(title))
+            self.table.setItem(index, 1, cell(date))
+        fit_columns(self.table)
         self.empty.setText("" if rows else t("gui.lists.empty"))

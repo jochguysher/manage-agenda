@@ -69,10 +69,13 @@ class SettingsScreen(Screen):
         self.language.addItem(t("gui.settings.language_auto"), "")
         for language in SUPPORTED_LANGUAGES:
             self.language.addItem(language, language)
+        self.form = form
         form.addRow(t("gui.settings.provider"), self.provider)
         form.addRow(t("gui.settings.model"), self.model)
         form.addRow(t("gui.settings.calendar_account"), account_row)
         form.addRow(t("gui.settings.calendars"), self.calendars)
+        # Nothing to tick before "Load calendars…": the empty list stays out of sight.
+        form.setRowVisible(self.calendars, False)
         form.addRow(t("gui.settings.calendar_ids"), self.calendar_ids)
         form.addRow("", self.calendar_names)
         form.addRow(t("gui.settings.language"), self.language)
@@ -87,6 +90,7 @@ class SettingsScreen(Screen):
         row.addStretch(1)
         layout.addLayout(row)
         self.message = QLabel("", self)
+        self.message.setWordWrap(True)
         layout.addWidget(self.message)
         layout.addStretch(1)
 
@@ -148,6 +152,7 @@ class SettingsScreen(Screen):
     def show_calendars(self, api, calendars, checked_ids):
         """Fill the picker with the account's calendars and learn their names."""
         self.calendars.fill(api, calendars, checked_ids)
+        self.form.setRowVisible(self.calendars, bool(calendars))
         self.known_names.update(
             {str(item["id"]): str(item["summary"]) for item in calendars if item.get("id") and item.get("summary")}
         )

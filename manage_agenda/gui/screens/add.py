@@ -21,6 +21,7 @@ from manage_agenda.gui.screens.base import Screen
 from manage_agenda.gui.widgets import (
     AccountPicker,
     CalendarSelectionDialog,
+    CollapsibleBox,
     account_label,
     fetch_calendars,
     form_layout,
@@ -56,15 +57,15 @@ class AddScreen(Screen):
         layout = self.content
 
         source_box = QGroupBox(t("gui.add.source"), self)
-        source_form = form_layout(source_box)
+        self.source_form = form_layout(source_box)
         self.source = QComboBox(self)
         self.urls = QLineEdit(self)
         self.urls.setPlaceholderText(t("gui.add.urls_placeholder"))
         self.files = QLineEdit(self)
         self.files.setPlaceholderText(t("gui.add.files_placeholder"))
-        source_form.addRow(t("gui.add.source"), self.source)
-        source_form.addRow(t("gui.add.urls"), self.urls)
-        source_form.addRow(t("gui.add.files"), self.files)
+        self.source_form.addRow(t("gui.add.source"), self.source)
+        self.source_form.addRow(t("gui.add.urls"), self.urls)
+        self.source_form.addRow(t("gui.add.files"), self.files)
         layout.addWidget(source_box)
 
         model_box = QGroupBox(t("gui.add.model_box"), self)
@@ -102,19 +103,24 @@ class AddScreen(Screen):
         self.rule.addItem(t("gui.add.rule_default"), "")
         for rule in RULES[1:]:
             self.rule.addItem(rule, rule)
+        options_form.addRow(t("gui.add.output"), self.output)
+        options_form.addRow(t("gui.add.rule_mode"), self.rule)
+        layout.addWidget(options_box)
+
+        # What a run seldom needs, folded so the page ends on its main action.
+        self.advanced_box = CollapsibleBox(t("gui.add.advanced_options"), self)
+        advanced_form = form_layout(self.advanced_box.body)
         self.force_refresh = QCheckBox(t("cli.add.force_refresh_help"), self)
         self.dry_run_ledger = QCheckBox(t("gui.add.dry_run_ledger"), self)
         self.debug_log = QCheckBox(t("gui.add.debug_log"), self)
         self.retention = QSpinBox(self)
         self.retention.setRange(1, 365)
         self.retention.setValue(7)
-        options_form.addRow(t("gui.add.output"), self.output)
-        options_form.addRow(t("gui.add.rule_mode"), self.rule)
-        options_form.addRow("", self.force_refresh)
-        options_form.addRow("", self.dry_run_ledger)
-        options_form.addRow("", self.debug_log)
-        options_form.addRow(t("gui.add.retention_days"), self.retention)
-        layout.addWidget(options_box)
+        advanced_form.addRow("", self.force_refresh)
+        advanced_form.addRow("", self.dry_run_ledger)
+        advanced_form.addRow("", self.debug_log)
+        advanced_form.addRow(t("gui.add.retention_days"), self.retention)
+        layout.addWidget(self.advanced_box)
 
         row = QHBoxLayout()
         self.run_button = self.register_run_button(primary(QPushButton(t("gui.add.run"), self)))
@@ -122,6 +128,7 @@ class AddScreen(Screen):
         row.addStretch(1)
         layout.addLayout(row)
         self.message = QLabel("", self)
+        self.message.setWordWrap(True)
         layout.addWidget(self.message)
         layout.addStretch(1)
 
@@ -174,9 +181,13 @@ class AddScreen(Screen):
         return "email"
 
     def _on_source_changed(self, _index):
+        """Only the field the chosen source reads is shown: URLs for a web source, file
+        names for a text one, neither for a mailbox."""
         kind = self._kind(self.selected_source()) if self.selected_source() else "email"
         self.urls.setEnabled(kind == "web")
         self.files.setEnabled(kind == "text")
+        self.source_form.setRowVisible(self.urls, kind == "web")
+        self.source_form.setRowVisible(self.files, kind == "text")
 
     def load_calendars(self):
         key = self.account.current_key()

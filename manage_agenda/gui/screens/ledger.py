@@ -9,12 +9,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import hint_label, primary
+from manage_agenda.gui.widgets import cell, fit_columns, hint_label, primary
 from manage_agenda.i18n import t
 from manage_agenda.sources import (
     Args,
@@ -60,6 +59,7 @@ class LedgerScreen(Screen):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         restore_layout.addWidget(self.table)
         self.restore_empty = QLabel("", self)
+        self.restore_empty.setWordWrap(True)
         restore_layout.addWidget(self.restore_empty)
         restore_row = QHBoxLayout()
         self.reload_button = QPushButton(t("gui.ledger.restore_list"), self)
@@ -81,8 +81,9 @@ class LedgerScreen(Screen):
         self.identities = list(found)
         self.table.setRowCount(len(found))
         for row, (identity, event_ids) in enumerate(found.items()):
-            self.table.setItem(row, 0, QTableWidgetItem(identity))
-            self.table.setItem(row, 1, QTableWidgetItem(", ".join(event_ids)))
+            self.table.setItem(row, 0, cell(identity))
+            self.table.setItem(row, 1, cell(", ".join(event_ids)))
+        fit_columns(self.table)
         self.restore_empty.setText("" if found else t("sources.restore_list_empty"))
 
     def build_args(self):

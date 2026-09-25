@@ -5,7 +5,6 @@ thread like Settings' Save does; the other screens re-read the file when they ar
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,7 +18,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
@@ -34,7 +32,7 @@ from manage_agenda.accounts import (
 )
 from manage_agenda.compat import IMAP_DEFAULT_PORT
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import form_layout, hint_label, primary, set_role
+from manage_agenda.gui.widgets import cell, fit_columns, form_layout, hint_label, primary, set_role
 from manage_agenda.i18n import t
 
 DEFAULT_FOLDER = "INBOX"
@@ -300,12 +298,10 @@ class AccountsScreen(Screen):
         for row, account in enumerate(self.accounts):
             cells = (account.name, account.service, account.address, self._details(account))
             for column, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(row, column, item)
+                self.table.setItem(row, column, cell(text))
             if current is not None and account.name == current.name:
                 self.table.selectRow(row)
-        self.table.resizeColumnsToContents()
+        fit_columns(self.table)
         if self.last_error:
             self.message.setText(self.last_error)
         elif not self.accounts:

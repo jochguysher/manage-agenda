@@ -43,6 +43,13 @@ class PromptDialog(QDialog):
     def value(self):
         raise NotImplementedError
 
+    def _question(self, text):
+        """The prompt's text, wrapped: it comes from the core (a confirmation, an error, a
+        model's answer) and can be long."""
+        label = QLabel(text, self)
+        label.setWordWrap(True)
+        return label
+
     def _button_box(self, ok_text=None):
         box = QDialogButtonBox(self)
         ok = box.addButton(ok_text or t("gui.dialog.ok"), QDialogButtonBox.ButtonRole.AcceptRole)
@@ -64,7 +71,7 @@ class ChooseOneDialog(PromptDialog):
 
         layout = QVBoxLayout(self)
         if payload.get("title"):
-            layout.addWidget(QLabel(payload["title"]))
+            layout.addWidget(self._question(payload["title"]))
         self.list = QListWidget(self)
         for label in labels:
             self.list.addItem(label)
@@ -115,7 +122,7 @@ class ChooseManyDialog(PromptDialog):
 
         layout = QVBoxLayout(self)
         if payload.get("title"):
-            layout.addWidget(QLabel(payload["title"]))
+            layout.addWidget(self._question(payload["title"]))
         self.list = _CheckableList(labels, self)
         layout.addWidget(self.list)
         layout.addLayout(select_all_none_row(self.list, self))
@@ -133,7 +140,7 @@ class ConfirmDialog(PromptDialog):
         self.setWindowTitle(t("gui.dialog.confirm_title"))
         self._answer = None
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(request.payload["text"]))
+        layout.addWidget(self._question(request.payload["text"]))
         row = QHBoxLayout()
         self.yes = QPushButton(t("gui.dialog.yes"), self)
         self.no = QPushButton(t("gui.dialog.no"), self)
@@ -158,7 +165,7 @@ class AskTextDialog(PromptDialog):
         super().__init__(request, parent)
         self.setWindowTitle(t("gui.dialog.ask_text_title"))
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(request.payload["text"]))
+        layout.addWidget(self._question(request.payload["text"]))
         self.edit = QLineEdit(request.payload.get("default") or "", self)
         layout.addWidget(self.edit)
         layout.addWidget(self._button_box())
@@ -173,7 +180,7 @@ class AskMultilineDialog(PromptDialog):
         super().__init__(request, parent)
         self.setWindowTitle(t("gui.dialog.ask_multiline_title"))
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(request.payload["text"]))
+        layout.addWidget(self._question(request.payload["text"]))
         self.edit = QPlainTextEdit(self)
         layout.addWidget(self.edit)
         layout.addWidget(QLabel(t("gui.dialog.ask_multiline_hint")))
@@ -191,7 +198,7 @@ class ChooseActionDialog(PromptDialog):
         self.setWindowTitle(t("gui.dialog.action_title"))
         self._key = None
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(request.payload["prompt_text"]))
+        layout.addWidget(self._question(request.payload["prompt_text"]))
         self.buttons = {}
         for key, label in request.payload["actions"]:
             button = QPushButton(label, self)
@@ -219,7 +226,7 @@ class SelectEventsDialog(PromptDialog):
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
         if payload.get("title"):
-            layout.addWidget(QLabel(payload["title"]))
+            layout.addWidget(self._question(payload["title"]))
         self.list = _CheckableList(list(payload["labels"]), self)
         layout.addWidget(self.list)
         layout.addLayout(select_all_none_row(self.list, self))

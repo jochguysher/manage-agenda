@@ -273,7 +273,7 @@ Open the desktop window (needs the `gui` extra, see [Desktop window](#desktop-wi
 | Command | Screen |
 |---|---|
 | `add [-i]` on a mail account | Home, the screen the window opens on: pick the mailbox, choose between *propose each event to me* (`-i`) and *plan without asking*, and scan. Proposals appear on the screen itself, each one naming its source message (subject, sender, date and time, identifier) above the title, times, place and description to correct; accept or ask the model again. The table below lists what is already on the destination calendar with the events the tool created marked |
-| `add` | Add (advanced): every option on one form - web pages and text files too; the run's questions (an old message, a failed extraction, the event review, the label removal) are dialogs |
+| `add` | Add (advanced): every option on one form - web pages and text files too, the field a source reads shown for that source only, the debugging options folded under *Advanced options*; the run's questions (an old message, a failed extraction, the event review, the label removal) are dialogs |
 | `copy`, `move`, `delete`, `clean`, `update-status` | Calendar operations: give the calendar ids and the title filter, or answer the dialogs as with `-i` |
 | `reconcile`, `migrate-ledger`, `restore` | Ledger: dry run, account choice, the exit code in the status bar; a table of the restorable identities |
 | `llm evaluate` | Evaluate models |

@@ -39,8 +39,11 @@ def test_add_screen_lists_mail_accounts_then_web_and_text(qapp):
     assert screen.sources == [MAIL, WEB, TEXT]
     assert screen.selected_source() == MAIL
     assert not screen.urls.isEnabled() and not screen.files.isEnabled()
+    assert screen.urls.isHidden() and screen.files.isHidden()
+    assert not screen.advanced_box.isChecked() and screen.advanced_box.body.isHidden()
     screen.source.setCurrentIndex(1)
     assert screen.urls.isEnabled() and not screen.files.isEnabled()
+    assert not screen.urls.isHidden() and screen.files.isHidden()
     screen.source.setCurrentIndex(2)
     assert screen.files.isEnabled()
 
@@ -222,3 +225,17 @@ def test_settings_names_the_typed_calendar_ids_when_it_can(qapp, pump):
     assert "Two" in screen.calendar_names.text() and not screen.calendar_names.isHidden()
     screen.calendars.item(0).setCheckState(screen.calendars.item(0).checkState().Checked)
     assert screen.calendar_ids.text() == "c1, c2" and "One, Two" in screen.calendar_names.text()
+
+
+def test_settings_shows_the_calendar_list_only_once_loaded(qapp, pump):
+    runner = JobRunner(Bridge())
+    screen = settings.SettingsScreen(runner)
+    screen.show()
+    assert screen.calendars.isHidden()
+    with patch.object(settings, "load_rules", return_value=_rules()):
+        screen.refresh()
+    with patch.object(settings, "fetch_calendars", return_value=(MagicMock(), [{"id": "c1", "summary": "One"}])):
+        screen.load_calendars()
+        assert pump(lambda: not runner.is_busy())
+    assert not screen.calendars.isHidden() and screen.calendars.count() == 1
+    screen.hide()

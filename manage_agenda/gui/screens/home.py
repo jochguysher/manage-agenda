@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
@@ -36,6 +35,8 @@ from manage_agenda.gui.widgets import (
     AccountPicker,
     ElidedLabel,
     account_label,
+    cell,
+    fit_columns,
     form_layout,
     hint_label,
     load_rules,
@@ -507,8 +508,8 @@ class HomeScreen(Screen):
             else:
                 origin = ""
             for column, text in enumerate((row["when"], row["summary"], row["calendar"], origin)):
-                self.table.setItem(index, column, QTableWidgetItem(text))
-        self.table.resizeColumnsToContents()
+                self.table.setItem(index, column, cell(text))
+        fit_columns(self.table)
         self.planned_message.setText(
             t("gui.home.planned_hint") if self.rows else t("gui.home.planned_empty")
         )

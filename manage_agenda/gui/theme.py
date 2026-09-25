@@ -84,6 +84,10 @@ QGroupBox::title {{
     padding: 0 4px;
     color: {accent.name()};
 }}
+QGroupBox[folded="true"] {{
+    border: none;
+    padding: 0 8px;
+}}
 QPushButton[primary="true"] {{
     background: {accent.name()};
     color: {on_accent};
