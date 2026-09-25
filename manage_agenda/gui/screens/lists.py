@@ -4,17 +4,15 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QComboBox,
-    QFormLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QVBoxLayout,
 )
 
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import AccountPicker, load_rules
+from manage_agenda.gui.widgets import AccountPicker, form_layout, load_rules, primary
 from manage_agenda.i18n import t
 from manage_agenda.sources import Args, _get_emails_from_folder, _get_events_from_calendar
 
@@ -36,12 +34,13 @@ def fetch_listing(rules, key, service, args):
 
 class ListsScreen(Screen):
     nav_key = "gui.nav.lists"
+    subtitle_key = "gui.lists.subtitle"
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
         self.rules = None
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        layout = self.content
+        form = form_layout()
         self.service = QComboBox(self)
         self.service.addItems(SERVICES)
         self.account = AccountPicker([SERVICES[0]], self)
@@ -50,7 +49,7 @@ class ListsScreen(Screen):
         layout.addLayout(form)
 
         row = QHBoxLayout()
-        self.run_button = self.register_run_button(QPushButton(t("gui.lists.refresh"), self))
+        self.run_button = self.register_run_button(primary(QPushButton(t("gui.lists.refresh"), self)))
         row.addWidget(self.run_button)
         row.addStretch(1)
         layout.addLayout(row)

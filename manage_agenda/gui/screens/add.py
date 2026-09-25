@@ -7,7 +7,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFormLayout,
+    QDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -18,7 +18,16 @@ from PySide6.QtWidgets import (
 )
 
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import AccountPicker, CalendarPicker, fetch_calendars, load_rules
+from manage_agenda.gui.widgets import (
+    AccountPicker,
+    CalendarSelectionDialog,
+    account_label,
+    fetch_calendars,
+    form_layout,
+    hint_label,
+    load_rules,
+    primary,
+)
 from manage_agenda.i18n import t
 from manage_agenda.sources import Args, add_events_cli, get_add_sources
 from manage_agenda.ui import label_for
@@ -31,15 +40,23 @@ RULES = ("", "auto", "review")
 
 class AddScreen(Screen):
     nav_key = "gui.nav.add"
+    subtitle_key = "gui.add.subtitle"
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
         self.rules = None
         self.sources = []
-        layout = QVBoxLayout(self)
+        # The calendars chosen in the dialog "Load calendars…" opens: the connected api, the
+        # account it belongs to, the ids checked and their names for the summary line.
+        self.calendar_api = None
+        self.calendar_key = None
+        self.calendar_ids = []
+        self.calendar_names = []
+        self._saved_calendar_ids = []
+        layout = self.content
 
         source_box = QGroupBox(t("gui.add.source"), self)
-        source_form = QFormLayout(source_box)
+        source_form = form_layout(source_box)
         self.source = QComboBox(self)
         self.urls = QLineEdit(self)
         self.urls.setPlaceholderText(t("gui.add.urls_placeholder"))
@@ -51,7 +68,7 @@ class AddScreen(Screen):
         layout.addWidget(source_box)
 
         model_box = QGroupBox(t("gui.add.model_box"), self)
-        model_form = QFormLayout(model_box)
+        model_form = form_layout(model_box)
         self.provider = QComboBox(self)
         self.provider.addItem(t("gui.add.saved_or_default"), "")
         for provider in PROVIDERS[1:]:
@@ -73,14 +90,12 @@ class AddScreen(Screen):
         account_row.addWidget(self.account, 1)
         account_row.addWidget(self.load_calendars_button)
         calendar_layout.addLayout(account_row)
-        self.calendars = CalendarPicker(self)
-        self.calendars.setMaximumHeight(120)
-        calendar_layout.addWidget(self.calendars)
-        calendar_layout.addWidget(QLabel(t("gui.add.calendars_note"), self))
+        self.calendars_summary = hint_label("", self)
+        calendar_layout.addWidget(self.calendars_summary)
         layout.addWidget(calendar_box)
 
         options_box = QGroupBox(t("gui.add.options"), self)
-        options_form = QFormLayout(options_box)
+        options_form = form_layout(options_box)
         self.output = QComboBox(self)
         self.output.addItems(OUTPUTS)
         self.rule = QComboBox(self)
@@ -102,7 +117,7 @@ class AddScreen(Screen):
         layout.addWidget(options_box)
 
         row = QHBoxLayout()
-        self.run_button = self.register_run_button(QPushButton(t("gui.add.run"), self))
+        self.run_button = self.register_run_button(primary(QPushButton(t("gui.add.run"), self)))
         row.addWidget(self.run_button)
         row.addStretch(1)
         layout.addLayout(row)
@@ -111,9 +126,11 @@ class AddScreen(Screen):
         layout.addStretch(1)
 
         self.source.currentIndexChanged.connect(self._on_source_changed)
+        self.account.currentIndexChanged.connect(self._update_calendar_summary)
         self.load_calendars_button.clicked.connect(self.load_calendars)
         self.run_button.clicked.connect(self.run)
         self._on_source_changed(0)
+        self._update_calendar_summary()
 
     # --- data ---
 
@@ -131,7 +148,7 @@ class AddScreen(Screen):
         current = self.selected_source()
         self.source.clear()
         for item in self.sources:
-            self.source.addItem(label_for(item))
+            self.source.addItem(account_label(item))
         if current in self.sources:
             self.source.setCurrentIndex(self.sources.index(current))
         self.account.refresh(self.rules)
@@ -171,10 +188,40 @@ class AddScreen(Screen):
             fetch_calendars,
             self.rules,
             key,
-            on_done=lambda result: self.calendars.fill(
-                result[0], result[1], getattr(self, "_saved_calendar_ids", ())
-            ),
+            on_done=lambda result: self.choose_calendars(key, result[0], result[1]),
         )
+
+    def choose_calendars(self, key, api, calendars):
+        """Open the dialog on account `key`'s `calendars`, pre-checking the current choice
+        (or the saved one); a cancelled dialog keeps the choice as it was."""
+        current = self.calendar_ids if self.calendar_key == key else self._saved_calendar_ids
+        dialog = CalendarSelectionDialog(calendars, current, parent=self)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.set_calendars(key, api, calendars, dialog.checked_ids())
+        finally:
+            dialog.deleteLater()
+
+    def set_calendars(self, key, api, calendars, checked_ids):
+        """Record the calendars of account `key` to write to."""
+        chosen = [calendar for calendar in calendars if calendar.get("id") in checked_ids]
+        self.calendar_key = key
+        self.calendar_api = api
+        self.calendar_ids = [calendar["id"] for calendar in chosen]
+        self.calendar_names = [label_for(calendar, "summary") for calendar in chosen]
+        self._update_calendar_summary()
+
+    def _calendars_apply(self):
+        """Whether the recorded choice belongs to the account selected now."""
+        return bool(self.calendar_ids) and self.calendar_key == self.account.current_key()
+
+    def _update_calendar_summary(self, *_ignored):
+        if self._calendars_apply():
+            self.calendars_summary.setText(
+                t("gui.add.calendars_chosen", names=", ".join(self.calendar_names))
+            )
+        else:
+            self.calendars_summary.setText(t("gui.add.calendars_none"))
 
     # --- the run ---
 
@@ -191,12 +238,11 @@ class AddScreen(Screen):
             debug_log_extractions=self.debug_log.isChecked(),
             debug_log_retention_days=self.retention.value(),
         )
-        checked = self.calendars.checked_ids()
-        if checked and self.calendars.api is not None and args.output == "calendar":
+        if self._calendars_apply() and self.calendar_api is not None and args.output == "calendar":
             # What prepare_calendar()/_selected_calendar() would otherwise ask for.
-            args.calendar_api = self.calendars.api
-            args.calendar_ids = checked
-            args.calendar_id = checked[0]
+            args.calendar_api = self.calendar_api
+            args.calendar_ids = list(self.calendar_ids)
+            args.calendar_id = self.calendar_ids[0]
         return args
 
     def selection_for_run(self):

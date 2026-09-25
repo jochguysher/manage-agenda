@@ -1,13 +1,56 @@
-"""Widgets shared by several screens: account and calendar pickers."""
+"""Widgets shared by several screens: account and calendar pickers, and the small helpers
+that give every screen the same layout and the theme's roles (see gui/theme.py)."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QListWidget, QListWidgetItem
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+)
 
 from manage_agenda.connections import _eligible_calendars, missing_calendar_message
 from manage_agenda.exceptions import CalendarError
+from manage_agenda.i18n import t
 from manage_agenda.ui import label_for
+
+
+def form_layout(parent=None):
+    """A form whose fields take the available width, with the spacing every screen uses."""
+    form = QFormLayout(parent) if parent is not None else QFormLayout()
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setHorizontalSpacing(12)
+    form.setVerticalSpacing(8)
+    return form
+
+
+def set_role(widget, role):
+    """Give `widget` the `role` the theme styles (hint, error, ok), re-polishing it so a
+    change after the widget was shown takes effect."""
+    widget.setProperty("role", role)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
+def hint_label(text, parent=None):
+    """A wrapped, muted label: the notes under a form or a field."""
+    label = QLabel(text, parent)
+    label.setWordWrap(True)
+    set_role(label, "hint")
+    return label
+
+
+def primary(button):
+    """Mark `button` as the screen's main action: the theme colours it with the accent."""
+    button.setProperty("primary", True)
+    return button
 
 
 def load_rules():
@@ -26,6 +69,17 @@ def rule_keys(rules, services):
     return keys
 
 
+def account_label(key):
+    """A rule key shown as "<nick> (<service>)" - `('imap', 'set', 'royal-review', 'posts')`
+    reads as `royal-review (imap)` - and a pseudo-source (web, text) as its service name;
+    anything else as label_for() shows it."""
+    if isinstance(key, tuple) and len(key) >= 4 and key[2]:
+        return f"{key[2]} ({key[0]})"
+    if isinstance(key, tuple) and key and isinstance(key[0], str):
+        return key[0]
+    return label_for(key)
+
+
 class AccountPicker(QComboBox):
     """The configured accounts of one or more services (e.g. ["gmail", "imap"])."""
 
@@ -39,7 +93,7 @@ class AccountPicker(QComboBox):
         self.keys = rule_keys(rules, self.services)
         self.clear()
         for key in self.keys:
-            self.addItem(label_for(key))
+            self.addItem(account_label(key))
         if current in self.keys:
             self.setCurrentIndex(self.keys.index(current))
 
@@ -82,3 +136,52 @@ class CalendarPicker(QListWidget):
             for row in range(self.count())
             if self.item(row).checkState() == Qt.CheckState.Checked
         ]
+
+    def set_all(self, checked):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for row in range(self.count()):
+            self.item(row).setCheckState(state)
+
+
+def select_all_none_row(target, parent=None):
+    """Select all / none buttons for a checkable list with a set_all(bool) method."""
+    row = QHBoxLayout()
+    select_all = QPushButton(t("gui.dialog.select_all"), parent)
+    select_none = QPushButton(t("gui.dialog.select_none"), parent)
+    select_all.clicked.connect(lambda: target.set_all(True))
+    select_none.clicked.connect(lambda: target.set_all(False))
+    row.addWidget(select_all)
+    row.addWidget(select_none)
+    row.addStretch(1)
+    return row
+
+
+class CalendarSelectionDialog(QDialog):
+    """An account's calendars to check or uncheck: what the Add screen's "Load calendars…"
+    opens once the account is connected. checked_ids() is the choice when accepted."""
+
+    def __init__(self, calendars, checked_ids=(), parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowTitle(t("gui.add.calendars"))
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.addWidget(hint_label(t("gui.add.calendars_note"), self))
+        self.picker = CalendarPicker(self)
+        self.picker.fill(None, calendars, checked_ids)
+        layout.addWidget(self.picker)
+        layout.addLayout(select_all_none_row(self.picker, self))
+        buttons = QHBoxLayout()
+        cancel = QPushButton(t("gui.dialog.cancel"), self)
+        ok = primary(QPushButton(t("gui.dialog.ok"), self))
+        cancel.clicked.connect(self.reject)
+        ok.clicked.connect(self.accept)
+        ok.setDefault(True)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
+
+    def checked_ids(self):
+        return self.picker.checked_ids()

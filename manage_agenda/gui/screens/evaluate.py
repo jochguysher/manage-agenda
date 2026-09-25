@@ -5,15 +5,14 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QComboBox,
-    QFormLayout,
     QHBoxLayout,
     QPlainTextEdit,
     QPushButton,
-    QVBoxLayout,
 )
 
 from manage_agenda.evaluation import evaluate_models
 from manage_agenda.gui.screens.base import Screen
+from manage_agenda.gui.widgets import form_layout, primary
 from manage_agenda.i18n import t
 from manage_agenda.sources import Args
 
@@ -23,11 +22,12 @@ OUTPUTS = ("file", "calendar")
 
 class EvaluateScreen(Screen):
     nav_key = "gui.nav.evaluate"
+    subtitle_key = "gui.evaluate.subtitle"
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        layout = self.content
+        form = form_layout()
         self.type = QComboBox(self)
         self.type.addItems(TYPES)
         self.output = QComboBox(self)
@@ -39,7 +39,7 @@ class EvaluateScreen(Screen):
         form.addRow(t("gui.evaluate.prompt"), self.prompt)
         layout.addLayout(form)
         row = QHBoxLayout()
-        self.run_button = self.register_run_button(QPushButton(t("gui.evaluate.run"), self))
+        self.run_button = self.register_run_button(primary(QPushButton(t("gui.evaluate.run"), self)))
         row.addWidget(self.run_button)
         row.addStretch(1)
         layout.addLayout(row)

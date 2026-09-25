@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from manage_agenda.gui.screens.base import Screen
+from manage_agenda.gui.widgets import hint_label, primary
 from manage_agenda.i18n import t
 from manage_agenda.sources import (
     Args,
@@ -26,10 +27,11 @@ from manage_agenda.sources import (
 
 class LedgerScreen(Screen):
     nav_key = "gui.nav.ledger"
+    subtitle_key = "gui.ledger.subtitle"
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
-        layout = QVBoxLayout(self)
+        layout = self.content
 
         maintenance = QGroupBox(t("gui.ledger.maintenance"), self)
         maintenance_layout = QVBoxLayout(maintenance)
@@ -39,13 +41,13 @@ class LedgerScreen(Screen):
         maintenance_layout.addWidget(self.dry_run)
         maintenance_layout.addWidget(self.choose_account)
         row = QHBoxLayout()
-        self.reconcile_button = self.register_run_button(QPushButton(t("gui.ledger.reconcile"), self))
+        self.reconcile_button = self.register_run_button(primary(QPushButton(t("gui.ledger.reconcile"), self)))
         self.migrate_button = self.register_run_button(QPushButton(t("gui.ledger.migrate"), self))
         row.addWidget(self.reconcile_button)
         row.addWidget(self.migrate_button)
         row.addStretch(1)
         maintenance_layout.addLayout(row)
-        maintenance_layout.addWidget(QLabel(t("gui.ledger.exit_code_note"), self))
+        maintenance_layout.addWidget(hint_label(t("gui.ledger.exit_code_note"), self))
         layout.addWidget(maintenance)
 
         restore = QGroupBox(t("gui.ledger.restore"), self)

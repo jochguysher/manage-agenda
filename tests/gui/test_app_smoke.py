@@ -6,6 +6,7 @@ import logging
 import pytest
 
 from manage_agenda.base import PACKAGE_LOGGER_NAME, setup_logging
+from manage_agenda.config import config_dir
 from manage_agenda.gui import app as gui_app
 from manage_agenda.gui.log_panel import QtLogHandler
 from manage_agenda.gui.main_window import SCREEN_CLASSES, MainWindow
@@ -20,6 +21,22 @@ def test_main_window_has_every_screen(qapp):
     assert all(screen.title() for screen in window.screens)
     assert not window.cancel_button.isEnabled()
     window.close()
+
+
+def test_log_panel_toggles_and_its_state_survives_a_restart(qapp):
+    window = MainWindow()
+    window.show()
+    assert window.log_dock.isVisible() and window.log_action.isChecked()
+    window.log_action.trigger()
+    assert not window.log_dock.isVisible()
+    assert window.close()
+    assert (config_dir() / "gui.ini").is_file()
+
+    reopened = MainWindow()
+    assert reopened.log_dock.isHidden() and not reopened.log_action.isChecked()
+    reopened.log_action.trigger()
+    assert not reopened.log_dock.isHidden()
+    reopened.close()
 
 
 def test_create_window_installs_the_log_handler_and_the_gui_thread_ui(qapp, pump, monkeypatch, tmp_path):

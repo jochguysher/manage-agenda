@@ -3,6 +3,8 @@ config.yaml round trip (under conftest's isolated XDG_CONFIG_HOME)."""
 
 from unittest.mock import MagicMock, patch
 
+from PySide6.QtWidgets import QDialog
+
 from manage_agenda.gui.bridge import Bridge
 from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.screens import add, settings
@@ -71,15 +73,24 @@ def test_add_screen_args_follow_the_form(qapp):
     )
 
 
-def test_checked_calendars_pre_answer_the_calendar_question(qapp):
+def test_chosen_calendars_pre_answer_the_calendar_question(qapp):
     _runner, screen = _add_screen(qapp)
+    assert not screen.calendar_ids and screen.calendars_summary.text()
     api = MagicMock()
-    screen.calendars.fill(api, [{"id": "c1", "summary": "One"}, {"id": "c2", "summary": "Two"}], ["c2"])
+    calendars = [{"id": "c1", "summary": "One"}, {"id": "c2", "summary": "Two"}]
+    screen.set_calendars(CAL, api, calendars, ["c2", "ghost"])
+    assert screen.calendar_ids == ["c2"] and "Two" in screen.calendars_summary.text()
     args = screen.build_args()
     assert args.calendar_api is api
     assert args.calendar_ids == ["c2"] and args.calendar_id == "c2"
     screen.output.setCurrentText("file")
     assert not hasattr(screen.build_args(), "calendar_api")
+
+    # The choice belongs to the account it was made on.
+    screen.output.setCurrentText("calendar")
+    screen.set_calendars(("gcalendar", "set", "other", "posts"), api, calendars, ["c1"])
+    assert not hasattr(screen.build_args(), "calendar_api")
+    assert "One" not in screen.calendars_summary.text()
 
 
 def test_run_submits_add_events_cli_with_the_selection(qapp, pump):
@@ -109,16 +120,38 @@ def test_run_without_a_source_does_not_submit(qapp):
     assert screen.message.text()
 
 
-def test_load_calendars_fills_the_picker_with_saved_ids_checked(qapp, pump):
+def test_load_calendars_opens_the_dialog_with_the_saved_ids_checked(qapp, pump):
     runner, screen = _add_screen(qapp)
     screen._saved_calendar_ids = ["c2"]
     api = MagicMock()
     calendars = [{"id": "c1", "summary": "One"}, {"id": "c2", "summary": "Two"}]
-    with patch.object(add, "fetch_calendars", return_value=(api, calendars)):
+    opened = []
+
+    def accept(dialog):
+        opened.append(dialog.checked_ids())
+        dialog.picker.set_all(True)
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(add, "fetch_calendars", return_value=(api, calendars)), patch.object(
+        add.CalendarSelectionDialog, "exec", accept
+    ):
         screen.load_calendars()
         assert pump(lambda: not runner.is_busy())
-    assert screen.calendars.checked_ids() == ["c2"]
-    assert screen.calendars.api is api
+    assert opened == [["c2"]]
+    assert screen.calendar_ids == ["c1", "c2"] and screen.calendar_api is api
+    assert "One, Two" in screen.calendars_summary.text()
+
+    # Cancelling keeps the choice; the dialog reopens on that choice, not the saved one.
+    def cancel(dialog):
+        opened.append(dialog.checked_ids())
+        return QDialog.DialogCode.Rejected
+
+    with patch.object(add, "fetch_calendars", return_value=(api, calendars)), patch.object(
+        add.CalendarSelectionDialog, "exec", cancel
+    ):
+        screen.load_calendars()
+        assert pump(lambda: not runner.is_busy())
+    assert opened[-1] == ["c1", "c2"] and screen.calendar_ids == ["c1", "c2"]
 
 
 def test_settings_round_trip(qapp):

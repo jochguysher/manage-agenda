@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from manage_agenda.events import DATETIME_FORMAT
 from manage_agenda.gui.bridge import UIRequest
+from manage_agenda.gui.widgets import select_all_none_row, set_role
 from manage_agenda.i18n import t
 from manage_agenda.ui import label_for
 
@@ -103,18 +104,6 @@ class _CheckableList(QListWidget):
         ]
 
 
-def _select_all_none_row(target, parent):
-    row = QHBoxLayout()
-    select_all = QPushButton(t("gui.dialog.select_all"), parent)
-    select_none = QPushButton(t("gui.dialog.select_none"), parent)
-    select_all.clicked.connect(lambda: target.set_all(True))
-    select_none.clicked.connect(lambda: target.set_all(False))
-    row.addWidget(select_all)
-    row.addWidget(select_none)
-    row.addStretch(1)
-    return row
-
-
 class ChooseManyDialog(PromptDialog):
     def __init__(self, request, parent=None):
         super().__init__(request, parent)
@@ -128,7 +117,7 @@ class ChooseManyDialog(PromptDialog):
             layout.addWidget(QLabel(payload["title"]))
         self.list = _CheckableList(labels, self)
         layout.addWidget(self.list)
-        layout.addLayout(_select_all_none_row(self.list, self))
+        layout.addLayout(select_all_none_row(self.list, self))
         layout.addWidget(self._button_box())
 
     def value(self):
@@ -232,7 +221,7 @@ class SelectEventsDialog(PromptDialog):
             layout.addWidget(QLabel(payload["title"]))
         self.list = _CheckableList(list(payload["labels"]), self)
         layout.addWidget(self.list)
-        layout.addLayout(_select_all_none_row(self.list, self))
+        layout.addLayout(select_all_none_row(self.list, self))
         layout.addWidget(self._button_box())
 
     def value(self):
@@ -290,7 +279,7 @@ class ReviewEventDialog(PromptDialog):
         form.addRow(t("events.review_description"), self.description)
         layout.addLayout(form)
         self.error = QLabel("", self)
-        self.error.setStyleSheet("color: #b00020;")
+        set_role(self.error, "error")
         layout.addWidget(self.error)
 
         row = QHBoxLayout()

@@ -6,12 +6,9 @@ import os
 
 from PySide6.QtWidgets import (
     QComboBox,
-    QFormLayout,
     QHBoxLayout,
-    QLabel,
     QPlainTextEdit,
     QPushButton,
-    QVBoxLayout,
 )
 
 from manage_agenda.connections import (
@@ -20,7 +17,7 @@ from manage_agenda.connections import (
     describe_auth_failure,
 )
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import AccountPicker, load_rules
+from manage_agenda.gui.widgets import AccountPicker, form_layout, hint_label, load_rules, primary
 from manage_agenda.i18n import t
 from manage_agenda.ui import echo
 
@@ -57,12 +54,13 @@ def run_oauth(rules, key):
 
 class AuthScreen(Screen):
     nav_key = "gui.nav.auth"
+    subtitle_key = "gui.auth.subtitle"
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
         self.rules = None
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        layout = self.content
+        form = form_layout()
         self.service = QComboBox(self)
         self.service.addItems(SERVICES)
         self.account = AccountPicker([SERVICES[0]], self)
@@ -71,13 +69,13 @@ class AuthScreen(Screen):
         layout.addLayout(form)
 
         row = QHBoxLayout()
-        self.check_button = self.register_run_button(QPushButton(t("gui.auth.check"), self))
+        self.check_button = self.register_run_button(primary(QPushButton(t("gui.auth.check"), self)))
         self.oauth_button = self.register_run_button(QPushButton(t("gui.auth.run_oauth"), self))
         row.addWidget(self.check_button)
         row.addWidget(self.oauth_button)
         row.addStretch(1)
         layout.addLayout(row)
-        layout.addWidget(QLabel(t("gui.auth.browser_note"), self))
+        layout.addWidget(hint_label(t("gui.auth.browser_note"), self))
 
         self.status = QPlainTextEdit(self)
         self.status.setReadOnly(True)

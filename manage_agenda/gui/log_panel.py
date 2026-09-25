@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import Slot
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QPlainTextEdit
 
 from manage_agenda.gui.bridge import Bridge
@@ -15,9 +16,11 @@ MAX_LINES = 5000
 class LogPanel(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("logPanel")
         self.setReadOnly(True)
         self.setMaximumBlockCount(MAX_LINES)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
 
     @Slot(str)
     def append_line(self, text):

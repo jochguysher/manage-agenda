@@ -3,16 +3,19 @@ the slot that turns the worker's UI requests into dialogs."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QSize, Qt, Slot
 from PySide6.QtWidgets import (
     QDialog,
     QDockWidget,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QWidget,
 )
@@ -21,6 +24,7 @@ from manage_agenda.gui import dialogs
 from manage_agenda.gui.bridge import Bridge, UIRequest
 from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.log_panel import LogPanel
+from manage_agenda.gui.persist import gui_settings
 from manage_agenda.gui.screens.add import AddScreen
 from manage_agenda.gui.screens.auth import AuthScreen
 from manage_agenda.gui.screens.calendar_ops import CalendarOpsScreen
@@ -43,6 +47,19 @@ SCREEN_CLASSES = (
 )
 
 CLOSE_WAIT_MS = 5000
+NAV_ROW_HEIGHT = 34
+LOG_DOCK_HEIGHT = 170
+
+
+def _scrollable(screen):
+    """The screen in a scroll area: a window too short for the page scrolls it instead of
+    squeezing its widgets against the log panel."""
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.viewport().setAutoFillBackground(False)
+    area.setWidget(screen)
+    return area
 
 
 class MainWindow(QMainWindow):
@@ -57,22 +74,38 @@ class MainWindow(QMainWindow):
         self._active_dialog: QDialog | None = None
 
         self.log_panel = LogPanel(self)
-        dock = QDockWidget(t("gui.log_panel_title"), self)
-        dock.setWidget(self.log_panel)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        self.log_dock = QDockWidget(t("gui.log_panel_title"), self)
+        self.log_dock.setObjectName("logDock")  # saveState() needs a name
+        self.log_dock.setWidget(self.log_panel)
+        self.log_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
+        self.resizeDocks([self.log_dock], [LOG_DOCK_HEIGHT], Qt.Orientation.Vertical)
+        self.log_action = self.log_dock.toggleViewAction()
+        self.log_action.setShortcut("Ctrl+L")
+        self.menuBar().addMenu(t("gui.menu.view")).addAction(self.log_action)
 
         self.nav = QListWidget(self)
-        self.nav.setMaximumWidth(220)
+        self.nav.setObjectName("nav")  # styled by gui/theme.py
+        self.nav.setFixedWidth(210)
+        self.nav.setSpacing(1)
         self.stack = QStackedWidget(self)
         self.screens = []
         for screen_class in SCREEN_CLASSES:
             screen = screen_class(self.runner, self)
             self.screens.append(screen)
-            self.nav.addItem(screen.title())
-            self.stack.addWidget(screen)
+            item = QListWidgetItem(screen.title())
+            # The theme pads the rows; the row height has to follow (a stylesheet's padding
+            # does not reach the item's size hint).
+            item.setSizeHint(QSize(0, NAV_ROW_HEIGHT))
+            self.nav.addItem(item)
+            self.stack.addWidget(_scrollable(screen))
         central = QWidget(self)
         layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self.nav)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(central)
@@ -96,6 +129,28 @@ class MainWindow(QMainWindow):
         self.cancel_button.clicked.connect(self.cancel_job)
         self.nav.currentRowChanged.connect(self._show_screen)
         self.nav.setCurrentRow(0)
+        self.restore_window_state()
+
+    def show_screen(self, screen_class):
+        """Select `screen_class` in the sidebar (which shows and refreshes it)."""
+        self.nav.setCurrentRow(self.screens.index(self.screen(screen_class)))
+
+    # --- window geometry and the log panel, kept between sessions ---
+
+    def restore_window_state(self):
+        settings = gui_settings()
+        geometry = settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        state = settings.value("state")
+        if state is not None:
+            self.restoreState(state)
+
+    def save_window_state(self):
+        settings = gui_settings()
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("state", self.saveState())
+        settings.sync()
 
     def _show_screen(self, row):
         if 0 <= row < len(self.screens):
@@ -180,4 +235,5 @@ class MainWindow(QMainWindow):
                 self.log_panel.append_line(t("gui.close_job_still_running"))
                 event.ignore()
                 return
+        self.save_window_state()
         event.accept()

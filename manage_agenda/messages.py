@@ -1184,8 +1184,8 @@ TRANSLATIONS = {
         # The original source hardcoded the French word "Visite" here regardless of language -
         # a latent bug (the room-visit feature's prompt title never actually said "Visit" in
         # English), fixed here rather than preserved, since nothing depends on that literal.
-        "en": "Visit",
-        "fr": "Visite",
+        "en": "Cleaning after the occupation",
+        "fr": "Entretien après l'occupation",
     },
     # --- UI port: prompts that used to be inline input()/select_from_list calls ---
     "cli.gui.help": {
@@ -1284,8 +1284,8 @@ TRANSLATIONS = {
         "fr": 'manage-agenda',
     },
     'gui.nav.add': {
-        "en": 'Add events',
-        "fr": 'Ajouter des événements',
+        "en": 'Add (advanced)',
+        "fr": 'Ajouter (avancé)',
     },
     'gui.nav.calendar_ops': {
         "en": 'Calendar operations',
@@ -1318,6 +1318,10 @@ TRANSLATIONS = {
     'gui.nav.unknown': {
         "en": 'Screen',
         "fr": 'Écran',
+    },
+    'gui.menu.view': {
+        "en": '&View',
+        "fr": '&Affichage',
     },
     'gui.log_panel_title': {
         "en": 'Log',
@@ -1549,12 +1553,20 @@ TRANSLATIONS = {
         "fr": 'Compte',
     },
     'gui.add.load_calendars': {
-        "en": 'Load calendars',
-        "fr": 'Charger les calendriers',
+        "en": 'Load calendars…',
+        "fr": 'Charger les calendriers…',
     },
     'gui.add.calendars_note': {
         "en": 'Check the calendars to write to. None checked: the saved choice is used, or you are asked when the run starts.',
         "fr": 'Cochez les calendriers à alimenter. Aucun coché : le choix enregistré est utilisé, ou la question est posée au lancement.',
+    },
+    'gui.add.calendars_none': {
+        "en": 'No calendar chosen: the saved choice is used, or you are asked when the run starts.',
+        "fr": 'Aucun calendrier choisi : le choix enregistré est utilisé, ou la question est posée au lancement.',
+    },
+    'gui.add.calendars_chosen': {
+        "en": 'Calendars: {names}',
+        "fr": 'Calendriers : {names}',
     },
     'gui.add.no_calendar_account': {
         "en": 'No calendar account configured.',
@@ -1780,5 +1792,535 @@ TRANSLATIONS = {
     'gui.install.job': {
         "en": 'Browser installation',
         "fr": 'Installation du navigateur',
+    },
+    # --- accounts: the editor of socialModules' .rssBlogs / .rssImap (manage_agenda.accounts) ---
+    'accounts.error_name_required': {
+        "en": 'Give the account a name (the section name in .rssBlogs).',
+        "fr": 'Donnez un nom au compte (le nom de section dans .rssBlogs).',
+    },
+    'accounts.error_name_invalid': {
+        "en": "'{name}' cannot be a section name (no brackets, not DEFAULT).",
+        "fr": '« {name} » ne peut pas être un nom de section (pas de crochets, pas DEFAULT).',
+    },
+    'accounts.error_name_duplicate': {
+        "en": "An account named '{name}' already exists.",
+        "fr": 'Un compte nommé « {name} » existe déjà.',
+    },
+    'accounts.error_service_unknown': {
+        "en": "Unknown service '{service}': gmail, imap or gcalendar.",
+        "fr": 'Service inconnu « {service} » : gmail, imap ou gcalendar.',
+    },
+    'accounts.error_address_required': {
+        "en": "Give the account's address.",
+        "fr": "Indiquez l'adresse du compte.",
+    },
+    'accounts.error_google_address': {
+        "en": 'A Google account needs an address with an @ (it names the OAuth client file).',
+        "fr": 'Un compte Google demande une adresse avec un @ (elle nomme le fichier client OAuth).',
+    },
+    'accounts.error_imap_server_required': {
+        "en": 'Give the IMAP server.',
+        "fr": 'Indiquez le serveur IMAP.',
+    },
+    'accounts.error_imap_user_required': {
+        "en": 'Give the IMAP login.',
+        "fr": "Indiquez l'identifiant IMAP.",
+    },
+    'accounts.error_imap_password_required': {
+        "en": 'Give the IMAP password: none is stored for this account.',
+        "fr": "Indiquez le mot de passe IMAP : aucun n'est enregistré pour ce compte.",
+    },
+    'accounts.error_imap_port': {
+        "en": "'{port}' is not a port (1 to 65535).",
+        "fr": "« {port} » n'est pas un port (1 à 65535).",
+    },
+    'accounts.error_imap_mode': {
+        "en": "Unknown IMAP mode '{mode}': auto or review.",
+        "fr": 'Mode IMAP inconnu « {mode} » : auto ou review.',
+    },
+    'accounts.error_multiline_value': {
+        "en": "The value of '{name}' spans several lines; a section value must be one line.",
+        "fr": 'La valeur de « {name} » tient sur plusieurs lignes ; une valeur de section tient sur une seule.',
+    },
+    'accounts.error_google_client_invalid': {
+        "en": '{file} is not an OAuth client JSON: {error}',
+        "fr": "{file} n'est pas un client OAuth (JSON) : {error}",
+    },
+    # --- gui: the Accounts screen and the screen headers ---
+    'gui.nav.accounts': {
+        "en": 'Accounts',
+        "fr": 'Comptes',
+    },
+    'gui.add.subtitle': {
+        "en": 'Every option of `add` on one form - web pages and text files too. The home screen runs the same with the saved configuration.',
+        "fr": "Toutes les options de `add` sur un formulaire - pages web et fichiers texte compris. L'accueil lance la même analyse avec la configuration enregistrée.",
+    },
+    'gui.calendar_ops.subtitle': {
+        "en": 'Copy, move, delete, clean or update the status of events between calendars.',
+        "fr": "Copier, déplacer, supprimer, nettoyer ou mettre à jour le statut d'événements entre calendriers.",
+    },
+    'gui.ledger.subtitle': {
+        "en": 'Reconcile and migrate the ledger; restore events that were cancelled.',
+        "fr": 'Réconcilier et migrer le registre ; restaurer des événements annulés.',
+    },
+    'gui.evaluate.subtitle': {
+        "en": 'Compare every installed Ollama model on a prompt or a source workflow.',
+        "fr": 'Comparer tous les modèles Ollama installés sur une consigne ou un flux source.',
+    },
+    'gui.auth.subtitle': {
+        "en": 'Check the Google authorization of an account, or run the browser consent.',
+        "fr": "Vérifier l'autorisation Google d'un compte, ou lancer le consentement dans le navigateur.",
+    },
+    'gui.lists.subtitle': {
+        "en": 'Browse a mail folder or a calendar as a table.',
+        "fr": 'Parcourir un dossier de courrier ou un calendrier sous forme de table.',
+    },
+    'gui.install.subtitle': {
+        "en": 'Download the browser Playwright uses to read web pages.',
+        "fr": 'Télécharger le navigateur que Playwright utilise pour lire les pages web.',
+    },
+    'gui.settings.subtitle': {
+        "en": "The saved configuration the command line's wizard writes: provider, model, calendars, language.",
+        "fr": "La configuration enregistrée qu'écrit l'assistant de la ligne de commande : fournisseur, modèle, calendriers, langue.",
+    },
+    'gui.accounts.subtitle': {
+        "en": "The mail and calendar accounts the other screens select from (socialModules' .rssBlogs).",
+        "fr": 'Les comptes de courrier et de calendrier que les autres écrans proposent (le .rssBlogs de socialModules).',
+    },
+    'gui.accounts.column_name': {
+        "en": 'Name',
+        "fr": 'Nom',
+    },
+    'gui.accounts.column_service': {
+        "en": 'Service',
+        "fr": 'Service',
+    },
+    'gui.accounts.column_address': {
+        "en": 'Address',
+        "fr": 'Adresse',
+    },
+    'gui.accounts.column_details': {
+        "en": 'Details',
+        "fr": 'Détails',
+    },
+    'gui.accounts.add': {
+        "en": 'Add…',
+        "fr": 'Ajouter…',
+    },
+    'gui.accounts.edit': {
+        "en": 'Edit…',
+        "fr": 'Modifier…',
+    },
+    'gui.accounts.remove': {
+        "en": 'Remove',
+        "fr": 'Supprimer',
+    },
+    'gui.accounts.reload': {
+        "en": 'Reload',
+        "fr": 'Recharger',
+    },
+    'gui.accounts.empty': {
+        "en": 'No account yet: Add… creates the first section of {file}.',
+        "fr": 'Aucun compte : Ajouter… crée la première section de {file}.',
+    },
+    'gui.accounts.select_one': {
+        "en": 'Select an account first.',
+        "fr": "Sélectionnez d'abord un compte.",
+    },
+    'gui.accounts.remove_confirm': {
+        "en": (
+            "Remove the account '{name}' from {file}?\n\n"
+            'Its IMAP credentials are removed with it; a Google OAuth client file and its token are kept.'
+        ),
+        "fr": (
+            'Supprimer le compte « {name} » de {file} ?\n\n'
+            'Ses identifiants IMAP sont supprimés avec lui ; un fichier client OAuth Google et son jeton sont conservés.'
+        ),
+    },
+    'gui.accounts.saved': {
+        "en": "Account '{name}' saved. The other screens pick it up when they are shown.",
+        "fr": 'Compte « {name} » enregistré. Les autres écrans le prennent en compte à leur affichage.',
+    },
+    'gui.accounts.removed': {
+        "en": "Account '{name}' removed.",
+        "fr": 'Compte « {name} » supprimé.',
+    },
+    'gui.accounts.details_imap': {
+        "en": '{server} · {folder} · mode {mode} · senders: {senders}',
+        "fr": '{server} · {folder} · mode {mode} · expéditeurs : {senders}',
+    },
+    'gui.accounts.senders_none': {
+        "en": 'none (selects nothing)',
+        "fr": 'aucun (ne sélectionne rien)',
+    },
+    'gui.accounts.client_found': {
+        "en": 'OAuth client file found',
+        "fr": 'Fichier client OAuth présent',
+    },
+    'gui.accounts.client_missing': {
+        "en": 'OAuth client file missing: {file}',
+        "fr": 'Fichier client OAuth absent : {file}',
+    },
+    'gui.accounts.dialog_add_title': {
+        "en": 'New account',
+        "fr": 'Nouveau compte',
+    },
+    'gui.accounts.dialog_edit_title': {
+        "en": 'Edit account',
+        "fr": 'Modifier le compte',
+    },
+    'gui.accounts.name': {
+        "en": 'Name',
+        "fr": 'Nom',
+    },
+    'gui.accounts.name_hint': {
+        "en": (
+            'The section name; it identifies the account everywhere (rule key, ledger, mailbox '
+            'history). Renaming starts a new history.'
+        ),
+        "fr": (
+            'Le nom de la section ; il identifie le compte partout (clé de règle, registre, '
+            'historique de la boîte). Le renommer démarre un nouvel historique.'
+        ),
+    },
+    'gui.accounts.service': {
+        "en": 'Service',
+        "fr": 'Service',
+    },
+    'gui.accounts.address': {
+        "en": 'Address',
+        "fr": 'Adresse',
+    },
+    'gui.accounts.address_hint': {
+        "en": 'The mailbox address (IMAP) or the Google account (gmail, gcalendar).',
+        "fr": "L'adresse de la boîte (IMAP) ou le compte Google (gmail, gcalendar).",
+    },
+    'gui.accounts.imap_box': {
+        "en": 'IMAP connection and scan',
+        "fr": 'Connexion et analyse IMAP',
+    },
+    'gui.accounts.server': {
+        "en": 'Server',
+        "fr": 'Serveur',
+    },
+    'gui.accounts.port': {
+        "en": 'Port (993, or 1143 for a local Proton Mail Bridge)',
+        "fr": 'Port (993, ou 1143 pour un Proton Mail Bridge local)',
+    },
+    'gui.accounts.login': {
+        "en": 'Login',
+        "fr": 'Identifiant',
+    },
+    'gui.accounts.password': {
+        "en": 'Password',
+        "fr": 'Mot de passe',
+    },
+    'gui.accounts.password_unchanged': {
+        "en": '(unchanged)',
+        "fr": '(inchangé)',
+    },
+    'gui.accounts.folder': {
+        "en": 'Folder',
+        "fr": 'Dossier',
+    },
+    'gui.accounts.mode': {
+        "en": 'Mode',
+        "fr": 'Mode',
+    },
+    'gui.accounts.mode_hint': {
+        "en": 'auto is what `add -s imap` selects; review is what `add -s imap -i` selects.',
+        "fr": 'auto est ce que sélectionne `add -s imap` ; review, ce que sélectionne `add -s imap -i`.',
+    },
+    'gui.accounts.mark_seen': {
+        "en": 'Flag processed messages as read',
+        "fr": 'Marquer comme lus les messages traités',
+    },
+    'gui.accounts.max_age': {
+        "en": 'Maximum age (days)',
+        "fr": 'Âge maximal (jours)',
+    },
+    'gui.accounts.include_older': {
+        "en": 'Include older mail',
+        "fr": 'Inclure les messages plus anciens',
+    },
+    'gui.accounts.senders': {
+        "en": 'Senders',
+        "fr": 'Expéditeurs',
+    },
+    'gui.accounts.senders_hint': {
+        "en": (
+            'Comma-separated: an address, a @domain, a name:"…", or a name with an address or a '
+            'domain. Empty selects nothing.'
+        ),
+        "fr": (
+            'Séparés par des virgules : une adresse, un @domaine, un name:"…", ou un nom avec une '
+            'adresse ou un domaine. Vide : ne sélectionne rien.'
+        ),
+    },
+    'gui.accounts.google_box': {
+        "en": 'Google authorization',
+        "fr": 'Autorisation Google',
+    },
+    'gui.accounts.google_client': {
+        "en": 'OAuth client',
+        "fr": 'Client OAuth',
+    },
+    'gui.accounts.import_client': {
+        "en": 'Import OAuth client JSON…',
+        "fr": 'Importer le client OAuth (JSON)…',
+    },
+    'gui.accounts.import_client_title': {
+        "en": 'OAuth client JSON',
+        "fr": 'Client OAuth (JSON)',
+    },
+    'gui.accounts.client_imported': {
+        "en": 'Copied to {file}',
+        "fr": 'Copié dans {file}',
+    },
+    'gui.accounts.google_hint': {
+        "en": (
+            'Download the desktop OAuth client from the Google Cloud console, import it here, '
+            'then run the consent on the Authentication screen.'
+        ),
+        "fr": (
+            'Téléchargez le client OAuth (application de bureau) depuis la console Google Cloud, '
+            "importez-le ici, puis lancez le consentement sur l'écran Authentification."
+        ),
+    },
+    'gui.accounts.save': {
+        "en": 'Save',
+        "fr": 'Enregistrer',
+    },
+    # --- gui: the home screen (the task: scan, propose, plan) ---
+    'gui.nav.home': {
+        "en": 'Home',
+        "fr": 'Accueil',
+    },
+    'gui.home.subtitle': {
+        "en": 'Read a mailbox, extract the dates and put the events on your calendar. This screen is the task; the others are its settings.',
+        "fr": 'Lire une boîte mail, en extraire les dates et mettre les événements dans votre calendrier. Cet écran est la tâche ; les autres en sont les réglages.',
+    },
+    'gui.home.run_box': {
+        "en": 'Look for appointments in the mail',
+        "fr": 'Chercher des rendez-vous dans le courrier',
+    },
+    'gui.home.source': {
+        "en": 'Mailbox',
+        "fr": 'Boîte mail',
+    },
+    'gui.home.mode': {
+        "en": 'Mode',
+        "fr": 'Mode',
+    },
+    'gui.home.mode_review': {
+        "en": 'Propose each event to me',
+        "fr": 'Me proposer chaque événement',
+    },
+    'gui.home.mode_auto': {
+        "en": 'Plan without asking',
+        "fr": 'Planifier sans demander',
+    },
+    'gui.home.mode_hint': {
+        "en": (
+            'Proposals appear below, one at a time: accept it (after correcting it if needed) '
+            'or ask the model again. Without asking, old or unclear messages are skipped and '
+            'the events are created as extracted.'
+        ),
+        "fr": (
+            "Les propositions s'affichent ci-dessous, une à la fois : acceptez (après "
+            'correction si besoin) ou redemandez au modèle. Sans demander, les messages anciens '
+            'ou ambigus sont ignorés et les événements sont créés tels quels.'
+        ),
+    },
+    'gui.home.destination': {
+        "en": 'Destination',
+        "fr": 'Destination',
+    },
+    'gui.home.destination_text': {
+        "en": '{calendars} · model: {model}',
+        "fr": '{calendars} · modèle : {model}',
+    },
+    'gui.home.no_calendar': {
+        "en": 'no calendar saved yet: it is asked at the first run, then remembered',
+        "fr": 'aucun calendrier enregistré : il est demandé à la première analyse, puis mémorisé',
+    },
+    'gui.home.model_default': {
+        "en": 'saved or default',
+        "fr": 'enregistré ou par défaut',
+    },
+    'gui.home.run': {
+        "en": 'Scan the mail',
+        "fr": 'Analyser le courrier',
+    },
+    'gui.home.open_advanced': {
+        "en": 'Advanced…',
+        "fr": 'Options avancées…',
+    },
+    'gui.home.open_settings': {
+        "en": 'Settings…',
+        "fr": 'Réglages…',
+    },
+    'gui.home.no_source': {
+        "en": 'Configure a mail account first (Accounts).',
+        "fr": "Configurez d'abord un compte de courrier (Comptes).",
+    },
+    'gui.home.job': {
+        "en": 'Mail scan',
+        "fr": 'Analyse du courrier',
+    },
+    'gui.home.run_done': {
+        "en": 'Scan finished: {events} new event(s) added to the calendar.',
+        "fr": 'Analyse terminée : {events} nouvel(s) événement(s) ajouté(s) au calendrier.',
+    },
+    'gui.home.run_done_none': {
+        "en": 'Scan finished: nothing new (no message retained, or nothing extracted - see the log).',
+        "fr": "Analyse terminée : rien de nouveau (aucun message retenu, ou rien d'extrait - voir le journal).",
+    },
+    'gui.home.mailbox_unreachable': {
+        "en": (
+            'The mailbox {account} does not answer: nothing was scanned. Check that its server '
+            'is up (a local bridge must be running for 127.0.0.1) and its credentials in '
+            'Accounts, then scan again.'
+        ),
+        "fr": (
+            "La boîte {account} ne répond pas : rien n'a été analysé. Vérifiez que son serveur "
+            'est joignable (un pont local doit tourner pour 127.0.0.1) et ses identifiants dans '
+            'Comptes, puis relancez.'
+        ),
+    },
+    'gui.home.inert_mailbox': {
+        "en": (
+            'This mailbox is configured to select no message (empty sender filter, see '
+            'Accounts): a scan of it finds nothing, on purpose.'
+        ),
+        "fr": (
+            'Cette boîte est configurée pour ne sélectionner aucun message (filtre expéditeurs '
+            "vide, voir Comptes) : une analyse n'y trouve rien, volontairement."
+        ),
+    },
+    'gui.home.review_box': {
+        "en": 'Proposal',
+        "fr": 'Proposition',
+    },
+    'gui.home.review_from': {
+        "en": 'Found in message {label}',
+        "fr": 'Trouvé dans le message {label}',
+    },
+    'gui.home.review_accept': {
+        "en": 'Add to the calendar',
+        "fr": 'Ajouter au calendrier',
+    },
+    'gui.home.review_stop': {
+        "en": 'Stop the scan',
+        "fr": "Arrêter l'analyse",
+    },
+    'gui.home.planned_box': {
+        "en": 'Already on the calendar',
+        "fr": 'Déjà au calendrier',
+    },
+    'gui.home.column_when': {
+        "en": 'When',
+        "fr": 'Quand',
+    },
+    'gui.home.column_title': {
+        "en": 'Title',
+        "fr": 'Titre',
+    },
+    'gui.home.column_calendar': {
+        "en": 'Calendar',
+        "fr": 'Calendrier',
+    },
+    'gui.home.column_origin': {
+        "en": 'Origin',
+        "fr": 'Origine',
+    },
+    'gui.home.origin_tool': {
+        "en": 'planned from the mail',
+        "fr": 'planifié depuis le courrier',
+    },
+    'gui.home.origin_new': {
+        "en": 'planned by this scan',
+        "fr": 'planifié par cette analyse',
+    },
+    'gui.home.refresh': {
+        "en": 'Refresh',
+        "fr": 'Actualiser',
+    },
+    'gui.home.job_planned': {
+        "en": 'Calendar reading',
+        "fr": 'Lecture du calendrier',
+    },
+    'gui.home.no_calendar_account': {
+        "en": 'No calendar account saved: choose it in Settings.',
+        "fr": 'Aucun compte de calendrier enregistré : choisissez-le dans Réglages.',
+    },
+    'gui.home.planned_empty': {
+        "en": 'Nothing upcoming on these calendars.',
+        "fr": 'Rien à venir sur ces calendriers.',
+    },
+    'gui.home.planned_hint': {
+        "en": (
+            'What the calendar already holds, not the result of a scan. Refresh reads the '
+            'upcoming events (it connects to the account); double-click opens one in the browser.'
+        ),
+        "fr": (
+            "Ce que le calendrier contient déjà, pas le résultat d'une analyse. Actualiser lit les "
+            'événements à venir (se connecte au compte) ; un double-clic en ouvre un dans le navigateur.'
+        ),
+    },
+    'gui.home.ledger_summary': {
+        "en": '{messages} message(s) handled, {events} event(s) created by the tool; last on {last}.',
+        "fr": "{messages} message(s) traité(s), {events} événement(s) créé(s) par l'outil ; dernier le {last}.",
+    },
+    'gui.home.ledger_empty': {
+        "en": 'No message handled yet.',
+        "fr": 'Aucun message traité pour l\'instant.',
+    },
+    # --- the source message named next to an event under review (ui.describe_source) ---
+    'events.review_source': {
+        "en": 'Source message: {details}',
+        "fr": "Message d'origine : {details}",
+    },
+    'events.review_source_subject': {
+        "en": '“{subject}”',
+        "fr": '« {subject} »',
+    },
+    'events.review_source_from': {
+        "en": 'from {sender}',
+        "fr": 'de {sender}',
+    },
+    'events.review_source_date': {
+        "en": 'received {date}',
+        "fr": 'reçu le {date}',
+    },
+    'events.review_source_id': {
+        "en": 'id {identifier}',
+        "fr": 'id {identifier}',
+    },
+    'events.review_nature_cleaning': {
+        "en": (
+            'Cleaning proposed after the occupation of {room} from {first} to {last}: the first '
+            'free slot on your configured days and hours. The message gives the occupation, not '
+            'the cleaning.'
+        ),
+        "fr": (
+            "Entretien proposé après l'occupation de {room} du {first} au {last} : premier créneau "
+            "libre selon vos jours et heures configurés. Le message donne l'occupation, pas "
+            "l'entretien."
+        ),
+    },
+    'events.review_nature_deadline': {
+        "en": 'The message asks for it before {when}.',
+        "fr": 'Le message le demande avant le {when}.',
+    },
+    'events.review_nature_cleaning_day': {
+        "en": (
+            'Cleaning proposed after the occupation of {room} on {day}: the first free slot on '
+            'your configured days and hours. The message gives the occupation, not the cleaning.'
+        ),
+        "fr": (
+            "Entretien proposé après l'occupation de {room} le {day} : premier créneau libre selon "
+            "vos jours et heures configurés. Le message donne l'occupation, pas l'entretien."
+        ),
     },
 }

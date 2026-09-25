@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from manage_agenda.gui.bridge import Bridge
 from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.screens import auth, lists
-from manage_agenda.gui.widgets import AccountPicker, rule_keys
+from manage_agenda.gui.widgets import AccountPicker, account_label, rule_keys
 
 
 def _rules(keys_by_service):
@@ -24,7 +24,9 @@ def test_rule_keys_and_account_picker(qapp):
     picker.refresh(rules)
     assert picker.count() == 1
     assert picker.current_key() == ("gmail", "set", "a@x", "posts")
-    assert picker.itemText(0) == str(("gmail", "set", "a@x", "posts"))
+    assert picker.itemText(0) == "a@x (gmail)"
+    assert account_label(("web/http", "set", "(Enter URLs or leave empty)")) == "web/http"
+    assert account_label("plain") == "plain"
 
 
 def test_fetch_listing_rows(qapp):

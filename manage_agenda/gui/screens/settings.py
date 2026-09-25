@@ -5,16 +5,22 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QComboBox,
-    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QVBoxLayout,
 )
 
 from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import AccountPicker, CalendarPicker, fetch_calendars, load_rules
+from manage_agenda.gui.widgets import (
+    AccountPicker,
+    CalendarPicker,
+    fetch_calendars,
+    form_layout,
+    hint_label,
+    load_rules,
+    primary,
+)
 from manage_agenda.i18n import SUPPORTED_LANGUAGES, t
 from manage_agenda.user_config import load_user_config, save_user_config, saved_calendar_ids
 
@@ -23,12 +29,13 @@ PROVIDERS = ("ollama", "gemini", "mistral")
 
 class SettingsScreen(Screen):
     nav_key = "gui.nav.settings"
+    subtitle_key = "gui.settings.subtitle"
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
         self.rules = None
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        layout = self.content
+        form = form_layout()
         self.provider = QComboBox(self)
         self.provider.addItem(t("gui.settings.unset"), "")
         for provider in PROVIDERS:
@@ -56,10 +63,10 @@ class SettingsScreen(Screen):
         form.addRow(t("gui.settings.calendar_ids"), self.calendar_ids)
         form.addRow(t("gui.settings.language"), self.language)
         layout.addLayout(form)
-        layout.addWidget(QLabel(t("gui.settings.restart_note"), self))
+        layout.addWidget(hint_label(t("gui.settings.restart_note"), self))
 
         row = QHBoxLayout()
-        self.save_button = QPushButton(t("gui.settings.save"), self)
+        self.save_button = primary(QPushButton(t("gui.settings.save"), self))
         self.reload_button = QPushButton(t("gui.settings.reload"), self)
         row.addWidget(self.save_button)
         row.addWidget(self.reload_button)

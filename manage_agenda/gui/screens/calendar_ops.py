@@ -6,12 +6,9 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QComboBox,
-    QFormLayout,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QPushButton,
-    QVBoxLayout,
 )
 
 from manage_agenda.events import (
@@ -22,6 +19,7 @@ from manage_agenda.events import (
     update_event_status_cli,
 )
 from manage_agenda.gui.screens.base import Screen
+from manage_agenda.gui.widgets import form_layout, hint_label, primary
 from manage_agenda.i18n import t
 from manage_agenda.sources import Args
 
@@ -36,11 +34,12 @@ OPERATIONS = (
 
 class CalendarOpsScreen(Screen):
     nav_key = "gui.nav.calendar_ops"
+    subtitle_key = "gui.calendar_ops.subtitle"
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
+        layout = self.content
+        form = form_layout()
         self.operation = QComboBox(self)
         for name, _func, _needs_destination in OPERATIONS:
             self.operation.addItem(name, name)
@@ -55,10 +54,10 @@ class CalendarOpsScreen(Screen):
         form.addRow(t("gui.calendar_ops.destination_calendar"), self.destination)
         form.addRow(t("gui.calendar_ops.text_filter"), self.text)
         layout.addLayout(form)
-        layout.addWidget(QLabel(t("gui.calendar_ops.note"), self))
+        layout.addWidget(hint_label(t("gui.calendar_ops.note"), self))
 
         row = QHBoxLayout()
-        self.run_button = self.register_run_button(QPushButton(t("gui.calendar_ops.run"), self))
+        self.run_button = self.register_run_button(primary(QPushButton(t("gui.calendar_ops.run"), self)))
         row.addWidget(self.run_button)
         row.addStretch(1)
         layout.addLayout(row)
