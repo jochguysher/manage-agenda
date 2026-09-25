@@ -1323,6 +1323,22 @@ TRANSLATIONS = {
         "en": '&View',
         "fr": '&Affichage',
     },
+    'gui.menu.theme': {
+        "en": '&Theme',
+        "fr": '&Thème',
+    },
+    'gui.theme.light': {
+        "en": 'Light',
+        "fr": 'Clair',
+    },
+    'gui.theme.dark': {
+        "en": 'Dark',
+        "fr": 'Sombre',
+    },
+    'gui.theme.system': {
+        "en": 'System',
+        "fr": 'Système',
+    },
     'gui.log_panel_title': {
         "en": 'Log',
         "fr": 'Journal',

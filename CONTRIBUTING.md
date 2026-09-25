@@ -268,8 +268,9 @@ script, so nothing else needs PySide6. Rules for GUI code:
   prompts become dialogs through `QtUI` and `MainWindow._on_ui_request`;
 - every string goes through `t()` with `en` and `fr` entries (keys `gui.*`);
 - no import-time side effects (no `QApplication`, no paths, no handlers); the look comes
-  from `theme.py`, applied by `app.run()` only, and from the `role` / `primary` properties
-  `widgets.py` sets - not from per-widget `setStyleSheet` calls;
+  from `theme.py` (two explicit palettes, light and dark, or the platform's; `apply_theme(app,
+  mode)` is called by `app.run()` and by View › Theme only) and from the `role` / `primary` /
+  `folded` properties `widgets.py` sets - not from per-widget `setStyleSheet` calls;
 - the Accounts screen is the one screen that writes files from the GUI thread: it goes
   through `manage_agenda.accounts`, which only edits local configuration and takes an
   explicit `directory` so a test never reaches the real `~/.mySocial`;

@@ -1,15 +1,122 @@
-"""The window's look: the Fusion style and a small stylesheet derived from the palette, so it
-follows the platform's light or dark colours instead of hardcoding either. Applied by
-app.run() only - create_window() stays style-free for the tests.
+"""The window's look: the Fusion style, one of two explicit palettes (light, dark) or the
+platform's own, and a small stylesheet derived from the palette in force. The theme is a
+choice of the user (View › Theme, kept in gui.ini), not of the desktop: the same window
+looks the same on every machine unless "system" is chosen. Applied by app.run() and by the
+Theme menu only - create_window() stays style-free for the tests.
 
 The stylesheet touches a deliberately small set of selectors (the sidebar, group boxes,
 the primary buttons, the labels with a `role`, table headers, the status bar): a partial
-stylesheet on a combo box or a spin box breaks their arrows and popups under Fusion.
+stylesheet on a combo box or a spin box breaks their arrows and popups under Fusion. The
+accent is spent on two things only, the selected sidebar entry and the primary button, so
+the main action of a screen is the first thing the eye finds.
 """
 
 from __future__ import annotations
 
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QColor, QPalette
+
+THEMES = ("light", "dark", "system")
+DEFAULT_THEME = "system"
+
+# Both palettes cover every role Fusion reads, plus the disabled group (which Fusion would
+# otherwise derive, unevenly, from the active one) and the Accent role (Qt >= 6.6).
+LIGHT = {
+    "window": "#f2f2f2",
+    "window_text": "#1e1f22",
+    "base": "#ffffff",
+    "alternate_base": "#f5f6f7",
+    "text": "#1e1f22",
+    "button": "#e7e8ea",
+    "button_text": "#1e1f22",
+    "bright_text": "#d0021b",
+    "highlight": "#2f7fd6",
+    "highlighted_text": "#ffffff",
+    "tooltip_base": "#fffbe6",
+    "tooltip_text": "#1e1f22",
+    "placeholder_text": "#8b9096",
+    "link": "#1f63b8",
+    "light": "#ffffff",
+    "midlight": "#e1e2e4",
+    "mid": "#c6c8cc",
+    "dark": "#9a9da3",
+    "shadow": "#6b6e74",
+    "disabled_text": "#9a9da3",
+    "disabled_highlight": "#c6c8cc",
+    "hint": "#5c6168",
+    "error": "#b3261e",
+    "ok": "#1b6e3a",
+}
+
+DARK = {
+    "window": "#2b2e33",
+    "window_text": "#eaecee",
+    "base": "#1f2124",
+    "alternate_base": "#26292d",
+    "text": "#eaecee",
+    "button": "#383c42",
+    "button_text": "#eaecee",
+    "bright_text": "#ff6b6b",
+    "highlight": "#3d9be9",
+    "highlighted_text": "#ffffff",
+    "tooltip_base": "#3a3e45",
+    "tooltip_text": "#eaecee",
+    "placeholder_text": "#8e949c",
+    "link": "#6cb4ee",
+    "light": "#4d525a",
+    "midlight": "#3d4249",
+    "mid": "#4a4f57",
+    "dark": "#1a1c1f",
+    "shadow": "#101214",
+    "disabled_text": "#7a8088",
+    "disabled_highlight": "#4a4f57",
+    "hint": "#a3a8ae",
+    "error": "#f2b8b5",
+    "ok": "#8fd19e",
+}
+
+_ROLES = {
+    "window": QPalette.ColorRole.Window,
+    "window_text": QPalette.ColorRole.WindowText,
+    "base": QPalette.ColorRole.Base,
+    "alternate_base": QPalette.ColorRole.AlternateBase,
+    "text": QPalette.ColorRole.Text,
+    "button": QPalette.ColorRole.Button,
+    "button_text": QPalette.ColorRole.ButtonText,
+    "bright_text": QPalette.ColorRole.BrightText,
+    "highlight": QPalette.ColorRole.Highlight,
+    "highlighted_text": QPalette.ColorRole.HighlightedText,
+    "tooltip_base": QPalette.ColorRole.ToolTipBase,
+    "tooltip_text": QPalette.ColorRole.ToolTipText,
+    "placeholder_text": QPalette.ColorRole.PlaceholderText,
+    "link": QPalette.ColorRole.Link,
+    "light": QPalette.ColorRole.Light,
+    "midlight": QPalette.ColorRole.Midlight,
+    "mid": QPalette.ColorRole.Mid,
+    "dark": QPalette.ColorRole.Dark,
+    "shadow": QPalette.ColorRole.Shadow,
+}
+
+_system_palette: QPalette | None = None
+
+
+def make_palette(spec):
+    """A QPalette from a colour spec (LIGHT or DARK)."""
+    palette = QPalette()
+    for key, role in _ROLES.items():
+        palette.setColor(role, QColor(spec[key]))
+    accent = getattr(QPalette.ColorRole, "Accent", None)
+    if accent is not None:
+        palette.setColor(accent, QColor(spec["highlight"]))
+    disabled = QPalette.ColorGroup.Disabled
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+    ):
+        palette.setColor(disabled, role, QColor(spec["disabled_text"]))
+    palette.setColor(disabled, QPalette.ColorRole.Highlight, QColor(spec["disabled_highlight"]))
+    palette.setColor(disabled, QPalette.ColorRole.HighlightedText, QColor(spec["disabled_text"]))
+    return palette
 
 
 def is_dark(palette):
@@ -17,7 +124,7 @@ def is_dark(palette):
 
 
 def accent_color(palette):
-    """The platform accent (Qt >= 6.6), or the selection colour when there is none."""
+    """The palette's accent (Qt >= 6.6), or its selection colour when there is none."""
     role = getattr(QPalette.ColorRole, "Accent", None)
     color = palette.color(role) if role is not None else None
     if color is None or not color.isValid():
@@ -25,20 +132,40 @@ def accent_color(palette):
     return color
 
 
+def system_palette(app):
+    """The palette the platform gave the application, as it was before any theme of ours:
+    captured on the first call, so "system" can be chosen back after "light" or "dark"."""
+    global _system_palette
+    if _system_palette is None:
+        _system_palette = QPalette(app.palette())
+    return _system_palette
+
+
+def palette_for(mode, app=None):
+    """The palette of theme `mode` ("light", "dark" or "system"); `app` is needed for
+    "system". An unknown mode is the default one."""
+    if mode == "light":
+        return make_palette(LIGHT)
+    if mode == "dark":
+        return make_palette(DARK)
+    return system_palette(app)
+
+
 def _rgba(color, alpha):
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha})"
 
 
 def stylesheet(palette):
-    """The stylesheet for `palette`."""
-    dark = is_dark(palette)
+    """The stylesheet for `palette`. The role colours (hint, error, ok) are constants of the
+    light or the dark family, chosen for their contrast on that family's window colour -
+    the platform's placeholder colour, which used to give `hint`, is often too faint."""
+    family = DARK if is_dark(palette) else LIGHT
     accent = accent_color(palette)
     on_accent = palette.color(QPalette.ColorRole.HighlightedText).name()
     window = palette.color(QPalette.ColorRole.Window).name()
     border = palette.color(QPalette.ColorRole.Mid).name()
-    muted = palette.color(QPalette.ColorRole.PlaceholderText).name()
-    error = "#f2b8b5" if dark else "#b3261e"
-    ok = "#8fd19e" if dark else "#1b6e3a"
+    text = palette.color(QPalette.ColorRole.WindowText).name()
+    hint, error, ok = family["hint"], family["error"], family["ok"]
     return f"""
 QListWidget#nav {{
     background: {window};
@@ -63,7 +190,7 @@ QLabel#screenTitle {{
     font-weight: 600;
 }}
 QLabel[role="hint"] {{
-    color: {muted};
+    color: {hint};
 }}
 QLabel[role="error"] {{
     color: {error};
@@ -82,7 +209,8 @@ QGroupBox::title {{
     subcontrol-position: top left;
     left: 10px;
     padding: 0 4px;
-    color: {accent.name()};
+    color: {text};
+    font-weight: 600;
 }}
 QGroupBox[folded="true"] {{
     border: none;
@@ -104,7 +232,7 @@ QPushButton[primary="true"]:pressed {{
 }}
 QPushButton[primary="true"]:disabled {{
     background: {border};
-    color: {muted};
+    color: {hint};
     border-color: {border};
 }}
 QHeaderView::section {{
@@ -130,8 +258,12 @@ QStatusBar::item {{
 """
 
 
-def apply_theme(app):
-    """Fusion plus the stylesheet for the application's palette; the style installed."""
+def apply_theme(app, mode=DEFAULT_THEME):
+    """Fusion, the palette of theme `mode` and the stylesheet for it, on the application;
+    the style installed. Safe to call again with another mode: the widgets are repolished."""
     style = app.setStyle("Fusion")
-    app.setStyleSheet(stylesheet(app.palette()))
+    system_palette(app)  # captured before our first palette replaces it
+    palette = palette_for(mode, app)
+    app.setPalette(palette)
+    app.setStyleSheet(stylesheet(palette))
     return style

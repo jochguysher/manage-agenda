@@ -51,10 +51,11 @@ def run(verbose=False):
     """Open the window and run the application; the process exit code."""
     from PySide6.QtWidgets import QApplication
 
+    from manage_agenda.gui.persist import saved_theme
     from manage_agenda.gui.theme import apply_theme
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
-    apply_theme(app)
+    apply_theme(app, saved_theme())
     window = create_window(verbose=verbose)
     window.show()
     try:

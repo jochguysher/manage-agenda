@@ -4,7 +4,9 @@ the slot that turns the worker's UI requests into dialogs."""
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Slot
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDockWidget,
     QFrame,
@@ -24,7 +26,7 @@ from manage_agenda.gui import dialogs
 from manage_agenda.gui.bridge import Bridge, UIRequest
 from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.log_panel import LogPanel
-from manage_agenda.gui.persist import gui_settings
+from manage_agenda.gui.persist import gui_settings, save_theme, saved_theme
 from manage_agenda.gui.screens.accounts import AccountsScreen
 from manage_agenda.gui.screens.add import AddScreen
 from manage_agenda.gui.screens.auth import AuthScreen
@@ -35,6 +37,7 @@ from manage_agenda.gui.screens.install import InstallScreen
 from manage_agenda.gui.screens.ledger import LedgerScreen
 from manage_agenda.gui.screens.lists import ListsScreen
 from manage_agenda.gui.screens.settings import SettingsScreen
+from manage_agenda.gui.theme import THEMES, apply_theme
 from manage_agenda.i18n import t
 
 SCREEN_CLASSES = (
@@ -89,7 +92,10 @@ class MainWindow(QMainWindow):
         self.resizeDocks([self.log_dock], [LOG_DOCK_HEIGHT], Qt.Orientation.Vertical)
         self.log_action = self.log_dock.toggleViewAction()
         self.log_action.setShortcut("Ctrl+L")
-        self.menuBar().addMenu(t("gui.menu.view")).addAction(self.log_action)
+        self.view_menu = self.menuBar().addMenu(t("gui.menu.view"))
+        self.view_menu.addAction(self.log_action)
+        self.view_menu.addSeparator()
+        self._build_theme_menu()
 
         self.nav = QListWidget(self)
         self.nav.setObjectName("nav")  # styled by gui/theme.py
@@ -139,6 +145,32 @@ class MainWindow(QMainWindow):
     def show_screen(self, screen_class):
         """Select `screen_class` in the sidebar (which shows and refreshes it)."""
         self.nav.setCurrentRow(self.screens.index(self.screen(screen_class)))
+
+    # --- the theme: View › Theme, one exclusive action per mode ---
+
+    def _build_theme_menu(self):
+        self.theme_menu = self.view_menu.addMenu(t("gui.menu.theme"))
+        self.theme_group = QActionGroup(self)
+        self.theme_group.setExclusive(True)
+        self.theme_actions = {}
+        current = saved_theme()
+        for mode in THEMES:
+            action = QAction(t(f"gui.theme.{mode}"), self)
+            action.setObjectName(f"theme_{mode}")
+            action.setCheckable(True)
+            action.setChecked(mode == current)
+            action.triggered.connect(lambda _checked=False, mode=mode: self.choose_theme(mode))
+            self.theme_group.addAction(action)
+            self.theme_menu.addAction(action)
+            self.theme_actions[mode] = action
+
+    def choose_theme(self, mode):
+        """Apply theme `mode` to the running application and remember it in gui.ini."""
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, mode)
+        save_theme(mode)
+        self.theme_actions[mode].setChecked(True)
 
     # --- window geometry and the log panel, kept between sessions ---
 
