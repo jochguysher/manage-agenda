@@ -43,7 +43,8 @@ def test_home_shows_the_saved_destination_and_remembers_its_choices(qapp):
     save_user_config({"calendar_account": list(CAL), "calendar": ["c1"], "provider": "ollama", "model": "m"})
     _runner, screen = _home(qapp)
     assert screen.source.keys == [MAIL, IMAP]
-    assert "c1" in screen.destination.text() and "ollama / m" in screen.destination.text()
+    assert "c1" in screen.destination.text() and "ollama / m" in screen.destination_model.text()
+    assert "me@x" in screen.destination_account.text()
     assert screen.review_mode.isChecked()
     assert screen.build_args().interactive is True
 

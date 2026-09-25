@@ -29,11 +29,17 @@ from manage_agenda.gui.widgets import (
     hint_label,
     load_rules,
     primary,
+    short_id,
 )
 from manage_agenda.i18n import t
 from manage_agenda.sources import Args, add_events_cli, get_add_sources
 from manage_agenda.ui import label_for
-from manage_agenda.user_config import load_user_config, saved_calendar_ids
+from manage_agenda.user_config import (
+    load_user_config,
+    saved_calendar_ids,
+    saved_calendar_names,
+    update_user_config,
+)
 
 PROVIDERS = ("", "ollama", "gemini", "mistral")
 OUTPUTS = ("calendar", "file")
@@ -65,6 +71,8 @@ class AddScreen(Screen):
         self.calendar_key = None
         self.calendar_ids = []
         self.calendar_names = []
+        self._saved = {}
+        self._saved_account = None
         self._saved_calendar_ids = []
         layout = self.content
 
@@ -178,8 +186,11 @@ class AddScreen(Screen):
         account = tuple(account) if isinstance(account, list) else account
         if account in self.account.keys:
             self.account.setCurrentIndex(self.account.keys.index(account))
+        self._saved = saved
+        self._saved_account = account
         self._saved_calendar_ids = saved_calendar_ids(saved)
         self._on_source_changed(self.source.currentIndex())
+        self._update_calendar_summary()
 
     def selected_source(self):
         index = self.source.currentIndex()
@@ -228,12 +239,17 @@ class AddScreen(Screen):
             dialog.deleteLater()
 
     def set_calendars(self, key, api, calendars, checked_ids):
-        """Record the calendars of account `key` to write to."""
+        """Record the calendars of account `key` to write to, and save the choice as the
+        terminal's wizard does: ticking or unticking a calendar here is what changes the
+        destination, for this run and the next ones (Home shows it)."""
         chosen = [calendar for calendar in calendars if calendar.get("id") in checked_ids]
         self.calendar_key = key
         self.calendar_api = api
         self.calendar_ids = [calendar["id"] for calendar in chosen]
         self.calendar_names = [label_for(calendar, "summary") for calendar in chosen]
+        self._saved = update_user_config({"calendar_account": list(key), "calendar": list(self.calendar_ids)})
+        self._saved_account = key
+        self._saved_calendar_ids = list(self.calendar_ids)
         self._update_calendar_summary()
 
     def _calendars_apply(self):
@@ -241,10 +257,18 @@ class AddScreen(Screen):
         return bool(self.calendar_ids) and self.calendar_key == self.account.current_key()
 
     def _update_calendar_summary(self, *_ignored):
+        """The calendars the run will write to: those ticked here, else the saved ones when
+        the selected account is the saved one (by name when known), else none yet."""
+        key = self.account.current_key()
         if self._calendars_apply():
-            self.calendars_summary.setText(
-                t("gui.add.calendars_chosen", names=", ".join(self.calendar_names))
-            )
+            names = self.calendar_names
+        elif key is not None and key == self._saved_account and self._saved_calendar_ids:
+            known = saved_calendar_names(self._saved)
+            names = [known.get(item) or short_id(item) for item in self._saved_calendar_ids]
+        else:
+            names = []
+        if names:
+            self.calendars_summary.setText(t("gui.add.calendars_chosen", names=", ".join(names)))
         else:
             self.calendars_summary.setText(t("gui.add.calendars_none"))
 

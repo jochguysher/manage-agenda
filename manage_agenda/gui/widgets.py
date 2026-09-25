@@ -150,6 +150,16 @@ def primary(button):
 
 
 ELIDED_MIN_CHARS = 12
+SHORT_ID_LENGTH = 24
+
+
+def short_id(value):
+    """A calendar id a person can still recognise when its name is not known: the first and
+    last characters of a long one (Google's are 90-character hashes), the whole of a short one."""
+    value = str(value)
+    if len(value) <= SHORT_ID_LENGTH:
+        return value
+    return f"{value[:10]}…{value[-8:]}"
 
 
 class ElidedLabel(QLabel):

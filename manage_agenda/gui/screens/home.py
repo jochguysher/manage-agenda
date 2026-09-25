@@ -16,6 +16,7 @@ import datetime
 from PySide6.QtCore import QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -42,6 +43,7 @@ from manage_agenda.gui.widgets import (
     load_rules,
     primary,
     set_role,
+    short_id,
 )
 from manage_agenda.i18n import t
 from manage_agenda.sources import (
@@ -55,18 +57,9 @@ from manage_agenda.user_config import load_user_config, saved_calendar_ids, save
 
 MAIL_SERVICES = ("gmail", "imap")
 MAX_ROWS = 80
+DESTINATION_CARD_WIDTH = 300
 SETTING_SOURCE = "home/source"
 SETTING_REVIEW = "home/review"
-SHORT_ID_LENGTH = 24
-
-
-def short_id(value):
-    """A calendar id a person can still recognise when its name is not known: the first and
-    last characters of a long one (Google's are 90-character hashes), the whole of a short one."""
-    value = str(value)
-    if len(value) <= SHORT_ID_LENGTH:
-        return value
-    return f"{value[:10]}…{value[-8:]}"
 
 
 def tool_created(event):
@@ -186,7 +179,10 @@ class HomeScreen(Screen):
         layout = self.content
 
         run_box = QGroupBox(t("gui.home.run_box"), self)
-        run_layout = QVBoxLayout(run_box)
+        columns = QHBoxLayout(run_box)
+        columns.setSpacing(18)
+        run_layout = QVBoxLayout()
+        columns.addLayout(run_layout, 1)
         form = form_layout()
         self.source = AccountPicker(MAIL_SERVICES, self)
         mode_row = QHBoxLayout()
@@ -199,10 +195,8 @@ class HomeScreen(Screen):
         mode_row.addWidget(self.review_mode)
         mode_row.addWidget(self.auto_mode)
         mode_row.addStretch(1)
-        self.destination = ElidedLabel("", self)
         form.addRow(t("gui.home.source"), self.source)
         form.addRow(t("gui.home.mode"), mode_row)
-        form.addRow(t("gui.home.destination"), self.destination)
         run_layout.addLayout(form)
         self.mailbox_hint = hint_label("", self)
         set_role(self.mailbox_hint, "error")
@@ -210,16 +204,43 @@ class HomeScreen(Screen):
         run_layout.addWidget(self.mailbox_hint)
         row = QHBoxLayout()
         self.run_button = self.register_run_button(primary(QPushButton(t("gui.home.run"), self)))
-        self.advanced_button = QPushButton(t("gui.home.open_advanced"), self)
-        self.settings_button = QPushButton(t("gui.home.open_settings"), self)
         row.addWidget(self.run_button)
         row.addStretch(1)
-        row.addWidget(self.advanced_button)
-        row.addWidget(self.settings_button)
         run_layout.addLayout(row)
         self.message = QLabel("", self)
         self.message.setWordWrap(True)
         run_layout.addWidget(self.message)
+        run_layout.addStretch(1)
+
+        # The destination, as a card on the right: the calendars, the account, the model -
+        # three short lines instead of one long one - and the two buttons that change them.
+        side = QVBoxLayout()
+        side.setSpacing(8)
+        self.destination_card = QFrame(self)
+        self.destination_card.setFixedWidth(DESTINATION_CARD_WIDTH)
+        set_role(self.destination_card, "card")
+        card = QVBoxLayout(self.destination_card)
+        card.setContentsMargins(12, 10, 12, 10)
+        card.setSpacing(4)
+        self.destination_title = QLabel(t("gui.home.destination"), self)
+        set_role(self.destination_title, "card_title")
+        self.destination = ElidedLabel("", self)
+        self.destination_account = ElidedLabel("", self)
+        set_role(self.destination_account, "hint")
+        self.destination_model = ElidedLabel("", self)
+        set_role(self.destination_model, "hint")
+        for widget in (self.destination_title, self.destination, self.destination_account, self.destination_model):
+            card.addWidget(widget)
+        side.addWidget(self.destination_card)
+        buttons = QHBoxLayout()
+        self.advanced_button = QPushButton(t("gui.home.open_advanced"), self)
+        self.settings_button = QPushButton(t("gui.home.open_settings"), self)
+        buttons.addStretch(1)
+        buttons.addWidget(self.advanced_button)
+        buttons.addWidget(self.settings_button)
+        side.addLayout(buttons)
+        side.addStretch(1)
+        columns.addLayout(side)
         layout.addWidget(run_box)
 
         self.review_box = QGroupBox(t("gui.home.review_box"), self)
@@ -357,10 +378,23 @@ class HomeScreen(Screen):
         return t("gui.home.destination_text", calendars=where, model=model or t("gui.home.model_default"))
 
     def _show_destination(self):
-        """The destination line, never wider than the page: the label elides what does not
-        fit and its tooltip carries the saved ids in full."""
-        self.destination.setText(self._destination_text())
-        self.destination.setToolTip(self._destination_text(full=True))
+        """The destination card: the calendars (by name when known), the account, the model.
+        The labels elide what does not fit; the calendars' tooltip carries the ids in full."""
+        account = self.saved_calendar_account()
+        names = saved_calendar_names(self.saved)
+        ids = saved_calendar_ids(self.saved)
+        if account and ids:
+            self.destination.setText(", ".join(names.get(item) or short_id(item) for item in ids))
+            self.destination.setToolTip(", ".join(ids))
+            self.destination_account.setText(account_label(account))
+        else:
+            self.destination.setText(t("gui.home.no_calendar"))
+            self.destination.setToolTip("")
+            self.destination_account.setText("")
+        model = " / ".join(
+            part for part in (self.saved.get("provider"), self.saved.get("model")) if part
+        )
+        self.destination_model.setText(t("gui.home.card_model", model=model or t("gui.home.model_default")))
         # A screen reader gets the ids in full, which the elided text may not show.
         self.destination.setAccessibleName(t("gui.home.destination"))
         self.destination.setAccessibleDescription(self._destination_text(full=True))

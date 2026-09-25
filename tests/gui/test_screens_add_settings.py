@@ -239,3 +239,20 @@ def test_settings_shows_the_calendar_list_only_once_loaded(qapp, pump):
         assert pump(lambda: not runner.is_busy())
     assert not screen.calendars.isHidden() and screen.calendars.count() == 1
     screen.hide()
+
+
+def test_calendar_summary_names_the_saved_calendars_and_the_dialog_saves_its_choice(qapp):
+    save_user_config({"calendar_account": list(CAL), "calendar": ["c1"], "calendar_names": {"c1": "Work"}})
+    _runner, screen = _add_screen(qapp)
+    assert screen.account.current_key() == CAL
+    assert "Work" in screen.calendars_summary.text()  # the saved choice, named, no loading needed
+
+    calendars = [{"id": "c1", "summary": "Work"}, {"id": "c2", "summary": "Home"}]
+    screen.set_calendars(CAL, MagicMock(), calendars, ["c2"])
+    assert "Home" in screen.calendars_summary.text() and "Work" not in screen.calendars_summary.text()
+    saved = load_user_config()
+    assert saved["calendar"] == ["c2"] and saved["calendar_account"] == list(CAL)
+
+    screen.set_calendars(CAL, MagicMock(), calendars, [])  # unticked: nothing chosen any more
+    assert screen.calendars_summary.text() == settings.t("gui.add.calendars_none")
+    assert load_user_config()["calendar"] == []

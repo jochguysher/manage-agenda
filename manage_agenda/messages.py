@@ -1379,6 +1379,10 @@ TRANSLATIONS = {
         "en": '← Back to Home',
         "fr": "← Retour à l'accueil",
     },
+    'gui.home.card_model': {
+        "en": 'Model: {model}',
+        "fr": 'Modèle : {model}',
+    },
     'gui.nav.accessible': {
         "en": 'Screens',
         "fr": 'Écrans',
@@ -1637,8 +1641,8 @@ TRANSLATIONS = {
         "fr": 'Cochez les calendriers à alimenter. Aucun coché : le choix enregistré est utilisé, ou la question est posée au lancement.',
     },
     'gui.add.calendars_none': {
-        "en": 'No calendar chosen: the saved choice is used, or you are asked when the run starts.',
-        "fr": 'Aucun calendrier choisi : le choix enregistré est utilisé, ou la question est posée au lancement.',
+        "en": 'No calendar chosen: you are asked when the run starts.',
+        "fr": 'Aucun calendrier choisi : la question est posée au lancement.',
     },
     'gui.add.calendars_chosen': {
         "en": 'Calendars: {names}',

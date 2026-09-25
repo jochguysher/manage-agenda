@@ -207,6 +207,14 @@ QLabel[role="error"] {{
 QLabel[role="ok"] {{
     color: {ok};
 }}
+QFrame[role="card"] {{
+    border: 1px solid {border};
+    border-radius: 6px;
+    background: {palette.color(QPalette.ColorRole.AlternateBase).name()};
+}}
+QLabel[role="card_title"] {{
+    font-weight: 600;
+}}
 QGroupBox {{
     border: 1px solid {border};
     border-radius: 6px;
