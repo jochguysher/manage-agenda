@@ -25,6 +25,7 @@ from manage_agenda.gui.bridge import Bridge, UIRequest
 from manage_agenda.gui.jobs import JobRunner
 from manage_agenda.gui.log_panel import LogPanel
 from manage_agenda.gui.persist import gui_settings
+from manage_agenda.gui.screens.accounts import AccountsScreen
 from manage_agenda.gui.screens.add import AddScreen
 from manage_agenda.gui.screens.auth import AuthScreen
 from manage_agenda.gui.screens.calendar_ops import CalendarOpsScreen
@@ -43,6 +44,7 @@ SCREEN_CLASSES = (
     AuthScreen,
     ListsScreen,
     InstallScreen,
+    AccountsScreen,
     SettingsScreen,
 )
 

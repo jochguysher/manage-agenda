@@ -7,11 +7,15 @@ import pickle
 from socialModules.configMod import safe_get
 from socialModules.moduleRules import moduleRules
 
+from manage_agenda.compat import install_socialmodules_shims
 from manage_agenda.exceptions import CalendarAccountChoiceRequired, CalendarError
 from manage_agenda.i18n import t
 from manage_agenda.ui import echo, get_ui, select_many, select_one
 
 logger = logging.getLogger(__name__)
+
+# Before any account is connected: every connection goes through moduleRules, imported here.
+install_socialmodules_shims()
 
 
 def select_rule_interactive(rules, service, title=""):
