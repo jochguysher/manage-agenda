@@ -73,9 +73,12 @@ uv tool install --force --editable '.[gui]'   # from the checkout
 
 See [Desktop window](#desktop-window) below for what it does and how it differs from the terminal.
 
+### Room occupations
+A sender listed in `~/.mySocial/config/prompts.ini` with `kind = occupancy` sends messages that announce **when rooms are used**, not appointments: one line per occupation, with its hours and sometimes an instruction. The model extracts each line (`occupations`: `start`, `end`, `clean`, `clean_before`); a cleaning is proposed only for a line that asks for one ("SVP nettoyer…"), never for a line that says not to or says nothing (the church, cleaned under its own contract). The cleaning is the first free slot **after the occupation ends** on the days and hours of the matching section of `availability.ini`, avoiding what is already on the destination calendar; when the line gives a deadline ("avant le dimanche 31 mai 8 h") the slot ends by it, outside the configured hours if the deadline leaves no other choice (the proposal says so). A cleaning that could only happen after the room's next occupation has started is dropped in favour of that occupation's own instruction. Trips are shared pragmatically: each cleaning has a window, from its first free slot to the last slot before its deadline (the first slot alone when the line gives no deadline - a cleaning does not wait for company unless the message allows it), and cleanings whose windows overlap become one event over consecutive slots on the earliest day that suits them all, the room with the earliest deadline first; when no trip long enough fits before a deadline, each room gets its own slot. The proposal names the occupation it answers; the event keeps it in its private extended properties (`kind`, `room`, `occupied_from`, `occupied_to`, `clean_before`).
+
 ### Configuration
 1. Install [socialModules](https://github.com/fernand0/socialModules) for email/calendar integration
-2. Configure your email and calendar accounts using socialModules
+2. Configure your email and calendar accounts using socialModules (`~/.mySocial/config/.rssBlogs`), or from the desktop window's Accounts screen
 3. Set up API keys for LLM providers (if using cloud models)
 4. Copy `.env.example` to `.env` and fill in your values (see [Environment Variables](#environment-variables))
 5. Optionally install [note-taker](https://github.com/fernand0/another-note-taking-app) for batch URL processing from notes
@@ -269,13 +272,15 @@ Open the desktop window (needs the `gui` extra, see [Desktop window](#desktop-wi
 
 | Command | Screen |
 |---|---|
-| `add` | Add events: source, model, destination calendars, options; the run's questions (an old message, a failed extraction, the event review, the label removal) are dialogs |
+| `add [-i]` on a mail account | Home, the screen the window opens on: pick the mailbox, choose between *propose each event to me* (`-i`) and *plan without asking*, and scan. Proposals appear on the screen itself, each one naming its source message (subject, sender, date and time, identifier) above the title, times, place and description to correct; accept or ask the model again. The table below lists what is already on the destination calendar with the events the tool created marked |
+| `add` | Add (advanced): every option on one form - web pages and text files too; the run's questions (an old message, a failed extraction, the event review, the label removal) are dialogs |
 | `copy`, `move`, `delete`, `clean`, `update-status` | Calendar operations: give the calendar ids and the title filter, or answer the dialogs as with `-i` |
 | `reconcile`, `migrate-ledger`, `restore` | Ledger: dry run, account choice, the exit code in the status bar; a table of the restorable identities |
 | `llm evaluate` | Evaluate models |
 | `auth` | Authentication: the check, and the browser consent |
 | `gmail`, `gcalendar` | Lists: the folder or calendar as a table |
 | `install` | Install browser, output streamed to the log |
+| editing `~/.mySocial/config/.rssBlogs` | Accounts: the mail and calendar accounts the other screens list; add, edit or remove one (IMAP server, port, login, password, folder, mode, sender filter and message age; the Google OAuth client file) |
 | the `config.yaml` wizard | Settings: provider, model, calendar account and calendars, language |
 
 Notes:
@@ -283,6 +288,10 @@ Notes:
 - One job runs at a time. **Cancel** stops it at its next question, or right away if it is waiting on one; a call in progress (a model request, a mailbox fetch, the browser consent) finishes on its own, and the window refuses to close until it has. A run cancelled during the event review leaves no ledger entry and marks nothing in the mailbox; one cancelled at the "remove the label?" question still records the event that was already created.
 - The event review dialog shows and edits times in local time and writes them back in UTC, as the terminal's date corrections end up after normalisation.
 - The language follows the same `language` key of `config.yaml` (or the system locale) and applies at the next start.
+- IMAP accounts connect with IMAP over TLS on port 993 unless their `.rssImap` section carries `port = …` (Accounts › Port): a local Proton Mail Bridge, for instance, serves IMAP on `127.0.0.1:1143`. socialModules itself only knows 993; `manage_agenda/compat.py` adds the key.
+- The home screen never connects on its own: **Refresh** (and the end of a scan started there) reads the upcoming events of the saved calendars, which may open the browser consent the first time. Events the tool created are recognised by the processing metadata it writes on them; those recorded by the ledger since the scan started are marked *planned by this scan*.
+- A page taller than the window scrolls. The log panel can be closed (its close button, View › Log, or Ctrl+L) and resized; the window remembers its size, and the panel's size and visibility, in `gui.ini` next to `config.yaml`.
+- The Accounts screen edits socialModules' `.rssBlogs` section by section (the header comments and the keys it does not know are kept) and the IMAP credentials in `.rssImap`; removing an account leaves a Google OAuth client file and its token in place. An account renamed there gets a new rule key, so the ledger and the mailbox history keep referring to the old name.
 - The ledger and `config.yaml` are not locked: do not run the window's `add` and a scheduled (cron) `add` at the same time on the same account.
 - The `gui` extra depends on PySide6, released under the LGPL; the rest of the tool does not import it.
 

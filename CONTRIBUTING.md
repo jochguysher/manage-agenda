@@ -168,7 +168,9 @@ def function_name(param1: str, param2: int) -> bool:
 manage-agenda/
 ├── manage_agenda/          # Main package
 │   ├── __init__.py
+│   ├── accounts.py        # Editor of socialModules' .rssBlogs / .rssImap (the Accounts screen)
 │   ├── cli.py             # CLI commands
+│   ├── compat.py          # Run-time shims on socialModules (IMAP port from .rssImap)
 │   ├── config.py          # Configuration management
 │   ├── exceptions.py      # Custom exceptions
 │   ├── base.py            # Base utilities
@@ -182,13 +184,16 @@ manage-agenda/
 │   │   ├── jobs.py        # JobRunner: one core flow at a time in a QThread
 │   │   ├── dialogs.py     # One dialog per prompt kind
 │   │   ├── main_window.py # Sidebar of screens, log panel, status bar, Cancel
-│   │   ├── widgets.py     # Account and calendar pickers
-│   │   └── screens/       # One screen per family of commands
+│   │   ├── persist.py     # gui.ini: window geometry, log panel, the home's last choices
+│   │   ├── review_form.py # The editable event form (review dialog and the home's proposal)
+│   │   ├── theme.py       # Fusion + a palette-derived stylesheet (light and dark)
+│   │   ├── widgets.py     # Account and calendar pickers, form/hint/primary helpers
+│   │   └── screens/       # Home (the task), one screen per family of commands, Accounts, Settings
 │   ├── i18n.py            # t(): interface language resolution
 │   ├── interactive.py     # questionary lists (console only, see "The UI port")
 │   ├── llm.py             # LLM provider clients and selection
 │   ├── messages.py        # en/fr message catalogue
-│   ├── scheduling.py      # Availability and room-visit planning
+│   ├── scheduling.py      # Availability; cleanings planned after room occupations
 │   ├── sources.py         # Source ingestion workflows
 │   ├── ui/                # The UI port (see below)
 │   │   ├── __init__.py    # UI protocol, get_ui()/set_ui()/use_ui(), echo()
@@ -262,7 +267,12 @@ script, so nothing else needs PySide6. Rules for GUI code:
   same `*_cli` function `cli.py` calls to the job runner (`Screen.submit`); the worker's
   prompts become dialogs through `QtUI` and `MainWindow._on_ui_request`;
 - every string goes through `t()` with `en` and `fr` entries (keys `gui.*`);
-- no import-time side effects (no `QApplication`, no paths, no handlers);
+- no import-time side effects (no `QApplication`, no paths, no handlers); the look comes
+  from `theme.py`, applied by `app.run()` only, and from the `role` / `primary` properties
+  `widgets.py` sets - not from per-widget `setStyleSheet` calls;
+- the Accounts screen is the one screen that writes files from the GUI thread: it goes
+  through `manage_agenda.accounts`, which only edits local configuration and takes an
+  explicit `directory` so a test never reaches the real `~/.mySocial`;
 - tests live in `tests/gui/`, are skipped without PySide6 and run offscreen:
   `QT_QPA_PLATFORM=offscreen python -m pytest tests/gui`. Install the toolkit with
   `uv sync --extra gui --extra dev`.
