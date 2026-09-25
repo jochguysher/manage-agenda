@@ -9,17 +9,28 @@ from manage_agenda.base import PACKAGE_LOGGER_NAME, setup_logging
 from manage_agenda.config import config_dir
 from manage_agenda.gui import app as gui_app
 from manage_agenda.gui.log_panel import QtLogHandler
-from manage_agenda.gui.main_window import SCREEN_CLASSES, MainWindow
+from manage_agenda.gui.main_window import NAV_GROUPS, SCREEN_CLASSES, MainWindow
 from manage_agenda.ui import echo, get_ui
 
 
 def test_main_window_has_every_screen(qapp):
     window = MainWindow()
     assert [type(screen) for screen in window.screens] == list(SCREEN_CLASSES)
-    assert window.nav.count() == len(SCREEN_CLASSES)
+    assert window.nav.count() == len(SCREEN_CLASSES) + len(NAV_GROUPS)
     assert window.stack.count() == len(SCREEN_CLASSES)
     assert all(screen.title() for screen in window.screens)
     assert not window.cancel_button.isEnabled()
+    # The group headers take a row each but cannot be selected; the screens map to rows.
+    from PySide6.QtCore import Qt
+
+    headers = [row for row in range(window.nav.count()) if row not in window.nav_rows]
+    assert len(headers) == len(NAV_GROUPS)
+    assert all(not (window.nav.item(row).flags() & Qt.ItemFlag.ItemIsSelectable) for row in headers)
+    assert window.nav.currentRow() == window.screen_rows[0] and window.stack.currentIndex() == 0
+    window.show_screen(SCREEN_CLASSES[-1])
+    assert window.stack.currentIndex() == len(SCREEN_CLASSES) - 1
+    assert window.nav.currentRow() == window.screen_rows[len(SCREEN_CLASSES) - 1]
+    assert window.install_action.text() and window.tools_menu.actions()[0] is window.install_action
     window.close()
 
 

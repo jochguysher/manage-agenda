@@ -181,6 +181,12 @@ QListWidget#nav::item {{
     margin: 0 2px;
     border-radius: 6px;
 }}
+QListWidget#nav::item:disabled {{
+    color: {hint};
+    font-size: 9pt;
+    font-weight: 600;
+    padding-top: 10px;
+}}
 QListWidget#nav::item:hover {{
     background: {_rgba(accent, 0.15)};
 }}

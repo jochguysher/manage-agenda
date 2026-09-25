@@ -2,7 +2,7 @@
 is given the directory; the real ~/.mySocial is never read)."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from manage_agenda import accounts
 from manage_agenda.gui.bridge import Bridge
@@ -183,3 +183,32 @@ def test_edit_and_add_are_disabled_while_a_job_runs(qapp, tmp_path):
     assert not screen.remove_button.isEnabled() and screen.reload_button.isEnabled()
     screen.set_running(False)
     assert screen.add_button.isEnabled()
+
+
+def test_google_authorization_runs_for_the_selected_google_account(qapp, tmp_path, pump):
+    screen = _screen(qapp, tmp_path)
+    runner = screen.runner
+    screen.table.selectRow(0)  # royal-review, IMAP: nothing to authorize
+    assert not screen.check_auth_button.isEnabled() and not screen.oauth_button.isEnabled()
+    screen._authorization(accounts_screen.check_auth, "check")  # a disabled button ignores clicks
+    assert not runner.is_busy() and screen.auth_status.text()
+
+    screen.table.selectRow(1)  # gcalendar me@gmail.com
+    assert screen.check_auth_button.isEnabled() and screen.oauth_button.isEnabled()
+    rules = MagicMock()
+    rules.selectRule.side_effect = lambda service, _sel="": {
+        "gcalendar": [("gcalendar", "set", "me@gmail.com", "posts")]
+    }.get(service, [])
+    with patch.object(accounts_screen, "load_rules", return_value=rules), patch.object(
+        accounts_screen, "check_auth", return_value=(False, "no token")
+    ) as check:
+        screen.check_auth_button.click()
+        assert pump(lambda: not runner.is_busy())
+    check.assert_called_once_with(rules, ("gcalendar", "set", "me@gmail.com", "posts"))
+    assert "no token" in screen.auth_status.text()
+    assert screen.check_auth_button.isEnabled()
+
+    rules.selectRule.side_effect = lambda service, _sel="": []
+    with patch.object(accounts_screen, "load_rules", return_value=rules):
+        screen.oauth_button.click()
+    assert not runner.is_busy() and "gcalendar" in screen.auth_status.text()

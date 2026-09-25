@@ -188,7 +188,7 @@ manage-agenda/
 │   │   ├── review_form.py # The editable event form (review dialog and the home's proposal)
 │   │   ├── theme.py       # Fusion + a palette-derived stylesheet (light and dark)
 │   │   ├── widgets.py     # Account and calendar pickers, form/hint/primary helpers
-│   │   └── screens/       # Home (the task), one screen per family of commands, Accounts, Settings
+│   │   └── screens/       # Home (the task), one screen per family of commands, Accounts (with the Google authorization), Settings; install.py is the Tools › Install dialog
 │   ├── i18n.py            # t(): interface language resolution
 │   ├── interactive.py     # questionary lists (console only, see "The UI port")
 │   ├── llm.py             # LLM provider clients and selection

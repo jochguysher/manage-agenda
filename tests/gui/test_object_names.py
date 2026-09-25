@@ -68,9 +68,9 @@ def test_every_screen_names_its_widgets(qapp):
         for expected in (
             "home_source", "home_run_button", "home_review_summary", "home_table",
             "add_run_button", "add_advanced_box", "accounts_add_button", "settings_save_button",
-            "ledger_reconcile_button", "auth_check_button", "lists_run_button",
-            "install_run_button", "evaluate_run_button", "calendar_ops_run_button",
-            "main_cancel_button", "main_theme_menu", "theme_dark",
+            "ledger_reconcile_button", "accounts_check_auth_button", "accounts_oauth_button",
+            "lists_run_button", "evaluate_run_button", "calendar_ops_run_button",
+            "main_cancel_button", "main_theme_menu", "main_tools_menu", "theme_dark", "install_browser",
         ):
             assert window.findChild(object, expected) is not None, expected
         assert window.nav.objectName() == "nav" and window.log_dock.objectName() == "logDock"
@@ -110,3 +110,10 @@ def test_every_dialog_names_its_widgets(qapp):
     calendars = CalendarSelectionDialog([{"id": "c1", "summary": "One"}])
     assert _unnamed(calendars) == [] and calendars.ok_button.objectName() == "calendars_ok_button"
     calendars.deleteLater()
+    from manage_agenda.gui.bridge import Bridge
+    from manage_agenda.gui.jobs import JobRunner
+    from manage_agenda.gui.screens.install import InstallDialog
+
+    install = InstallDialog(JobRunner(Bridge()))
+    assert _unnamed(install) == [] and install.run_button.objectName() == "install_run_button"
+    install.deleteLater()

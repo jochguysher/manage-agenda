@@ -112,14 +112,26 @@ def test_evaluate_args_prompt_and_type(qapp, pump):
     models.assert_called_once_with(Args(interactive=False, output="calendar"), prompt="hello", eval_type=None)
 
 
-def test_install_submits_the_chosen_browser(qapp, pump):
+def test_install_dialog_submits_the_chosen_browser_and_closes(qapp, pump):
+    from PySide6.QtWidgets import QDialog
+
     runner = JobRunner(Bridge())
-    screen = install.InstallScreen(runner)
-    screen.browser.setCurrentText("chromium")
+    dialog = install.InstallDialog(runner)
+    dialog.browser.setCurrentText("chromium")
     with patch.object(install, "install_playwright_browser", return_value=0) as installer:
-        screen.run()
+        assert dialog.run() is True
+        assert dialog.result() == QDialog.DialogCode.Accepted
         assert pump(lambda: not runner.is_busy())
     installer.assert_called_once_with("chromium")
+
+    import threading
+
+    gate = threading.Event()
+    runner.submit("busy", gate.wait)
+    busy = install.InstallDialog(runner)
+    assert busy.run() is False and busy.message.text()
+    gate.set()
+    assert pump(lambda: not runner.is_busy())
 
 
 def test_enter_in_a_calendar_ops_field_runs(qapp, pump):

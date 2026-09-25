@@ -30,11 +30,10 @@ from manage_agenda.gui.log_panel import LogPanel
 from manage_agenda.gui.persist import gui_settings, save_theme, saved_theme
 from manage_agenda.gui.screens.accounts import AccountsScreen
 from manage_agenda.gui.screens.add import AddScreen
-from manage_agenda.gui.screens.auth import AuthScreen
 from manage_agenda.gui.screens.calendar_ops import CalendarOpsScreen
 from manage_agenda.gui.screens.evaluate import EvaluateScreen
 from manage_agenda.gui.screens.home import HomeScreen
-from manage_agenda.gui.screens.install import InstallScreen
+from manage_agenda.gui.screens.install import InstallDialog
 from manage_agenda.gui.screens.ledger import LedgerScreen
 from manage_agenda.gui.screens.lists import ListsScreen
 from manage_agenda.gui.screens.settings import SettingsScreen
@@ -42,21 +41,19 @@ from manage_agenda.gui.theme import THEMES, apply_theme
 from manage_agenda.gui.widgets import AutoNamed
 from manage_agenda.i18n import t
 
-SCREEN_CLASSES = (
-    HomeScreen,
-    AddScreen,
-    CalendarOpsScreen,
-    LedgerScreen,
-    EvaluateScreen,
-    AuthScreen,
-    ListsScreen,
-    InstallScreen,
-    AccountsScreen,
-    SettingsScreen,
+# The sidebar in three groups: the task, its configuration, the tools around it. The
+# Google authorization lives on the Accounts screen; the browser install is a Tools menu
+# entry (a dialog), so neither takes a row.
+NAV_GROUPS = (
+    ("gui.nav.group_task", (HomeScreen, AddScreen)),
+    ("gui.nav.group_config", (AccountsScreen, SettingsScreen)),
+    ("gui.nav.group_tools", (CalendarOpsScreen, LedgerScreen, EvaluateScreen, ListsScreen)),
 )
+SCREEN_CLASSES = tuple(cls for _key, classes in NAV_GROUPS for cls in classes)
 
 CLOSE_WAIT_MS = 5000
 NAV_ROW_HEIGHT = 34
+NAV_HEADER_HEIGHT = 30
 LOG_DOCK_HEIGHT = 170
 PROGRESS_WIDTH = 120
 
@@ -105,6 +102,11 @@ class MainWindow(AutoNamed, QMainWindow):
         self.view_menu.addAction(self.log_action)
         self.view_menu.addSeparator()
         self._build_theme_menu()
+        self.tools_menu = self.menuBar().addMenu(t("gui.menu.tools"))
+        self.install_action = QAction(t("gui.tools.install"), self)
+        self.install_action.setObjectName("install_browser")
+        self.install_action.triggered.connect(self.install_browser)
+        self.tools_menu.addAction(self.install_action)
 
         self.nav = QListWidget(self)
         self.nav.setObjectName("nav")  # styled by gui/theme.py
@@ -113,15 +115,24 @@ class MainWindow(AutoNamed, QMainWindow):
         self.nav.setSpacing(1)
         self.stack = QStackedWidget(self)
         self.screens = []
-        for screen_class in SCREEN_CLASSES:
-            screen = screen_class(self.runner, self)
-            self.screens.append(screen)
-            item = QListWidgetItem(screen.title())
-            # The theme pads the rows; the row height has to follow (a stylesheet's padding
-            # does not reach the item's size hint).
-            item.setSizeHint(QSize(0, NAV_ROW_HEIGHT))
-            self.nav.addItem(item)
-            self.stack.addWidget(_scrollable(screen))
+        self.nav_rows = {}  # sidebar row -> index in self.screens (headers have none)
+        self.screen_rows = {}  # index in self.screens -> sidebar row
+        for group_key, screen_classes in NAV_GROUPS:
+            header = QListWidgetItem(t(group_key))
+            header.setFlags(Qt.ItemFlag.NoItemFlags)  # neither selectable nor focusable
+            header.setSizeHint(QSize(0, NAV_HEADER_HEIGHT))
+            self.nav.addItem(header)
+            for screen_class in screen_classes:
+                screen = screen_class(self.runner, self)
+                self.screens.append(screen)
+                item = QListWidgetItem(screen.title())
+                # The theme pads the rows; the row height has to follow (a stylesheet's
+                # padding does not reach the item's size hint).
+                item.setSizeHint(QSize(0, NAV_ROW_HEIGHT))
+                self.nav.addItem(item)
+                self.nav_rows[self.nav.count() - 1] = len(self.screens) - 1
+                self.screen_rows[len(self.screens) - 1] = self.nav.count() - 1
+                self.stack.addWidget(_scrollable(screen))
         central = QWidget(self)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -159,12 +170,20 @@ class MainWindow(AutoNamed, QMainWindow):
         self.cancel_button.clicked.connect(self.cancel_job)
         self.nav.currentRowChanged.connect(self._show_screen)
         self.screen(HomeScreen).open_screen.connect(self.show_screen)
-        self.nav.setCurrentRow(0)
+        self.nav.setCurrentRow(self.screen_rows[0])
         self.restore_window_state()
 
     def show_screen(self, screen_class):
         """Select `screen_class` in the sidebar (which shows and refreshes it)."""
-        self.nav.setCurrentRow(self.screens.index(self.screen(screen_class)))
+        self.nav.setCurrentRow(self.screen_rows[self.screens.index(self.screen(screen_class))])
+
+    def install_browser(self):
+        """Tools › Install the browser…: the dialog, which submits the download."""
+        dialog = InstallDialog(self.runner, self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     # --- the theme: View › Theme, one exclusive action per mode ---
 
@@ -210,9 +229,10 @@ class MainWindow(AutoNamed, QMainWindow):
         settings.sync()
 
     def _show_screen(self, row):
-        if 0 <= row < len(self.screens):
-            self.stack.setCurrentIndex(row)
-            self.screens[row].refresh()
+        index = self.nav_rows.get(row)
+        if index is not None:
+            self.stack.setCurrentIndex(index)
+            self.screens[index].refresh()
 
     def screen(self, screen_class):
         """The instance of `screen_class`, for tests and shortcuts."""

@@ -1335,6 +1335,46 @@ TRANSLATIONS = {
         "en": '&View',
         "fr": '&Affichage',
     },
+    'gui.nav.group_task': {
+        "en": 'Task',
+        "fr": 'Tâche',
+    },
+    'gui.nav.group_config': {
+        "en": 'Configuration',
+        "fr": 'Configuration',
+    },
+    'gui.nav.group_tools': {
+        "en": 'Tools',
+        "fr": 'Outils',
+    },
+    'gui.menu.tools': {
+        "en": '&Tools',
+        "fr": '&Outils',
+    },
+    'gui.tools.install': {
+        "en": 'Install the browser…',
+        "fr": 'Installer le navigateur…',
+    },
+    'gui.tools.install_title': {
+        "en": 'Install the browser',
+        "fr": 'Installer le navigateur',
+    },
+    'gui.install.busy': {
+        "en": 'A job is already running; wait for it to end.',
+        "fr": 'Un job est déjà en cours ; attendez sa fin.',
+    },
+    'gui.accounts.auth_box': {
+        "en": 'Google authorization',
+        "fr": 'Autorisation Google',
+    },
+    'gui.accounts.auth_select_google': {
+        "en": 'Select a Gmail or Google Calendar account first.',
+        "fr": "Sélectionnez d'abord un compte Gmail ou Google Calendar.",
+    },
+    'gui.accounts.auth_no_rule': {
+        "en": 'No configured rule matches the account {name}.',
+        "fr": 'Aucune règle configurée ne correspond au compte {name}.',
+    },
     'gui.nav.accessible': {
         "en": 'Screens',
         "fr": 'Écrans',

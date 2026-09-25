@@ -31,6 +31,7 @@ from manage_agenda.accounts import (
     AccountError,
 )
 from manage_agenda.compat import IMAP_DEFAULT_PORT
+from manage_agenda.gui.screens.auth import check_auth, run_oauth
 from manage_agenda.gui.screens.base import Screen
 from manage_agenda.gui.widgets import (
     AutoNamed,
@@ -38,6 +39,7 @@ from manage_agenda.gui.widgets import (
     fit_columns,
     form_layout,
     hint_label,
+    load_rules,
     primary,
     set_role,
 )
@@ -289,6 +291,27 @@ class AccountsScreen(Screen):
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
 
+        # `manage-agenda auth` for the selected Gmail / Google Calendar account: the check,
+        # and the browser consent.
+        auth_box = QGroupBox(t("gui.accounts.auth_box"), self)
+        auth_layout = QVBoxLayout(auth_box)
+        auth_row = QHBoxLayout()
+        self.check_auth_button = self.register_run_button(QPushButton(t("gui.auth.check"), self))
+        self.oauth_button = self.register_run_button(QPushButton(t("gui.auth.run_oauth"), self))
+        self.oauth_button.setToolTip(t("gui.auth.browser_note"))
+        auth_row.addWidget(self.check_auth_button)
+        auth_row.addWidget(self.oauth_button)
+        auth_row.addStretch(1)
+        auth_layout.addLayout(auth_row)
+        self.auth_status = QLabel("", self)
+        self.auth_status.setWordWrap(True)
+        auth_layout.addWidget(self.auth_status)
+        layout.addWidget(auth_box)
+        self.check_auth_button.clicked.connect(lambda: self._authorization(check_auth, t("gui.auth.job_check")))
+        self.oauth_button.clicked.connect(lambda: self._authorization(run_oauth, t("gui.auth.job_oauth")))
+        self.table.itemSelectionChanged.connect(self._update_auth_buttons)
+        self._update_auth_buttons()
+
         self.add_button.clicked.connect(self.add)
         self.edit_button.clicked.connect(self.edit)
         self.remove_button.clicked.connect(self.remove)
@@ -340,6 +363,53 @@ class AccountsScreen(Screen):
     def selected_account(self):
         row = self.table.currentRow()
         return self.accounts[row] if 0 <= row < len(self.accounts) else None
+
+    # --- the Google authorization of the selected account ---
+
+    def set_running(self, running):
+        super().set_running(running)
+        if not running:
+            self._update_auth_buttons()
+
+    def _update_auth_buttons(self, *_ignored):
+        account = self.selected_account()
+        google = account is not None and account.service in GOOGLE_SERVICE_NAMES
+        for button in (self.check_auth_button, self.oauth_button):
+            button.setEnabled(google and not self.runner.is_busy())
+
+    def rule_key_for(self, account, rules=None):
+        """The socialModules rule key of `account` (the one the other screens' pickers list):
+        the rule of its service whose nick is its address or its name; None when none is."""
+        rules = rules or load_rules()
+        keys = rules.selectRule(account.service, "") or []
+        for key in keys:
+            if isinstance(key, tuple) and len(key) > 2 and key[2] in (account.address, account.name):
+                return rules, key
+        return rules, (keys[0] if len(keys) == 1 else None)
+
+    def _authorization(self, func, job_name):
+        account = self.selected_account()
+        if account is None or account.service not in GOOGLE_SERVICE_NAMES:
+            self.auth_status.setText(t("gui.accounts.auth_select_google"))
+            return
+        try:
+            rules, key = self.rule_key_for(account)
+        except Exception as error:  # noqa: BLE001 - shown, the screen stays usable
+            set_role(self.auth_status, "error")
+            self.auth_status.setText(f"{type(error).__name__}: {error}")
+            return
+        if key is None:
+            set_role(self.auth_status, "error")
+            self.auth_status.setText(t("gui.accounts.auth_no_rule", name=account.name))
+            return
+        self.auth_status.setText("")
+        self.submit(job_name, func, rules, key, on_done=self.show_auth_result)
+
+    def show_auth_result(self, result):
+        authorized, message = result
+        set_role(self.auth_status, "ok" if authorized else "error")
+        prefix = t("gui.auth.status_ok") if authorized else t("gui.auth.status_failed")
+        self.auth_status.setText(f"{prefix}\n{message}")
 
     # --- the operations ---
 

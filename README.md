@@ -268,7 +268,7 @@ Open the desktop window (needs the `gui` extra, see [Desktop window](#desktop-wi
 
 ## Desktop window
 
-`manage-agenda gui` opens a window with one screen per family of commands, a log panel and a status bar. Every screen runs the **same code the corresponding command runs**: the window only replaces the terminal's questions with dialogs. Nothing is duplicated, so the ledger, the mailbox marking and the saved configuration behave exactly as on the command line.
+`manage-agenda gui` opens a window with one screen per family of commands, a log panel and a status bar. The sidebar lists the screens in three groups: the task (Home, Add), its configuration (Accounts, Settings) and the tools around it (Calendar operations, Ledger, Evaluate models, Lists). Every screen runs the **same code the corresponding command runs**: the window only replaces the terminal's questions with dialogs. Nothing is duplicated, so the ledger, the mailbox marking and the saved configuration behave exactly as on the command line.
 
 | Command | Screen |
 |---|---|
@@ -277,9 +277,9 @@ Open the desktop window (needs the `gui` extra, see [Desktop window](#desktop-wi
 | `copy`, `move`, `delete`, `clean`, `update-status` | Calendar operations: give the calendar ids and the title filter, or answer the dialogs as with `-i` |
 | `reconcile`, `migrate-ledger`, `restore` | Ledger: dry run, account choice, the exit code in the status bar; a table of the restorable identities |
 | `llm evaluate` | Evaluate models |
-| `auth` | Authentication: the check, and the browser consent |
+| `auth` | Accounts › Google authorization: the check and the browser consent for the selected Gmail or Google Calendar account |
 | `gmail`, `gcalendar` | Lists: the folder or calendar as a table |
-| `install` | Install browser, output streamed to the log |
+| `install` | Tools › Install the browser…: a dialog; the download's output streams to the log |
 | editing `~/.mySocial/config/.rssBlogs` | Accounts: the mail and calendar accounts the other screens list; add, edit or remove one (IMAP server, port, login, password, folder, mode, sender filter and message age; the Google OAuth client file) |
 | the `config.yaml` wizard | Settings: provider, model, calendar account and calendars, language |
 

@@ -108,16 +108,3 @@ def test_check_auth_and_run_oauth(qapp):
     ) as consent, patch.object(auth, "echo"):
         assert auth.run_oauth(rules, "k")[0] is True
     consent.assert_called_once_with(api)
-
-
-def test_auth_screen_shows_the_result(qapp, pump):
-    runner = JobRunner(Bridge())
-    screen = auth.AuthScreen(runner)
-    rules = _rules({"gcalendar": [("gcalendar", "set", "c", "posts")]})
-    with patch.object(auth, "load_rules", return_value=rules):
-        screen.refresh()
-    with patch.object(auth, "check_auth", return_value=(False, "no token")):
-        screen.check_button.click()
-        assert pump(lambda: not runner.is_busy())
-    assert "no token" in screen.status.toPlainText()
-    assert screen.check_button.isEnabled() and screen.oauth_button.isEnabled()

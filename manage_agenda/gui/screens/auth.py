@@ -1,23 +1,15 @@
-"""Auth: the `manage-agenda auth` check and the desktop OAuth consent."""
+"""The `manage-agenda auth` check and the desktop OAuth consent, as the Accounts screen runs
+them for a Google account (in the job runner)."""
 
 from __future__ import annotations
 
 import os
-
-from PySide6.QtWidgets import (
-    QComboBox,
-    QHBoxLayout,
-    QPlainTextEdit,
-    QPushButton,
-)
 
 from manage_agenda.connections import (
     complete_desktop_oauth,
     credential_path,
     describe_auth_failure,
 )
-from manage_agenda.gui.screens.base import Screen
-from manage_agenda.gui.widgets import AccountPicker, form_layout, load_rules, primary
 from manage_agenda.i18n import t
 from manage_agenda.ui import echo
 
@@ -50,65 +42,3 @@ def run_oauth(rules, key):
     if complete_desktop_oauth(api):
         return True, t("cli.auth.authorized_success")
     return False, describe_auth_failure(api)
-
-
-class AuthScreen(Screen):
-    nav_key = "gui.nav.auth"
-    subtitle_key = "gui.auth.subtitle"
-
-    def __init__(self, runner, parent=None):
-        super().__init__(runner, parent)
-        self.rules = None
-        layout = self.content
-        form = form_layout()
-        self.service = QComboBox(self)
-        self.service.addItems(SERVICES)
-        self.account = AccountPicker([SERVICES[0]], self)
-        form.addRow(t("gui.auth.service"), self.service)
-        form.addRow(t("gui.auth.account"), self.account)
-        layout.addLayout(form)
-
-        row = QHBoxLayout()
-        self.check_button = self.register_run_button(primary(QPushButton(t("gui.auth.check"), self)))
-        self.oauth_button = self.register_run_button(QPushButton(t("gui.auth.run_oauth"), self))
-        row.addWidget(self.check_button)
-        row.addWidget(self.oauth_button)
-        row.addStretch(1)
-        layout.addLayout(row)
-        self.oauth_button.setToolTip(t("gui.auth.browser_note"))
-
-        self.status = QPlainTextEdit(self)
-        self.status.setReadOnly(True)
-        layout.addWidget(self.status)
-
-        self.service.currentTextChanged.connect(self._on_service_changed)
-        self.check_button.clicked.connect(lambda: self._run(check_auth, t("gui.auth.job_check")))
-        self.oauth_button.clicked.connect(lambda: self._run(run_oauth, t("gui.auth.job_oauth")))
-
-    def refresh(self):
-        try:
-            self.rules = load_rules()
-            self.last_error = ""
-        except Exception as error:  # noqa: BLE001
-            self.rules = None
-            self.last_error = f"{type(error).__name__}: {error}"
-            self.status.setPlainText(self.last_error)
-            return
-        self.account.refresh(self.rules)
-
-    def _on_service_changed(self, service):
-        self.account.services = [service]
-        if self.rules is not None:
-            self.account.refresh(self.rules)
-
-    def _run(self, func, name):
-        key = self.account.current_key()
-        if self.rules is None or key is None:
-            self.status.setPlainText(t("gui.auth.no_account"))
-            return
-        self.submit(name, func, self.rules, key, on_done=self.show_result)
-
-    def show_result(self, result):
-        authorized, message = result
-        prefix = t("gui.auth.status_ok") if authorized else t("gui.auth.status_failed")
-        self.status.setPlainText(f"{prefix}\n\n{message}")
