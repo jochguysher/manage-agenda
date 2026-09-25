@@ -4,6 +4,7 @@ up as dialogs."""
 
 from __future__ import annotations
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -40,11 +41,22 @@ RULES = ("", "auto", "review")
 
 
 class AddScreen(Screen):
+    """The task's advanced page: no sidebar row, shown by Home's "Advanced options…" and
+    left through its Back button (the `back` signal)."""
+
     nav_key = "gui.nav.add"
     subtitle_key = "gui.add.subtitle"
+    back = Signal()
 
     def __init__(self, runner, parent=None):
         super().__init__(runner, parent)
+        back_row = QHBoxLayout()
+        self.back_button = QPushButton(t("gui.add.back"), self)
+        self.back_button.setFlat(True)
+        self.back_button.clicked.connect(self.back.emit)
+        back_row.addWidget(self.back_button)
+        back_row.addStretch(1)
+        self.content.addLayout(back_row)
         self.rules = None
         self.sources = []
         # The calendars chosen in the dialog "Load calendars…" opens: the connected api, the

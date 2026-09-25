@@ -215,10 +215,25 @@ def test_fetch_planned_reads_every_saved_calendar(qapp):
 
 
 def test_home_buttons_open_the_other_screens(qapp):
+    from manage_agenda.gui.screens.add import AddScreen
+
     window = MainWindow()
     screen = window.screen(HomeScreen)
     screen.settings_button.click()
     assert isinstance(window.screens[window.stack.currentIndex()], SettingsScreen)
+
+    # The advanced page has no sidebar row: Home stays selected while it shows, its Back
+    # button (or a click on Home) returns to the home page.
+    window.show_screen(HomeScreen)
+    home_row = window.nav.currentRow()
+    screen.advanced_button.click()
+    assert isinstance(window.screens[window.stack.currentIndex()], AddScreen)
+    assert window.nav.currentRow() == home_row
+    window.screen(AddScreen).back_button.click()
+    assert isinstance(window.screens[window.stack.currentIndex()], HomeScreen)
+    screen.advanced_button.click()
+    window.nav.itemClicked.emit(window.nav.item(home_row))
+    assert isinstance(window.screens[window.stack.currentIndex()], HomeScreen)
     window.close()
 
 

@@ -1284,8 +1284,8 @@ TRANSLATIONS = {
         "fr": 'manage-agenda',
     },
     'gui.nav.add': {
-        "en": 'Add (advanced)',
-        "fr": 'Ajouter (avancé)',
+        "en": 'Advanced options',
+        "fr": 'Options avancées',
     },
     'gui.nav.calendar_ops': {
         "en": 'Calendar operations',
@@ -1374,6 +1374,10 @@ TRANSLATIONS = {
     'gui.accounts.auth_no_rule': {
         "en": 'No configured rule matches the account {name}.',
         "fr": 'Aucune règle configurée ne correspond au compte {name}.',
+    },
+    'gui.add.back': {
+        "en": '← Back to Home',
+        "fr": "← Retour à l'accueil",
     },
     'gui.nav.accessible': {
         "en": 'Screens',
@@ -1641,8 +1645,8 @@ TRANSLATIONS = {
         "fr": 'Calendriers : {names}',
     },
     'gui.add.advanced_options': {
-        "en": 'Advanced options',
-        "fr": 'Options avancées',
+        "en": 'Debugging options',
+        "fr": 'Options de débogage',
     },
     'gui.add.no_calendar_account': {
         "en": 'No calendar account configured.',

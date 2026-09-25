@@ -45,11 +45,14 @@ from manage_agenda.i18n import t
 # Google authorization lives on the Accounts screen; the browser install is a Tools menu
 # entry (a dialog), so neither takes a row.
 NAV_GROUPS = (
-    ("gui.nav.group_task", (HomeScreen, AddScreen)),
+    ("gui.nav.group_task", (HomeScreen,)),
     ("gui.nav.group_config", (AccountsScreen, SettingsScreen)),
     ("gui.nav.group_tools", (CalendarOpsScreen, LedgerScreen, EvaluateScreen, ListsScreen)),
 )
-SCREEN_CLASSES = tuple(cls for _key, classes in NAV_GROUPS for cls in classes)
+# Pages without a sidebar row: the advanced form of the task, reached from Home's
+# "Advanced options…" and left through its own Back button; the sidebar stays on Home.
+HIDDEN_SCREENS = (AddScreen,)
+SCREEN_CLASSES = tuple(cls for _key, classes in NAV_GROUPS for cls in classes) + HIDDEN_SCREENS
 
 CLOSE_WAIT_MS = 5000
 NAV_ROW_HEIGHT = 34
@@ -133,6 +136,10 @@ class MainWindow(AutoNamed, QMainWindow):
                 self.nav_rows[self.nav.count() - 1] = len(self.screens) - 1
                 self.screen_rows[len(self.screens) - 1] = self.nav.count() - 1
                 self.stack.addWidget(_scrollable(screen))
+        for screen_class in HIDDEN_SCREENS:
+            screen = screen_class(self.runner, self)
+            self.screens.append(screen)
+            self.stack.addWidget(_scrollable(screen))
         central = QWidget(self)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -169,13 +176,30 @@ class MainWindow(AutoNamed, QMainWindow):
         self.runner.cancelled.connect(self._on_job_cancelled)
         self.cancel_button.clicked.connect(self.cancel_job)
         self.nav.currentRowChanged.connect(self._show_screen)
+        # A click on the row already current (Home, while its advanced page is shown) must
+        # bring the page back too: currentRowChanged does not fire then.
+        self.nav.itemClicked.connect(lambda item: self._show_screen(self.nav.row(item)))
         self.screen(HomeScreen).open_screen.connect(self.show_screen)
+        self.screen(AddScreen).back.connect(lambda: self.show_screen(HomeScreen))
         self.nav.setCurrentRow(self.screen_rows[0])
         self.restore_window_state()
 
     def show_screen(self, screen_class):
-        """Select `screen_class` in the sidebar (which shows and refreshes it)."""
-        self.nav.setCurrentRow(self.screen_rows[self.screens.index(self.screen(screen_class))])
+        """Show `screen_class`: through its sidebar row when it has one (which refreshes
+        it), else directly, the sidebar staying on Home."""
+        index = self.screens.index(self.screen(screen_class))
+        row = self.screen_rows.get(index)
+        if row is not None:
+            self.nav.setCurrentRow(row)
+            self._show_screen(row)  # a no-op for the sidebar when the row was current already
+            return
+        self.nav.blockSignals(True)
+        try:
+            self.nav.setCurrentRow(self.screen_rows[0])
+        finally:
+            self.nav.blockSignals(False)
+        self.stack.setCurrentIndex(index)
+        self.screens[index].refresh()
 
     def install_browser(self):
         """Tools › Install the browser…: the dialog, which submits the download."""
